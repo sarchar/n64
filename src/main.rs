@@ -10,7 +10,7 @@ enum MemorySegment {
 }
 
 pub trait Addressable {
-    fn read_u32(&self, offset: usize) -> u32;
+    fn read_u32(&mut self, offset: usize) -> u32;
     fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self;
 }
 
@@ -19,6 +19,7 @@ pub trait Addressable {
 struct Pif {
     boot_rom: Vec<u8>,    
     ram: Vec<u32>,
+    command_finished: bool,
 }
 
 impl Pif {
@@ -32,18 +33,27 @@ impl Pif {
         Pif {
             boot_rom: boot_rom_data,
             ram: ram,
+            command_finished: false,
         }
     }
 }
 
 impl Addressable for Pif {
-    fn read_u32(&self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> u32 {
         println!("PIF: read ${:08X}", offset);
         if offset < 1984 {
             ((self.boot_rom[offset+0] as u32) << 24)
             | ((self.boot_rom[offset+1] as u32) << 16)
             | ((self.boot_rom[offset+2] as u32) << 8)
             | (self.boot_rom[offset+3] as u32)
+        } else if offset == 0x7FC {
+            // HACK! data is always available (bit 7 set)
+            if self.command_finished { 
+                self.command_finished = false;
+                0x00000080 
+            } else { 
+                0x00000000 
+            }
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
@@ -57,6 +67,18 @@ impl Addressable for Pif {
     fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
         if offset < 0x7C0 {
             panic!("invalid PIF write");
+        } else if offset == 0x7FC {
+            //panic!("PIF: write command port");
+            if (value & 0x10) != 0 {
+                println!("PIF: disable PIF-ROM access");
+            } else if (value & 0x20) != 0 {
+                println!("PIF: CPU checksum ready");
+                self.command_finished = true;
+            } else if (value & 0x40) != 0 {
+                println!("PIF: run checksum");
+            } else if (value & 0x0F) != 0 {
+                panic!("PIF: not implemented PIF command ${:08X}", value);
+            }
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
@@ -91,7 +113,7 @@ impl Rcp {
         }
     }
 
-    fn rcp_read_u32(&self, offset: usize) -> u32 {
+    fn rcp_read_u32(&mut self, offset: usize) -> u32 {
         println!("RCP: read32 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
@@ -188,7 +210,7 @@ impl Rcp {
 impl Addressable for Rcp {
     // The RCP handles all bus arbitration, so that's why the primary bus access is
     // part of the Rcp module
-    fn read_u32(&self, address: usize) -> u32 {
+    fn read_u32(&mut self, address: usize) -> u32 {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: read32 address=${:08X} physical=${:08X}", address, physical_address);
 
@@ -262,7 +284,7 @@ impl Rsp {
         }
     }
 
-    fn read_register(&self, offset: usize) -> u32 {
+    fn read_register(&mut self, offset: usize) -> u32 {
         match offset {
             // SP_STATUS
             0x4_0010 => {
@@ -294,7 +316,7 @@ impl Rsp {
 }
 
 impl Addressable for Rsp {
-    fn read_u32(&self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> u32 {
         println!("RSP: read32 offset=${:08X}", offset);
 
         match offset & 0x000F_0000 {
@@ -334,7 +356,7 @@ impl Rdp {
 }
 
 impl Addressable for Rdp {
-    fn read_u32(&self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> u32 {
         println!("RDP: read32 offset=${:08X}", offset);
         match offset {
             // DP_STATUS 
@@ -366,7 +388,7 @@ impl Pi {
 }
 
 impl Addressable for Pi {
-    fn read_u32(&self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> u32 {
         println!("PI: read32 offset=${:08X}", offset);
 
         if offset < 0x0800_0000 {
@@ -428,7 +450,7 @@ fn main() {
             println!("m ${:08X} ${:08X} ${:08X} ${:08X}", rcp.rsp.mem[base+4] , rcp.rsp.mem[base+5] , rcp.rsp.mem[base+6] , rcp.rsp.mem[base+7]);
             println!("m ${:08X} ${:08X} ${:08X} ${:08X}", rcp.rsp.mem[base+8] , rcp.rsp.mem[base+9] , rcp.rsp.mem[base+10], rcp.rsp.mem[base+11]);
             println!("m ${:08X} ${:08X} ${:08X} ${:08X}", rcp.rsp.mem[base+12], rcp.rsp.mem[base+13], rcp.rsp.mem[base+14], rcp.rsp.mem[base+15]);
-        } else if pc == 0xA4000040 {
+        } else if pc == 0xB000_0000 {
             break;
         }
 
@@ -537,8 +559,7 @@ fn main() {
                         gpr[31] = pc; // unconditionally, the address after the delay slot is stored in the link register
 
                         if (gpr[rs as usize] & 0x8000_0000) == 0 {
-                            let dest = (pc - 4).wrapping_add(signed_imm << 2);
-                            pc = dest;
+                            pc = (pc - 4).wrapping_add(signed_imm << 2);
                         }
                     },
 
@@ -592,12 +613,10 @@ fn main() {
             },
             0b001_101 => {
                 println!("ori r{}, r{}, ${:04X}", rt, rs, imm);
-
                 gpr[rt as usize] = gpr[rs as usize] | imm;
             },
             0b001_111 => {
                 println!("lui r{}, ${:04X}", rt, imm);
-
                 gpr[rt as usize] = imm << 16;
             },
             0b010_000 => {
