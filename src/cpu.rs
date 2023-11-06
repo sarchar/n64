@@ -73,6 +73,28 @@ impl<T: Addressable> Cpu<T> {
         self.bus.write_u32(nv, aligned_address);
     }
 
+    #[inline(always)]
+    fn branch(&mut self, condition: bool, signed_imm: u32) {
+        if condition {
+            // target is the sum of the address of the delay slot instruction
+            // plus the sign extended and left-shifted immediate offset
+            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
+        }
+    }
+
+    // branch likely instructions discards the delay slot when the branch is not taken
+    #[inline(always)]
+    fn branch_likely(&mut self, condition: bool, signed_imm: u32) {
+        if condition {
+            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
+        } else {
+            // we need to throw away next_instruction when branch is not taken
+            self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
+            self.next_instruction_pc = self.pc;
+            self.pc += 4;
+        }
+    }
+
     pub fn step(&mut self) {
         assert!((self.pc & 0x03) == 0);
 
@@ -184,23 +206,16 @@ impl<T: Addressable> Cpu<T> {
                     0b00_011 => {
                         println!("bgezl r{}, ${:04X}", rs, imm);
 
-                        if (self.gpr[rs as usize] & 0x8000_0000) == 0 {
-                            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                        } else {
-                            // we need to throw away next_instruction
-                            self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
-                            self.next_instruction_pc = self.pc;
-                            self.pc += 4;
-                        }
+                        let condition = (self.gpr[rs as usize] & 0x8000_0000) == 0;
+                        self.branch_likely(condition, signed_imm);
                     },
                     0b10_001 => {
                         println!("bgezal r{}, ${:04X}", rs, imm);
 
                         self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
 
-                        if (self.gpr[rs as usize] & 0x8000_0000) == 0 {
-                            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                        }
+                        let condition = (self.gpr[rs as usize] & 0x8000_0000) == 0;
+                        self.branch(condition, signed_imm);
                     },
 
                     _ => panic!("Unknown regimm: 0b{:05b}", regimm)
@@ -214,25 +229,13 @@ impl<T: Addressable> Cpu<T> {
             },
             0b000_100 => {
                 println!("beq r{}, r{}, ${:04X}", rs, rt, imm);
-
-                // The only difference between this and beql is that
-                // the delay slot is not discarded
-                if self.gpr[rs as usize] == self.gpr[rt as usize] {
-                    // target is the sum of the address of the delay slot instruction
-                    // plus the sign extended and left-shifted immediate offset
-                    self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                }
+                let condition = self.gpr[rs as usize] == self.gpr[rt as usize];
+                self.branch(condition, signed_imm);
             },
             0b000_101 => {
                 println!("bne r{}, r{}, ${:04X}", rs, rt, imm);
-
-                // The only difference between this and bnel is that
-                // the delay slot is not discarded
-                if self.gpr[rs as usize] != self.gpr[rt as usize] {
-                    // target is the sum of the address of the delay slot instruction
-                    // plus the sign extended and left-shifted immediate offset
-                    self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                }
+                let condition = self.gpr[rs as usize] != self.gpr[rt as usize];
+                self.branch(condition, signed_imm);
             },
             0b001_000 => {
                 println!("addi r{}, r{}, ${:04X}", rt, rs, imm);
@@ -283,7 +286,6 @@ impl<T: Addressable> Cpu<T> {
                 match cop0 {
                     0b00_100 => {
                         println!("mtc0 r{}, cp0gpr{} (r{}=${:08X})", rt, rd, rt, self.gpr[rt as usize]);
-
                         self.cp0gpr[rd as usize] = self.gpr[rt as usize];
                     },
                     _ => panic!("Unknown cop0: 0b{:05b}", cop0)
@@ -297,51 +299,18 @@ impl<T: Addressable> Cpu<T> {
             },
             0b010_100 => {
                 println!("beql r{}, r{}, ${:04X}", rs, rt, imm);
-
-                // branch only when the condition is true
-                // if the branch is not taken, the delay slot instruction is discarded
-                if self.gpr[rs as usize] == self.gpr[rt as usize] {
-                    // target is the sum of the address of the delay slot instruction
-                    // plus the sign extended and left-shifted immediate offset
-                    self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                } else {
-                    // we need to throw away next_instruction
-                    self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
-                    self.next_instruction_pc = self.pc;
-                    self.pc += 4;
-                }
+                let condition = self.gpr[rs as usize] == self.gpr[rt as usize];
+                self.branch_likely(condition, signed_imm);
             },
             0b010_101 => {
                 println!("bnel r{}, r{}, ${:04X}", rs, rt, imm);
-
-                // branch only when the condition is true
-                // if the branch is not taken, the delay slot instruction is discarded
-                if self.gpr[rs as usize] != self.gpr[rt as usize] {
-                    // target is the sum of the address of the delay slot instruction
-                    // plus the sign extended and left-shifted immediate offset
-                    self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                } else {
-                    // we need to throw away next_instruction
-                    self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
-                    self.next_instruction_pc = self.pc;
-                    self.pc += 4;
-                }
+                let condition = self.gpr[rs as usize] != self.gpr[rt as usize];
+                self.branch_likely(condition, signed_imm);
             },
             0b010_110 => {
                 println!("blezl r{}, ${:04X}", rs, imm);
-
-                // branch only when the condition is true
-                // if the branch is not taken, the delay slot instruction is discarded
-                if (self.gpr[rs as usize] & 0x8000_0000) != 0 || (self.gpr[rs as usize] == 0) {
-                    // target is the sum of the address of the delay slot instruction
-                    // plus the sign extended and left-shifted immediate offset
-                    self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
-                } else {
-                    // we need to throw away next_instruction
-                    self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
-                    self.next_instruction_pc = self.pc;
-                    self.pc += 4;
-                }
+                let condition = (self.gpr[rs as usize] & 0x8000_0000) != 0 || (self.gpr[rs as usize] == 0);
+                self.branch_likely(condition, signed_imm);
             },
             0b100_011 => {
                 println!("lw r{}, 0x{:04X}(r{})", rt, imm, rs);
