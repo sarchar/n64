@@ -25,15 +25,16 @@ impl Addressable for MipsInterface {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
+    fn write_u32(&mut self, value: u32, offset: usize) {
         println!("MI: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
-            0x0_0000 => { },
+            0x0_0000 => { 
+                println!("MI: write MI_MODE value=${:08X}", value);
+            },
 
             _ => panic!("MI: unhandled write32 ${:08X}", offset),
         };
-        self
     }
 }
 

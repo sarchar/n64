@@ -19,7 +19,7 @@ impl Addressable for Rdp {
         }
     }
 
-    fn write_u32(&mut self, _value: u32, _offset: usize) -> &mut Self {
+    fn write_u32(&mut self, _value: u32, _offset: usize) {
         panic!("RDP: write32");
     }
 }

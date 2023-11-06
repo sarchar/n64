@@ -32,11 +32,6 @@ impl Rcp {
         }
     }
 
-    /// TEMP debug
-    pub fn print_debug_ipl2(&self) {
-        self.rsp.print_debug_ipl2();
-    }
-
     fn rcp_read_u32(&mut self, offset: usize) -> u32 {
         println!("RCP: read32 offset=${:08X}", offset);
 
@@ -74,7 +69,7 @@ impl Rcp {
         }
     }
 
-    fn rcp_write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
+    fn rcp_write_u32(&mut self, value: u32, offset: usize) {
         println!("RCP: write32 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
@@ -112,7 +107,6 @@ impl Rcp {
             // 0x0409_0000-0x04FF_FFFF unmapped
             _ => panic!("invalid RCP write"),
         };
-        self
     }
 
     fn get_physical_address(&self, address: usize) -> (MemorySegment, usize) {
@@ -134,6 +128,11 @@ impl Rcp {
 }
 
 impl Addressable for Rcp {
+    /// TEMP debug
+    fn print_debug_ipl2(&self) {
+        self.rsp.print_debug_ipl2();
+    }
+
     // The RCP handles all bus arbitration, so that's why the primary bus access is
     // part of the Rcp module
     fn read_u32(&mut self, address: usize) -> u32 {
@@ -164,7 +163,7 @@ impl Addressable for Rcp {
         }
     }
 
-    fn write_u32(&mut self, value: u32, address: usize) -> &mut Self {
+    fn write_u32(&mut self, value: u32, address: usize) {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
 
@@ -190,8 +189,6 @@ impl Addressable for Rcp {
             // 0x8000_0000 and up not mapped
             _ => panic!("can't happen")
         };
-
-        self
     }
 }
 

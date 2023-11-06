@@ -43,7 +43,7 @@ impl Addressable for PeripheralInterface {
         }
     }
 
-    fn write_u32(&mut self, _value: u32, _offset: usize) -> &mut Self {
+    fn write_u32(&mut self, _value: u32, _offset: usize) {
         panic!("PI: write32");
     }
 }

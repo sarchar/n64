@@ -53,7 +53,7 @@ impl Addressable for PifRom {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
+    fn write_u32(&mut self, value: u32, offset: usize) {
         if offset < 0x7C0 {
             panic!("invalid PIF write");
         } else if offset == 0x7FC {
@@ -76,8 +76,6 @@ impl Addressable for PifRom {
                 panic!("invalid PIF write");
             }
         }
-
-        self
     }
 }
 

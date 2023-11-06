@@ -15,14 +15,6 @@ impl Rsp {
         }
     }
 
-    pub fn print_debug_ipl2(&self) {
-        let base = 2017;
-        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+0] , self.mem[base+1] , self.mem[base+2] , self.mem[base+3]);
-        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+4] , self.mem[base+5] , self.mem[base+6] , self.mem[base+7]);
-        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+8] , self.mem[base+9] , self.mem[base+10], self.mem[base+11]);
-        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+12], self.mem[base+13], self.mem[base+14], self.mem[base+15]);
-    }
-
     fn read_register(&mut self, offset: usize) -> u32 {
         match offset {
             // SP_STATUS
@@ -55,6 +47,14 @@ impl Rsp {
 }
 
 impl Addressable for Rsp {
+    fn print_debug_ipl2(&self) {
+        let base = 2017;
+        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+0] , self.mem[base+1] , self.mem[base+2] , self.mem[base+3]);
+        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+4] , self.mem[base+5] , self.mem[base+6] , self.mem[base+7]);
+        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+8] , self.mem[base+9] , self.mem[base+10], self.mem[base+11]);
+        println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+12], self.mem[base+13], self.mem[base+14], self.mem[base+15]);
+    }
+
     fn read_u32(&mut self, offset: usize) -> u32 {
         println!("RSP: read32 offset=${:08X}", offset);
 
@@ -69,7 +69,7 @@ impl Addressable for Rsp {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
+    fn write_u32(&mut self, value: u32, offset: usize) {
         println!("RSP: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset & 0x000F_0000 {
@@ -82,7 +82,6 @@ impl Addressable for Rsp {
 
             _ => panic!("invalid RSP write"),
         };
-        self
     }
 }
 
