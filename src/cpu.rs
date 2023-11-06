@@ -134,7 +134,7 @@ impl<T: Addressable> Cpu<T> {
 
         if self.pc == 0xA4001420 {
             self.bus.print_debug_ipl2();
-        } else if self.pc == 0x8000_0000 || self.pc == 0xB000_0000 {
+        } else if self.pc == 0x8000_02B4 {
             panic!("Starting cartridge ROM!");
         }
 

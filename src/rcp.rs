@@ -1,4 +1,4 @@
-use crate::{MemorySegment,Addressable};
+use crate::*;
 
 use crate::rdp::Rdp;
 use crate::rsp::Rsp;
@@ -52,7 +52,7 @@ impl Rcp {
             5 => panic!("Audio interface (AI) read"),
             
             // PI 0x0460_0000-0x046F_FFFF
-            6 => panic!("Peripheral interface (PI) read"),
+            6 => self.pi.read_u32(offset & 0x7FFF_FFFF),
 
             // RDRAM 0x0470_0000-0x047F_FFFF
             // we pass bit 26 along to indicate the RDRAM interface vs RDRAM access
@@ -72,40 +72,48 @@ impl Rcp {
     fn rcp_write_u32(&mut self, value: u32, offset: usize) {
         println!("RCP: write32 offset=${:08X}", offset);
 
-        match (offset & 0x00F0_0000) >> 20 {
+        let write_return_signal = match (offset & 0x00F0_0000) >> 20 {
             // RSP range 0x0400_0000-0x040F_FFFF 
-            0 => { self.rsp.write_u32(value, offset & 0x000F_FFFF); },
+            0 => self.rsp.write_u32(value, offset & 0x000F_FFFF),
 
             // RDP 0x0410_0000-0x041F_FFFF
-            1..=2 => { self.rdp.write_u32(value, offset & 0x003F_FFFF); },
+            1..=2 => self.rdp.write_u32(value, offset & 0x003F_FFFF),
 
             // MI 0x0430_0000-0x043F_FFFF
-            3 => { self.mi.write_u32(value, offset & 0x000F_FFFF); },
+            3 => self.mi.write_u32(value, offset & 0x000F_FFFF),
 
             // VI 0x0440_0000-0x044F_FFFF
             4 => {
                 println!("VI: write32");
-            }
+                WriteReturnSignal::None
+            },
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => {
                 println!("AI: write32");
-            }
+                WriteReturnSignal::None
+            },
             
             // PI 0x0460_0000-0x046F_FFFF
-            6 => {
-                println!("PI: write32");
-            }
+            6 => self.pi.write_u32(value, offset & 0x7FFF_FFFF),
 
             // RDRAM 0x0470_0000-0x047F_FFFF
             // we pass bit 26 along to indicate the RDRAM interface vs RDRAM access
-            7 => { self.ri.write_u32(value, 0x0400_0000 | (offset & 0x000F_FFFF)); },
+            7 => self.ri.write_u32(value, 0x0400_0000 | (offset & 0x000F_FFFF)),
 
             // SI 0x0480_0000-0x048F_FFFF
             8 => panic!("Serial interface (SI) write"),
 
             // 0x0409_0000-0x04FF_FFFF unmapped
             _ => panic!("invalid RCP write"),
+        };
+
+        match write_return_signal {
+            WriteReturnSignal::StartDMA(dma_info) => {
+                self.start_dma(dma_info)
+            },
+
+            WriteReturnSignal::None => {},
         };
     }
 
@@ -123,6 +131,25 @@ impl Rcp {
                 _ => panic!("not valid")
             };
             (s, address & 0x1FFF_FFFF)
+        }
+    }
+
+    // Slow, maybe at some point we can do more of a direct memory copy
+    fn start_dma(&mut self, dma_info: DmaInfo) {
+        println!("DMA: performing DMA!");
+
+        //assert!(source_data.len() == dma_info.count as usize);
+        assert!((dma_info.count % 4) == 0);
+
+        for i in 0..(dma_info.count / 4) {
+            let j = i as usize;
+            let source_data = self.pi.get_dma_info(&dma_info);
+            let word = ((source_data[j*4 + 0] as u32) << 24)
+                        | ((source_data[j*4 + 1] as u32) << 16)
+                        | ((source_data[j*4 + 2] as u32) << 8)
+                        | ((source_data[j*4 + 3] as u32));
+
+            self.write_u32(word, (dma_info.dest_address + i * 4) as usize);
         }
     }
 }
@@ -163,13 +190,12 @@ impl Addressable for Rcp {
         }
     }
 
-    fn write_u32(&mut self, value: u32, address: usize) {
+    fn write_u32(&mut self, value: u32, address: usize) -> WriteReturnSignal {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
         if address == 0x800003f0 {
             panic!("writing mem size");
         }
-
 
         match physical_address & 0xFFF0_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
@@ -193,6 +219,8 @@ impl Addressable for Rcp {
             // 0x8000_0000 and up not mapped
             _ => panic!("can't happen")
         };
+
+        WriteReturnSignal::None
     }
 }
 

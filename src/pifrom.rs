@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::Addressable;
+use crate::*;
 
 /// N64 PIF-ROM, where the boot rom is stored
 /// boot_rom is big endian data
@@ -53,7 +53,7 @@ impl Addressable for PifRom {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) {
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         if offset < 0x7C0 {
             panic!("invalid PIF write");
         } else if offset == 0x7FC {
@@ -76,6 +76,8 @@ impl Addressable for PifRom {
                 panic!("invalid PIF write");
             }
         }
+
+        WriteReturnSignal::None
     }
 }
 

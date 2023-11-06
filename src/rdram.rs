@@ -1,4 +1,4 @@
-use crate::Addressable;
+use crate::*;
 
 pub struct RdramInterface {
     ram: Vec<u32>,
@@ -56,7 +56,7 @@ impl Addressable for RdramInterface {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) {
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         println!("RDRAM: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
@@ -112,6 +112,8 @@ impl Addressable for RdramInterface {
 
             _ => panic!("RDRAM: unhandled write32 ${:08X}", offset),
         };
+
+        WriteReturnSignal::None
     }
 }
 

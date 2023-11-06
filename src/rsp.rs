@@ -1,4 +1,4 @@
-use crate::Addressable;
+use crate::*;
 
 /// N64 Reality Signal Processor
 /// Resides on the die of the RCP.
@@ -69,7 +69,7 @@ impl Addressable for Rsp {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) {
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         println!("RSP: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset & 0x000F_0000 {
@@ -82,6 +82,8 @@ impl Addressable for Rsp {
 
             _ => panic!("invalid RSP write"),
         };
+
+        WriteReturnSignal::None
     }
 }
 

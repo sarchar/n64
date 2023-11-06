@@ -7,9 +7,20 @@ pub enum MemorySegment {
     KSeg3,
 }
 
+pub struct DmaInfo {
+    source_address: u32,
+    dest_address: u32,
+    count: u32
+}
+
+pub enum WriteReturnSignal {
+    None,
+    StartDMA(DmaInfo),
+}
+
 pub trait Addressable {
     fn read_u32(&mut self, offset: usize) -> u32;
-    fn write_u32(&mut self, value: u32, offset: usize);
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal;
 
     /// TEMP 
     fn print_debug_ipl2(&self) {}

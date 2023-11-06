@@ -1,4 +1,4 @@
-use crate::Addressable;
+use crate::*;
 
 pub struct MipsInterface {
 }
@@ -25,7 +25,7 @@ impl Addressable for MipsInterface {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) {
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         println!("MI: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
@@ -35,6 +35,8 @@ impl Addressable for MipsInterface {
 
             _ => panic!("MI: unhandled write32 ${:08X}", offset),
         };
+
+        WriteReturnSignal::None
     }
 }
 

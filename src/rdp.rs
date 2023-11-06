@@ -1,4 +1,4 @@
-use crate::Addressable;
+use crate::*;
 
 pub struct Rdp {
 }
@@ -19,7 +19,7 @@ impl Addressable for Rdp {
         }
     }
 
-    fn write_u32(&mut self, _value: u32, _offset: usize) {
+    fn write_u32(&mut self, _value: u32, _offset: usize) -> WriteReturnSignal {
         panic!("RDP: write32");
     }
 }
