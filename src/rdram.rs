@@ -7,7 +7,7 @@ pub struct RdramInterface {
 impl RdramInterface {
     pub fn new() -> RdramInterface {
         RdramInterface { 
-            ram: vec![0u32; 256*1024], // 8mbit => 8*1024*1024/8 = 1MiB => 1MiB/4 = 256Ki ints
+            ram: vec![0u32; 2*1024*1024], // 8MiB => 8*1024*1024/4 = 2MiB
         }
     }
 
@@ -47,6 +47,11 @@ impl Addressable for RdramInterface {
                 0
             },
 
+            // RI_REFRESH
+            0x0400_0010 => {
+                println!("RI: read RI_REFRESH");
+                0
+            },
             _ => panic!("RDRAM: unhandled read32 ${:08X}", offset),
         }
     }
@@ -92,10 +97,17 @@ impl Addressable for RdramInterface {
                 assert!(value == 0);
             },
 
+
             // RI_SELECT
             0x0400_000C => {
                 println!("RI: write RI_SELECT value=${:08X}", value);
                 assert!(value == 0x14);
+            },
+
+            // RI_REFRESH
+            0x0400_0010 => {
+                println!("RI: write RI_REFRESH value=${:08X}", value);
+                assert!(value == 0x00063634);
             },
 
             _ => panic!("RDRAM: unhandled write32 ${:08X}", offset),

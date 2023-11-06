@@ -166,16 +166,20 @@ impl Addressable for Rcp {
     fn write_u32(&mut self, value: u32, address: usize) {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
+        if address == 0x800003f0 {
+            panic!("writing mem size");
+        }
 
-        match physical_address & 0xFC00_0000 {
+
+        match physical_address & 0xFFF0_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000 => { self.ri.write_u32(value, physical_address & 0x03FF_FFFF); },
+            0x0000_0000..=0x03F0_0000 => { self.ri.write_u32(value, physical_address & 0x03FF_FFFF); },
 
             // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000 => { self.rcp_write_u32(value, physical_address & 0x00FF_FFFF); },
+            0x0400_0000..=0x04F0_0000 => { self.rcp_write_u32(value, physical_address & 0x00FF_FFFF); },
 
             // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7C00_0000 => {
+            0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
                     // the SI external bus only has the PIF, so forward all access to it

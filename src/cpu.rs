@@ -73,6 +73,40 @@ impl<T: Addressable> Cpu<T> {
         self.bus.write_u32(nv, aligned_address);
     }
 
+    // R-M-W for write_u16
+    fn write_u16(&mut self, value: u16, address: usize) {
+        assert!((address & 0x01) == 0); // address must be halfword aligned
+        let aligned_address = address & !0x03;
+
+        // on cacheable addresses, we need to have the old data in order to change a byte
+        let word = if (address & 0xF000_0000) != 0xA000_0000 {
+            self.bus.read_u32(aligned_address)  // this read "simulates" the cache miss and fetch and 
+                                                // doesn't happen for uncached addresses
+        } else { 0 };
+
+        let shift = 16 - ((address & 0x03) << 4);
+        let mask = 0xFFFFu32 << shift;
+        let nv = (word & !mask) | ((value as u32) << shift);
+        self.bus.write_u32(nv, aligned_address);
+    }
+
+    // R-M-W for write_u24
+    fn write_u24(&mut self, value: u32, address: usize) {
+        assert!((address & 0x02) == 0); // address must be byte 0 or 1 of the word
+        let aligned_address = address & !0x03;
+
+        // on cacheable addresses, we need to have the old data in order to change a byte
+        let word = if (address & 0xF000_0000) != 0xA000_0000 {
+            self.bus.read_u32(aligned_address)  // this read "simulates" the cache miss and fetch and 
+                                                // doesn't happen for uncached addresses
+        } else { 0 };
+
+        let shift = 8 - ((address & 0x03) << 3);
+        let mask = 0x00FFFFFFu32 << shift;
+        let nv = (word & !mask) | ((value as u32) << shift);
+        self.bus.write_u32(nv, aligned_address);
+    }
+
     #[inline(always)]
     fn branch(&mut self, condition: bool, signed_imm: u32) {
         if condition {
@@ -166,6 +200,20 @@ impl<T: Addressable> Cpu<T> {
                         self.lo = (result & 0xFFFF_FFFF) as u32;
                         self.hi = ((result >> 32) & 0xFFFF_FFFF) as u32;
                     },
+                    0b100_000 => {
+                        println!("add r{}, r{}, r{}", rd, rs, rt);
+                        // add does cause an overflow exception
+                        let rs = self.gpr[rs as usize];
+                        let rt = self.gpr[rt as usize];
+
+                        let result = rs.wrapping_add(rt);
+                        // if addends had the same sign but the result differs, overflow occurred
+                        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
+                            panic!("overflow exception occurred");
+                        } else {
+                            self.gpr[rd as usize] = result;
+                        }
+                    },
                     0b100_001 => {
                         println!("addu r{}, r{}, r{}", rd, rs, rt);
                         // addu does not cause an overflow exception
@@ -190,6 +238,12 @@ impl<T: Addressable> Cpu<T> {
                         println!("xor r{}, r{}, r{}", rd, rs, rt);
 
                         self.gpr[rd as usize] = self.gpr[rs as usize] ^ self.gpr[rt as usize];
+                    },
+                    0b101_010 => {
+                        println!("slt r{}, r{}, r{}", rd, rs, rt);
+
+                        // set rd to 1 if rs < rt, otherwise 0
+                        self.gpr[rd as usize] = ((self.gpr[rs as usize] as i32) < (self.gpr[rt as usize] as i32)) as u32;
                     },
                     0b101_011 => {
                         println!("sltu r{}, r{}, r{}", rd, rs, rt);
@@ -333,12 +387,34 @@ impl<T: Addressable> Cpu<T> {
                 let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
                 self.write_u8((self.gpr[rt as usize] & 0xFF) as u8, address);
             },
+            // these SWL and SWR implementations should be done but they haven't actually
+            // been encountered yet
+            /*
             0b101_010 => {
-                println!("sb r{}, 0x{:04X}(r{})", rt, imm, rs);
-
+                println!("swl r{}, ${:4X}(r{})", rt, imm, rs);
                 let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                self.write_u8((self.gpr[rt as usize] & 0xFF) as u8, address);
+                let bytes_to_write = 4 - (address & 0x03);
+                match bytes_to_write {
+                    1 => self.write_u8(((self.gpr[rt as usize] & 0xFF00_0000) >> 24) as u8, address),
+                    2 => self.write_u16(((self.gpr[rt as usize] & 0xFFFF_0000) >> 16) as u16, address),
+                    3 => self.write_u24((self.gpr[rt as usize] & 0xFFFF_FF00) >> 8, address),
+                    4 => self.bus.write_u32(self.gpr[rt as usize], address),
+                    _ => panic!("not possible"),
+                };
             },
+            0b101_110 => {
+                println!("swr r{}, ${:4X}(r{})", rt, imm, rs);
+                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
+                let bytes_to_write = 1 + (address & 0x03);
+                match bytes_to_write {
+                    1 => self.write_u8((self.gpr[rt as usize] & 0x0000_00FF) as u8, address & !0x03),
+                    2 => self.write_u16((self.gpr[rt as usize] & 0x0000_FFFF) as u16, address & !0x03),
+                    3 => self.write_u24((self.gpr[rt as usize] & 0x00FF_FFFF) as u32, address & !0x03),
+                    4 => self.bus.write_u32(self.gpr[rt as usize], address & !0x03),
+                    _ => panic!("not possible"),
+                };
+            },
+            */
             0b101_011 => {
                 println!("sw r{}, 0x{:04X}(r{})", rt, imm, rs);
 
@@ -347,6 +423,9 @@ impl<T: Addressable> Cpu<T> {
                     panic!("address exception!");
                 }
                 self.bus.write_u32(self.gpr[rt as usize], address);
+            },
+            0b101_111 => {
+                println!("cache ${:02X},${:04X}(r{})", rt, imm, rs);
             },
             0b111_111 => {
                 panic!("<invalid>")
