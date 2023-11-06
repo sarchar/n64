@@ -1,0 +1,84 @@
+use std::fs;
+
+use crate::Addressable;
+
+/// N64 PIF-ROM, where the boot rom is stored
+/// boot_rom is big endian data
+/// Essentially part of the PeripheralInterface but the PIF-ROM and features abstracted out
+pub struct PifRom {
+    boot_rom: Vec<u8>,    
+    ram: Vec<u32>,
+    command_finished: bool,
+}
+
+impl PifRom {
+    pub fn new(boot_rom_file: &str) -> PifRom {
+        let boot_rom_data = fs::read(boot_rom_file).expect("Boot rom not found");
+
+        // HACK! To simulate the CIC exchange, we need seeds at location 0x7E4 in PIF memory
+        let mut ram = vec![0u32; 16]; // 64 byte RAM
+        ram[9] = 0x0000_3F3F;
+
+        PifRom {
+            boot_rom: boot_rom_data,
+            ram: ram,
+            command_finished: false,
+        }
+    }
+}
+
+impl Addressable for PifRom {
+    fn read_u32(&mut self, offset: usize) -> u32 {
+        println!("PIF: read ${:08X}", offset);
+        if offset < 1984 {
+            ((self.boot_rom[offset+0] as u32) << 24)
+            | ((self.boot_rom[offset+1] as u32) << 16)
+            | ((self.boot_rom[offset+2] as u32) << 8)
+            | (self.boot_rom[offset+3] as u32)
+        } else if offset == 0x7FC {
+            // HACK! data is always available (bit 7 set)
+            if self.command_finished { 
+                self.command_finished = false;
+                0x00000080 
+            } else { 
+                0x00000000 
+            }
+        } else {
+            let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
+            if ram_offset < 16 {
+                self.ram[ram_offset as usize]
+            } else {
+                panic!("unhandled PIF read")
+            }
+        }
+    }
+
+    fn write_u32(&mut self, value: u32, offset: usize) -> &mut Self {
+        if offset < 0x7C0 {
+            panic!("invalid PIF write");
+        } else if offset == 0x7FC {
+            //panic!("PIF: write command port");
+            if (value & 0x10) != 0 {
+                println!("PIF: disable PIF-ROM access");
+            } else if (value & 0x20) != 0 {
+                println!("PIF: CPU checksum ready");
+                self.command_finished = true;
+            } else if (value & 0x40) != 0 {
+                println!("PIF: run checksum");
+            } else if (value & 0x0F) != 0 {
+                panic!("PIF: not implemented PIF command ${:08X}", value);
+            }
+        } else {
+            let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
+            if ram_offset < 16 {
+                self.ram[ram_offset as usize] = value;
+            } else {
+                panic!("invalid PIF write");
+            }
+        }
+
+        self
+    }
+}
+
+
