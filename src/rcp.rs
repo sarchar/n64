@@ -191,6 +191,8 @@ impl Addressable for Rcp {
     }
 
     fn write_u32(&mut self, value: u32, address: usize) -> WriteReturnSignal {
+        if address == 0xB3FF0020 { panic!(""); }
+
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
         if address == 0x800003f0 {

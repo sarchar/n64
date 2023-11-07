@@ -48,7 +48,7 @@ impl Addressable for PifRom {
             if ram_offset < 16 {
                 self.ram[ram_offset as usize]
             } else {
-                panic!("unhandled PIF read")
+                panic!("unhandled PIF read offset=${:08X}", offset)
             }
         }
     }
@@ -65,7 +65,9 @@ impl Addressable for PifRom {
                 self.command_finished = true;
             } else if (value & 0x40) != 0 {
                 println!("PIF: run checksum");
-            } else if (value & 0x0F) != 0 {
+            } else if (value & 0x08) != 0 {
+                println!("PIF: Yay! BOOT IS DONE!");
+            } else if (value & 0x07) != 0 {
                 panic!("PIF: not implemented PIF command ${:08X}", value);
             }
         } else {

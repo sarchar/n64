@@ -1,4 +1,4 @@
-use crate::Addressable;
+use crate::*;
 
 pub struct Cpu<T: Addressable> {
     bus: T,
@@ -10,6 +10,9 @@ pub struct Cpu<T: Addressable> {
     hi: u32,
 
     cp0gpr: [u32; 32],
+
+    fcr: [u32; 32],
+    _fgpr: [f32; 32],
 
     next_instruction: u32,    // emulates delay slot
     next_instruction_pc: u32, // for printing correct delay slot addresses
@@ -26,6 +29,9 @@ impl<T: Addressable> Cpu<T> {
             pc  : 0,
 
             cp0gpr: [0u32; 32],
+
+            fcr: [0u32; 32],
+            _fgpr: [0f32; 32],
 
             next_instruction: 0,
             next_instruction_pc: 0,
@@ -58,7 +64,7 @@ impl<T: Addressable> Cpu<T> {
     // is uncached or there's a cache miss. otherwise, the value from cache would be used
     // so the programmer needs to be aware of side effects when reading/writing bytes
     // R-M-W for write_u8
-    fn write_u8(&mut self, value: u8, address: usize) {
+    fn write_u8(&mut self, value: u8, address: usize) -> WriteReturnSignal {
         let aligned_address = address & !0x03;
 
         // on cacheable addresses, we need to have the old data in order to change a byte
@@ -70,11 +76,11 @@ impl<T: Addressable> Cpu<T> {
         let shift = 24 - ((address & 0x03) << 3);
         let mask = 0xFFu32 << shift;
         let nv = (word & !mask) | ((value as u32) << shift);
-        self.bus.write_u32(nv, aligned_address);
+        self.bus.write_u32(nv, aligned_address)
     }
 
     // R-M-W for write_u16
-    fn write_u16(&mut self, value: u16, address: usize) {
+    fn write_u16(&mut self, value: u16, address: usize) -> WriteReturnSignal {
         assert!((address & 0x01) == 0); // address must be halfword aligned
         let aligned_address = address & !0x03;
 
@@ -87,11 +93,11 @@ impl<T: Addressable> Cpu<T> {
         let shift = 16 - ((address & 0x03) << 4);
         let mask = 0xFFFFu32 << shift;
         let nv = (word & !mask) | ((value as u32) << shift);
-        self.bus.write_u32(nv, aligned_address);
+        self.bus.write_u32(nv, aligned_address)
     }
 
     // R-M-W for write_u24
-    fn write_u24(&mut self, value: u32, address: usize) {
+    fn write_u24(&mut self, value: u32, address: usize) -> WriteReturnSignal {
         assert!((address & 0x02) == 0); // address must be byte 0 or 1 of the word
         let aligned_address = address & !0x03;
 
@@ -104,7 +110,7 @@ impl<T: Addressable> Cpu<T> {
         let shift = 8 - ((address & 0x03) << 3);
         let mask = 0x00FFFFFFu32 << shift;
         let nv = (word & !mask) | ((value as u32) << shift);
-        self.bus.write_u32(nv, aligned_address);
+        self.bus.write_u32(nv, aligned_address)
     }
 
     #[inline(always)]
@@ -134,8 +140,8 @@ impl<T: Addressable> Cpu<T> {
 
         if self.pc == 0xA4001420 {
             self.bus.print_debug_ipl2();
-        } else if self.pc == 0x8000_02B4 {
-            panic!("Starting cartridge ROM!");
+        //} else if self.pc == 0x8000_02B4 {
+        //    panic!("Starting cartridge ROM!");
         }
 
         // current instruction
@@ -239,6 +245,12 @@ impl<T: Addressable> Cpu<T> {
 
                         self.gpr[rd as usize] = self.gpr[rs as usize] ^ self.gpr[rt as usize];
                     },
+                    0b100_111 => {
+                        println!("nor r{}, r{}, r{}", rd, rs, rt);
+
+                        self.gpr[rd as usize] = !(self.gpr[rs as usize] | self.gpr[rt as usize]);
+                    },
+
                     0b101_010 => {
                         println!("slt r{}, r{}, r{}", rd, rs, rt);
 
@@ -341,15 +353,28 @@ impl<T: Addressable> Cpu<T> {
                     0b00_100 => {
                         println!("mtc0 r{}, cp0gpr{} (r{}=${:08X})", rt, rd, rt, self.gpr[rt as usize]);
                         self.cp0gpr[rd as usize] = self.gpr[rt as usize];
+
+                        if rd == 12 {
+                            if (self.cp0gpr[rd as usize] & 0x0200_00E0) != 0 {
+                                panic!("going to 64-bit cpu or little endian?");
+                            }
+                        }
                     },
                     _ => panic!("Unknown cop0: 0b{:05b}", cop0)
                 }
             },
             0b010_001 => {
-                panic!("cop1")
+                let fmt = rs; // fmt is the field as rs
+                match fmt {
+                    0b00_110 => {
+                        println!("ctc1 r{}, fcr{}", rt, rd);
+                        self.fcr[rd as usize] = self.gpr[rt as usize];
+                    },
+                    _ => panic!("Unknown cop1 op: 0b{:02b}_{:03b}", fmt >> 3, fmt & 0x07)
+                }
             },
             0b010_010 => {
-                panic!("cop2")
+                panic!("cop2 ${:08X}", inst);
             },
             0b010_100 => {
                 println!("beql r{}, r{}, ${:04X}", rs, rt, imm);
@@ -387,8 +412,7 @@ impl<T: Addressable> Cpu<T> {
                 let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
                 self.write_u8((self.gpr[rt as usize] & 0xFF) as u8, address);
             },
-            // these SWL and SWR implementations should be done but they haven't actually
-            // been encountered yet
+            // the SWL implementation should be done but hasn't been encountered yet
             /*
             0b101_010 => {
                 println!("swl r{}, ${:4X}(r{})", rt, imm, rs);
@@ -402,6 +426,7 @@ impl<T: Addressable> Cpu<T> {
                     _ => panic!("not possible"),
                 };
             },
+            */
             0b101_110 => {
                 println!("swr r{}, ${:4X}(r{})", rt, imm, rs);
                 let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
@@ -414,7 +439,6 @@ impl<T: Addressable> Cpu<T> {
                     _ => panic!("not possible"),
                 };
             },
-            */
             0b101_011 => {
                 println!("sw r{}, 0x{:04X}(r{})", rt, imm, rs);
 

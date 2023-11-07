@@ -1,3 +1,4 @@
+use std::cmp;
 use std::fs;
 
 use crate::*;
@@ -64,13 +65,16 @@ impl PeripheralInterface {
                 assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000); // right now only cartridge rom is valid for dma
 
                 let cart_addr = self.cart_addr & !0xF000_0000;
-                let end = (cart_addr + value + 1) as usize;
-                if end <= self.cartridge_rom.len() {
+                let mut end = cart_addr + value + 1;
+                if (cart_addr as usize) <= self.cartridge_rom.len() {
+                    // truncate dma
+                    end = cmp::min(self.cartridge_rom.len() as u32, end);
+
                     //let cart_data = &self.cartridge_rom[(self.cart_addr as usize)..end];
                     let dma_info = DmaInfo {
                         source_address: cart_addr,
                         dest_address: self.dram_addr,
-                        count: value + 1,
+                        count: end - cart_addr,
                     };
 
                     self.dma_status = 0x01;
