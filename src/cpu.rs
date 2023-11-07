@@ -1,6 +1,7 @@
 use crate::*;
 
 const COP0_STATUS: usize = 12;
+const COP0_EPC   : usize = 14; // Exception Program Counter
 const COP0_CONFIG: usize = 16;
 const COP0_LLADDR: usize = 17;
 
@@ -98,8 +99,8 @@ impl<T: Addressable> Cpu<T> {
    /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_jalr   , Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_sync   ,
    /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
    /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
-   /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_unknown, Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
-   /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_sub    , Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
+   /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_dadd   , Cpu::<T>::special_daddu  , Cpu::<T>::special_dsub   , Cpu::<T>::special_dsubu  ,
    /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
    /* 111_ */   Cpu::<T>::special_dsll   , Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_dsll32 , Cpu::<T>::special_invalid, Cpu::<T>::special_dslr32 , Cpu::<T>::special_unknown,
             ],
@@ -127,6 +128,7 @@ impl<T: Addressable> Cpu<T> {
         self.pc = 0xBFC0_0000;
 
         // COP0
+        // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
         self.cp0gpr[COP0_CONFIG] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
 
         // fetch next_instruction before starting the loop
@@ -826,6 +828,29 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
     }
 
+    fn special_dadd(&mut self) {
+        println!("dadd r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        
+        // add does cause an overflow exception
+        let rs = self.gpr[self.inst.rs];
+        let rt = self.gpr[self.inst.rt];
+        let result = rs.wrapping_add(rt);
+
+        // if addends had the same sign but the result differs, overflow occurred
+        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000_0000_0000u64) != 0 {
+            eprintln!("CPU: dadd overflow exception occurred");
+        } else {
+            self.gpr[self.inst.rd] = result;
+        }
+    }
+
+    fn special_daddu(&mut self) {
+        println!("daddu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // daddu does not cause an overflow exception
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
+    }
+
+
     fn special_dsll(&mut self) {
         println!("dsll r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
@@ -839,6 +864,27 @@ impl<T: Addressable> Cpu<T> {
     fn special_dslr32(&mut self) {
         println!("dslr32 r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (32 + self.inst.sa);
+    }
+
+    fn special_dsub(&mut self) {
+        println!("dsub r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // sub causes an overflow exception
+        let rs = self.gpr[self.inst.rs];
+        let rt = self.gpr[self.inst.rt];
+
+        let result = rs.wrapping_sub(rt);
+        // if addends had the same sign but the result differs, overflow occurred
+        if (((rs ^ rt) & (rs ^ result)) & 0x8000_0000_0000_0000u64) != 0 {
+            eprintln!("CPU: sub overflow exception occurred");
+        } else {
+            self.gpr[self.inst.rd] = result;
+        }
+    }
+
+    fn special_dsubu(&mut self) {
+        println!("dsubu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // dsubu does not cause an overflow exception
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
     }
 
     fn special_jalr(&mut self) {
@@ -953,6 +999,21 @@ impl<T: Addressable> Cpu<T> {
     fn special_srlv(&mut self) {
         println!("srlv r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as u32) >> (self.gpr[self.inst.rs] & 0x1F)) as u64;
+    }
+
+    fn special_sub(&mut self) {
+        println!("sub r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // sub causes an overflow exception
+        let rs = self.gpr[self.inst.rs] as u32;
+        let rt = self.gpr[self.inst.rt] as u32;
+
+        let result = rs.wrapping_sub(rt);
+        // if addends had the same sign but the result differs, overflow occurred
+        if (((rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
+            eprintln!("CPU: sub overflow exception occurred");
+        } else {
+            self.gpr[self.inst.rd] = (result as i32) as u64;
+        }
     }
 
     fn special_subu(&mut self) {
