@@ -1,5 +1,9 @@
 use crate::*;
 
+const COP0_STATUS: usize = 12;
+//const Cop0_Config: usize = 16;
+const COP0_LLADDR: usize = 17;
+
 struct InstructionDecode {
     v : u32,      // full 32-bit instruction
     op: u32,      // 6-bit opcode field
@@ -34,6 +38,7 @@ pub struct Cpu<T: Addressable> {
     hi: u32,
 
     cp0gpr: [u32; 32],
+    llbit: bool,
 
     fcr: [u32; 32],
     _fgpr: [f32; 32],
@@ -66,6 +71,7 @@ impl<T: Addressable> Cpu<T> {
             pc  : 0,
 
             cp0gpr: [0u32; 32],
+            llbit: false,
 
             fcr: [0u32; 32],
             _fgpr: [0f32; 32],
@@ -79,23 +85,23 @@ impl<T: Addressable> Cpu<T> {
    /* 000_ */   Cpu::<T>::inst_special, Cpu::<T>::inst_regimm , Cpu::<T>::inst_unknown, Cpu::<T>::inst_jal    , Cpu::<T>::inst_beq    , Cpu::<T>::inst_bne    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
    /* 001_ */   Cpu::<T>::inst_addi   , Cpu::<T>::inst_addiu  , Cpu::<T>::inst_slti   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_andi   , Cpu::<T>::inst_ori    , Cpu::<T>::inst_xori   , Cpu::<T>::inst_lui    ,
    /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
-   /* 011_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
+   /* 011_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_daddiu , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
    /* 100_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
    /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
-   /* 110_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
-   /* 111_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown
+   /* 110_ */   Cpu::<T>::inst_ll     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
+   /* 111_ */   Cpu::<T>::inst_sc     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown
             ],
 
             special_table: [
                     //   _000                       _001                       _010                       _011                       _100                       _101                       _110                       _111
-   /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_unknown, Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_unknown,
-   /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown,
+   /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_sra    , Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_unknown,
+   /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_sync   ,
    /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
    /* 011_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_multu  , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
    /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_unknown, Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
    /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
    /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
-   /* 111_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 111_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_dsll32 , Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
             ],
 
 
@@ -300,7 +306,7 @@ impl<T: Addressable> Cpu<T> {
                 println!("mtc0 r{}, cp0gpr{} (r{}=${:08X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
                 self.cp0gpr[self.inst.rd] = self.gpr[self.inst.rt];
 
-                if self.inst.rd == 12 {
+                if self.inst.rd == COP0_STATUS {
                     if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
                         panic!("CPU: unsupported 64-bit mode or little endian mode");
                     }
@@ -356,16 +362,19 @@ impl<T: Addressable> Cpu<T> {
         println!("cache ${:02X},${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
     }
 
+    fn inst_daddiu(&mut self) {
+        // TODO this function does 64-bit add but the CPU doesn't seem to be in 64-bit mode yet?
+        println!("daddiu r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+                
+        // no integer overflow exception occurs with ADDIU
+        self.gpr[self.inst.rt] = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+    }
+
     fn inst_jal(&mut self) {
         let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
         println!("jal ${:08X}", dest);
         self.gpr[31] = self.pc;
         self.pc = dest;
-    }
-
-    fn inst_lui(&mut self) {
-        println!("lui r{}, ${:04X}", self.inst.rt, self.inst.imm);
-        self.gpr[self.inst.rt] = self.inst.imm << 16;
     }
 
     fn inst_lbu(&mut self) {
@@ -375,8 +384,28 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = self.read_u8(address as usize);
     }
 
+    fn inst_ll(&mut self) {
+        println!("ll r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+        self.gpr[self.inst.rt] = self.bus.read_u32(address as usize);
+
+        // the "linked part" sets the LLAddr register in cop0 to the physical address
+        // of the read, and the LLbit to 1
+        self.cp0gpr[COP0_LLADDR] = address & 0x1FFF_FFFF; // TODO use proper physical address
+        self.llbit = true;
+    }
+
+    fn inst_lui(&mut self) {
+        println!("lui r{}, ${:04X}", self.inst.rt, self.inst.imm);
+        self.gpr[self.inst.rt] = self.inst.imm << 16;
+    }
+
     fn inst_lw(&mut self) {
-        println!("lw r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        println!("lw r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
@@ -395,6 +424,29 @@ impl<T: Addressable> Cpu<T> {
         self.regimm_table[self.inst.regimm as usize](self);
     }
 
+    fn inst_sb(&mut self) {
+        println!("sb r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        self.write_u8((self.gpr[self.inst.rt] & 0xFF) as u8, address as usize);
+    }
+
+    fn inst_sc(&mut self) {
+        println!("sc r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+
+        if self.llbit && ((address & 0x1FFF_FFFF) == self.cp0gpr[COP0_LLADDR]) {
+            self.bus.write_u32(self.gpr[self.inst.rt], address as usize);
+            self.gpr[self.inst.rt] = 1;
+        } else {
+            self.gpr[self.inst.rt] = 0;
+        }
+    }
+
     fn inst_slti(&mut self) {
         println!("slti r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
 
@@ -409,14 +461,6 @@ impl<T: Addressable> Cpu<T> {
         self.inst.special = self.inst.v & 0x3F;
         self.special_table[self.inst.special as usize](self);
     }
-
-    fn inst_sb(&mut self) {
-        println!("sb r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
-
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        self.write_u8((self.gpr[self.inst.rt] & 0xFF) as u8, address as usize);
-    }
-
 
     fn inst_sw(&mut self) {
         println!("sw r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
@@ -519,6 +563,12 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
     }
 
+    fn special_dsll32(&mut self) {
+        // TODO 64-bit?
+        println!("dsll32 r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (32 + self.inst.sa);
+    }
+
     fn special_jr(&mut self) {
         println!("jr r{}", self.inst.rs);
         self.pc = self.gpr[self.inst.rs];
@@ -579,6 +629,16 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = (self.gpr[self.inst.rs] < self.gpr[self.inst.rt]) as u32;
     }
 
+    fn special_sra(&mut self) {
+        println!("sra r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        let mut sign = self.gpr[self.inst.rt] & 0x8000_0000;
+        if sign != 0 {
+            // create leading 1s (i.e., 0xFFFFC000) to mask into the register to "sign extend" the result
+            sign = 0xFFFF_FFFF << (32 - self.inst.sa)
+        }
+        self.gpr[self.inst.rd] = sign | (self.gpr[self.inst.rt] >> self.inst.sa);
+    }
+
     fn special_srl(&mut self) {
         println!("srl r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> self.inst.sa;
@@ -593,6 +653,11 @@ impl<T: Addressable> Cpu<T> {
         println!("subu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
         // subu does not cause an overflow exception
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
+    }
+
+    fn special_sync(&mut self) {
+        println!("sync");
+        // NOP on VR4300
     }
 
     fn special_xor(&mut self) {
