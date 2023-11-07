@@ -14,6 +14,7 @@ pub struct PeripheralInterface {
     cartridge_rom: Vec<u8>,
 
     debug_buffer: Vec<u8>,
+    debug_newline: bool,
 }
 
 impl PeripheralInterface {
@@ -27,6 +28,7 @@ impl PeripheralInterface {
             cartridge_rom: cartridge_rom,
 
             debug_buffer: vec![0; 0x200],
+            debug_newline: true,
         }
     }
 
@@ -167,7 +169,20 @@ impl Addressable for PeripheralInterface {
         } else if offset == 0x13FF_0014 {
             let slice = &self.debug_buffer[0..(value as usize)];
             let msg = str::from_utf8(slice).unwrap();
-            println!("DEBUG: message: {}", msg);
+
+            for c in msg.chars() {
+                if self.debug_newline {
+                    eprint!("DEBUG: message: ");
+                    self.debug_newline = false;
+                }
+
+                eprint!("{}", c);
+
+                if c == '\n' {
+                    self.debug_newline = true;
+                }
+            }
+
             WriteReturnSignal::None
         } else if offset >= 0x13FF_0020 && offset <= 0x13FF_0220 {
             let buffer_offset = offset - 0x13FF_0020;

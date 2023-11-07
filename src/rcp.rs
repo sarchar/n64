@@ -18,8 +18,6 @@ pub struct Rcp {
     pi: PeripheralInterface,
     ri: RdramInterface,
     mi: MipsInterface,
-
-    debug_count: u32,
 }
 
 impl Rcp {
@@ -31,8 +29,6 @@ impl Rcp {
             mi: MipsInterface::new(),
             pif: pif,
             pi: pi,
-
-            debug_count: 1,
         }
     }
 
