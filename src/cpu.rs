@@ -1,5 +1,29 @@
 use crate::*;
 
+struct InstructionDecode {
+    v : u32,      // full 32-bit instruction
+    op: u32,      // 6-bit opcode field
+    regimm: u32,  // 5-bit regimm op
+    special: u32, // 6-bit special op
+
+    // rd, rs, and rt are mostly used to index into self.gpr, so they will be usize
+    // but they are 5 bits in the instruction
+    rd: usize,
+    rs: usize,
+    rt: usize,
+
+    // 16-bit immediate with sign extended version
+    // the signed_imm value needs to be casted to i32 for comparisons
+    imm: u32,
+    signed_imm: u32,
+
+    // 5 bit shift amount
+    sa: u32,
+
+    // 27-bit jump targets
+    target: u32,
+}
+
 pub struct Cpu<T: Addressable> {
     bus: T,
 
@@ -16,7 +40,20 @@ pub struct Cpu<T: Addressable> {
 
     next_instruction: u32,    // emulates delay slot
     next_instruction_pc: u32, // for printing correct delay slot addresses
+
+    instruction_table: [CpuInstruction<T>; 64],
+    special_table: [CpuInstruction<T>; 64],
+    regimm_table: [CpuInstruction<T>; 32],
+
+    // TODO - decide of one table can be used for both co-processors or not
+    //cop0_table: [CpuInstruction<T>; 32],
+    //cop1_table: [CpuInstruction<T>; 32],
+
+    // instruction decode values
+    inst: InstructionDecode,
 }
+
+type CpuInstruction<T> = fn(&mut Cpu<T>) -> ();
 
 impl<T: Addressable> Cpu<T> {
     pub fn new(bus: T) -> Cpu<T> {
@@ -35,6 +72,45 @@ impl<T: Addressable> Cpu<T> {
 
             next_instruction: 0,
             next_instruction_pc: 0,
+
+            // Sorry for making these so wide, but it maps to the instruction decode table in the datasheet better!
+            instruction_table: [
+                    // _000                     _001                     _010                    _011                    _100                    _101                    _110                    _111
+   /* 000_ */   Cpu::<T>::inst_special, Cpu::<T>::inst_regimm , Cpu::<T>::inst_unknown, Cpu::<T>::inst_jal    , Cpu::<T>::inst_beq    , Cpu::<T>::inst_bne    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
+   /* 001_ */   Cpu::<T>::inst_addi   , Cpu::<T>::inst_addiu  , Cpu::<T>::inst_slti   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_andi   , Cpu::<T>::inst_ori    , Cpu::<T>::inst_xori   , Cpu::<T>::inst_lui    ,
+   /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
+   /* 011_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
+   /* 100_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
+   /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
+   /* 110_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
+   /* 111_ */   Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown
+            ],
+
+            special_table: [
+                    //   _000                       _001                       _010                       _011                       _100                       _101                       _110                       _111
+   /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_unknown, Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_unknown,
+   /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown,
+   /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 011_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_multu  , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_unknown, Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
+   /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
+   /* 111_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+            ],
+
+
+            regimm_table: [
+                    //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
+   /* 00_ */    Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_bgezl  , Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
+   /* 01_ */    Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid,
+   /* 10_ */    Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_bgezal , Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
+   /* 11_ */    Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
+            ],
+
+            inst: InstructionDecode {
+                v: 0, op: 0, regimm: 0, special: 0, rd: 0, rs: 0, rt: 0,
+                imm: 0, signed_imm: 0, sa: 0, target: 0,
+            }
         };
         
         cpu.reset();
@@ -114,19 +190,19 @@ impl<T: Addressable> Cpu<T> {
     }
 
     #[inline(always)]
-    fn branch(&mut self, condition: bool, signed_imm: u32) {
+    fn branch(&mut self, condition: bool) {
         if condition {
             // target is the sum of the address of the delay slot instruction
             // plus the sign extended and left-shifted immediate offset
-            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
+            self.pc = (self.pc - 4).wrapping_add(self.inst.signed_imm << 2);
         }
     }
 
     // branch likely instructions discards the delay slot when the branch is not taken
     #[inline(always)]
-    fn branch_likely(&mut self, condition: bool, signed_imm: u32) {
+    fn branch_likely(&mut self, condition: bool) {
         if condition {
-            self.pc = (self.pc - 4).wrapping_add(signed_imm << 2);
+            self.pc = (self.pc - 4).wrapping_add(self.inst.signed_imm << 2);
         } else {
             // we need to throw away next_instruction when branch is not taken
             self.next_instruction = self.bus.read_u32(self.pc as usize); // pc already points after the delay slot
@@ -146,316 +222,27 @@ impl<T: Addressable> Cpu<T> {
 
         // current instruction
         let inst = self.next_instruction;
+        self.inst.v = inst;
 
         // next instruction fetch
         self.next_instruction = self.bus.read_u32(self.pc as usize);
 
         // instruction decode
-        let op     = inst >> 26;
-        let rs     = (inst >> 21) & 0x1F;
-        let rt     = (inst >> 16) & 0x1F;
-        let rd     = (inst >> 11) & 0x1F;
-        let imm    = inst & 0xFFFF;
-        let signed_imm = (imm as i16) as u32;
-        let target = inst & 0x3FFFFFF;
-        let sa     = (inst >> 6) & 0x1F;
+        self.inst.op         = inst >> 26;
+        self.inst.rs         = ((inst >> 21) & 0x1F) as usize;
+        self.inst.rt         = ((inst >> 16) & 0x1F) as usize;
+        self.inst.rd         = ((inst >> 11) & 0x1F) as usize;
+        self.inst.imm        = inst & 0xFFFF;
+        self.inst.signed_imm = (self.inst.imm as i16) as u32;
+        self.inst.target     = inst & 0x3FFFFFF;
+        self.inst.sa         = (inst >> 6) & 0x1F;
 
         print!("i {:08X}: ", self.next_instruction_pc);
         //print!("{:08X}, op=0b{:06b}: ", 0xBFC00000+i, inst, op);
         self.next_instruction_pc = self.pc;
         self.pc += 4;
 
-        // instruction execute
-        match op {
-            0b000_000 => {
-                let special = inst & 0x3F;
-                match special {
-                    0b000_000 => {
-                        println!("sll r{}, r{}, {}", rd, rt, sa);
-                        self.gpr[rd as usize] = self.gpr[rt as usize] << sa;
-                    },
-                    0b000_010 => {
-                        println!("srl r{}, r{}, {}", rd, rt, sa);
-                        self.gpr[rd as usize] = self.gpr[rt as usize] >> sa;
-                    },
-                    0b000_100 => {
-                        println!("sllv r{}, r{}, r{}", rd, rt, rs);
-                        self.gpr[rd as usize] = self.gpr[rt as usize] << (self.gpr[rs as usize] & 0x1F);
-                    },
-                    0b000_110 => {
-                        println!("srlv r{}, r{}, r{}", rd, rt, rs);
-                        self.gpr[rd as usize] = self.gpr[rt as usize] >> (self.gpr[rs as usize] & 0x1F);
-                    },
-                    0b001_000 => {
-                        println!("jr r{}", rs);
-                        self.pc = self.gpr[rs as usize];
-                    },
-                    0b010_000 => {
-                        println!("mfhi r{}", rd);
-                        self.gpr[rd as usize] = self.hi;
-                    },
-                    0b010_010 => {
-                        println!("mflo r{}", rd);
-                        self.gpr[rd as usize] = self.lo;
-                    },
-                    0b011_001 => {
-                        println!("multu r{}, r{}", rs, rt);
-                        let result = (self.gpr[rs as usize] as u64) * (self.gpr[rt as usize] as u64);
-                        // multu results are available in the next instruction since the multiply
-                        // was started earlier in the pipeline
-                        self.lo = (result & 0xFFFF_FFFF) as u32;
-                        self.hi = ((result >> 32) & 0xFFFF_FFFF) as u32;
-                    },
-                    0b100_000 => {
-                        println!("add r{}, r{}, r{}", rd, rs, rt);
-                        // add does cause an overflow exception
-                        let rs = self.gpr[rs as usize];
-                        let rt = self.gpr[rt as usize];
-
-                        let result = rs.wrapping_add(rt);
-                        // if addends had the same sign but the result differs, overflow occurred
-                        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
-                            panic!("overflow exception occurred");
-                        } else {
-                            self.gpr[rd as usize] = result;
-                        }
-                    },
-                    0b100_001 => {
-                        println!("addu r{}, r{}, r{}", rd, rs, rt);
-                        // addu does not cause an overflow exception
-                        self.gpr[rd as usize] = self.gpr[rs as usize].wrapping_add(self.gpr[rt as usize]);
-                    },
-                    0b100_011 => {
-                        println!("subu r{}, r{}, r{}", rd, rs, rt);
-                        // subu does not cause an overflow exception
-                        self.gpr[rd as usize] = self.gpr[rs as usize].wrapping_sub(self.gpr[rt as usize]);
-                    },
-                    0b100_100 => {
-                        println!("and r{}, r{}, r{}", rd, rs, rt);
-
-                        self.gpr[rd as usize] = self.gpr[rs as usize] & self.gpr[rt as usize];
-                    },
-                    0b100_101 => {
-                        println!("or r{}, r{}, r{}", rd, rs, rt);
-
-                        self.gpr[rd as usize] = self.gpr[rs as usize] | self.gpr[rt as usize];
-                    },
-                    0b100_110 => {
-                        println!("xor r{}, r{}, r{}", rd, rs, rt);
-
-                        self.gpr[rd as usize] = self.gpr[rs as usize] ^ self.gpr[rt as usize];
-                    },
-                    0b100_111 => {
-                        println!("nor r{}, r{}, r{}", rd, rs, rt);
-
-                        self.gpr[rd as usize] = !(self.gpr[rs as usize] | self.gpr[rt as usize]);
-                    },
-
-                    0b101_010 => {
-                        println!("slt r{}, r{}, r{}", rd, rs, rt);
-
-                        // set rd to 1 if rs < rt, otherwise 0
-                        self.gpr[rd as usize] = ((self.gpr[rs as usize] as i32) < (self.gpr[rt as usize] as i32)) as u32;
-                    },
-                    0b101_011 => {
-                        println!("sltu r{}, r{}, r{}", rd, rs, rt);
-
-                        // set rd to 1 if rs < rt, otherwise 0
-                        self.gpr[rd as usize] = (self.gpr[rs as usize] < self.gpr[rt as usize]) as u32;
-                    },
-                    _ => panic!("Unknown special: 0b{:06b}", special)
-                }
-            },
-            0b000_001 => {
-                let regimm = (inst >> 16) & 0x1F;
-                match regimm {
-                    0b00_011 => {
-                        println!("bgezl r{}, ${:04X}", rs, imm);
-
-                        let condition = (self.gpr[rs as usize] & 0x8000_0000) == 0;
-                        self.branch_likely(condition, signed_imm);
-                    },
-                    0b10_001 => {
-                        println!("bgezal r{}, ${:04X}", rs, imm);
-
-                        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
-
-                        let condition = (self.gpr[rs as usize] & 0x8000_0000) == 0;
-                        self.branch(condition, signed_imm);
-                    },
-
-                    _ => panic!("Unknown regimm: 0b{:05b}", regimm)
-                }
-            },
-            0b000_011 => {
-                let dest = ((self.pc - 4) & 0xF000_0000) | (target << 2);
-                println!("jal ${:08X}", dest);
-                self.gpr[31] = self.pc;
-                self.pc = dest;
-            },
-            0b000_100 => {
-                println!("beq r{}, r{}, ${:04X}", rs, rt, imm);
-                let condition = self.gpr[rs as usize] == self.gpr[rt as usize];
-                self.branch(condition, signed_imm);
-            },
-            0b000_101 => {
-                println!("bne r{}, r{}, ${:04X}", rs, rt, imm);
-                let condition = self.gpr[rs as usize] != self.gpr[rt as usize];
-                self.branch(condition, signed_imm);
-            },
-            0b001_000 => {
-                println!("addi r{}, r{}, ${:04X}", rt, rs, imm);
-
-                // integer overflow exception occurs with ADDI, unlike ADDIU
-                let src = self.gpr[rs as usize];
-                let result = src.wrapping_add(signed_imm);
-                let is_pos = (imm & 0x8000) == 0;
-                if imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
-                    panic!("overflow detected: src=${:08X} imm=${:08X} result=${:08X}", src, signed_imm, result);
-                }
-
-                self.gpr[rt as usize] = result;
-            },
-            0b001_001 => {
-                println!("addiu r{}, r{}, ${:04X}", rt, rs, imm);
-                
-                // no integer overflow exception occurs with ADDIU
-                self.gpr[rt as usize] = self.gpr[rs as usize].wrapping_add(signed_imm);
-            },
-            0b001_010 => {
-                println!("slti r{}, r{}, ${:04X}", rt, rs, imm);
-
-                if (self.gpr[rs as usize] as i32) < (signed_imm as i32) {
-                    self.gpr[rt as usize] = 1;
-                } else {
-                    self.gpr[rt as usize] = 0;
-                }
-            },
-            0b001_100 => {
-                println!("andi r{}, r{}, ${:04X}", rt, rs, imm);
-                self.gpr[rt as usize] = self.gpr[rs as usize] & imm;
-            },
-            0b001_101 => {
-                println!("ori r{}, r{}, ${:04X}", rt, rs, imm);
-                self.gpr[rt as usize] = self.gpr[rs as usize] | imm;
-            },
-            0b001_110 => {
-                println!("xori r{}, r{}, ${:04X}", rt, rs, imm);
-                self.gpr[rt as usize] = self.gpr[rs as usize] ^ imm;
-            },
-            0b001_111 => {
-                println!("lui r{}, ${:04X}", rt, imm);
-                self.gpr[rt as usize] = imm << 16;
-            },
-            0b010_000 => {
-                let cop0 = (inst >> 21) & 0x1F;
-                match cop0 {
-                    0b00_100 => {
-                        println!("mtc0 r{}, cp0gpr{} (r{}=${:08X})", rt, rd, rt, self.gpr[rt as usize]);
-                        self.cp0gpr[rd as usize] = self.gpr[rt as usize];
-
-                        if rd == 12 {
-                            if (self.cp0gpr[rd as usize] & 0x0200_00E0) != 0 {
-                                panic!("going to 64-bit cpu or little endian?");
-                            }
-                        }
-                    },
-                    _ => panic!("Unknown cop0: 0b{:05b}", cop0)
-                }
-            },
-            0b010_001 => {
-                let fmt = rs; // fmt is the field as rs
-                match fmt {
-                    0b00_110 => {
-                        println!("ctc1 r{}, fcr{}", rt, rd);
-                        self.fcr[rd as usize] = self.gpr[rt as usize];
-                    },
-                    _ => panic!("Unknown cop1 op: 0b{:02b}_{:03b}", fmt >> 3, fmt & 0x07)
-                }
-            },
-            0b010_010 => {
-                panic!("cop2 ${:08X}", inst);
-            },
-            0b010_100 => {
-                println!("beql r{}, r{}, ${:04X}", rs, rt, imm);
-                let condition = self.gpr[rs as usize] == self.gpr[rt as usize];
-                self.branch_likely(condition, signed_imm);
-            },
-            0b010_101 => {
-                println!("bnel r{}, r{}, ${:04X}", rs, rt, imm);
-                let condition = self.gpr[rs as usize] != self.gpr[rt as usize];
-                self.branch_likely(condition, signed_imm);
-            },
-            0b010_110 => {
-                println!("blezl r{}, ${:04X}", rs, imm);
-                let condition = (self.gpr[rs as usize] & 0x8000_0000) != 0 || (self.gpr[rs as usize] == 0);
-                self.branch_likely(condition, signed_imm);
-            },
-            0b100_011 => {
-                println!("lw r{}, 0x{:04X}(r{})", rt, imm, rs);
-
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                if (address & 0x03) != 0 {
-                    panic!("address exception!");
-                }
-                self.gpr[rt as usize] = self.bus.read_u32(address);
-            },
-            0b100_100 => {
-                println!("lbu r{}, 0x{:04X}(r{})", rt, imm, rs);
-
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                self.gpr[rt as usize] = self.read_u8(address);
-            },
-            0b101_000 => {
-                println!("sb r{}, 0x{:04X}(r{})", rt, imm, rs);
-
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                self.write_u8((self.gpr[rt as usize] & 0xFF) as u8, address);
-            },
-            // the SWL implementation should be done but hasn't been encountered yet
-            /*
-            0b101_010 => {
-                println!("swl r{}, ${:4X}(r{})", rt, imm, rs);
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                let bytes_to_write = 4 - (address & 0x03);
-                match bytes_to_write {
-                    1 => self.write_u8(((self.gpr[rt as usize] & 0xFF00_0000) >> 24) as u8, address),
-                    2 => self.write_u16(((self.gpr[rt as usize] & 0xFFFF_0000) >> 16) as u16, address),
-                    3 => self.write_u24((self.gpr[rt as usize] & 0xFFFF_FF00) >> 8, address),
-                    4 => self.bus.write_u32(self.gpr[rt as usize], address),
-                    _ => panic!("not possible"),
-                };
-            },
-            */
-            0b101_110 => {
-                println!("swr r{}, ${:4X}(r{})", rt, imm, rs);
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                let bytes_to_write = 1 + (address & 0x03);
-                match bytes_to_write {
-                    1 => self.write_u8((self.gpr[rt as usize] & 0x0000_00FF) as u8, address & !0x03),
-                    2 => self.write_u16((self.gpr[rt as usize] & 0x0000_FFFF) as u16, address & !0x03),
-                    3 => self.write_u24((self.gpr[rt as usize] & 0x00FF_FFFF) as u32, address & !0x03),
-                    4 => self.bus.write_u32(self.gpr[rt as usize], address & !0x03),
-                    _ => panic!("not possible"),
-                };
-            },
-            0b101_011 => {
-                println!("sw r{}, 0x{:04X}(r{})", rt, imm, rs);
-
-                let address = self.gpr[rs as usize].wrapping_add(signed_imm) as usize;
-                if (address & 0x03) != 0 {
-                    panic!("address exception!");
-                }
-                self.bus.write_u32(self.gpr[rt as usize], address);
-            },
-            0b101_111 => {
-                println!("cache ${:02X},${:04X}(r{})", rt, imm, rs);
-            },
-            0b111_111 => {
-                panic!("<invalid>")
-            },
-            _ => panic!("Unknown op: 0b{:06b}", op)
-        };
+        self.instruction_table[self.inst.op as usize](self);
 
         // r0 must always be zero
         self.gpr[0] = 0;
@@ -470,5 +257,347 @@ impl<T: Addressable> Cpu<T> {
         }
 
         println!("-");
+    }
+
+    fn inst_invalid(&mut self) {
+        panic!("CPU: invalid function ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+    }
+
+    fn inst_unknown(&mut self) {
+        panic!("CPU: unimplemented function ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+    }
+
+    fn inst_addi(&mut self) {
+        println!("addi r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+
+        // integer overflow exception occurs with ADDI, unlike ADDIU
+        let src = self.gpr[self.inst.rs];
+        let result = src.wrapping_add(self.inst.signed_imm);
+        let is_pos = (self.inst.imm & 0x8000) == 0;
+        if self.inst.imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
+            panic!("overflow detected: src=${:08X} imm=${:08X} result=${:08X}", src, self.inst.signed_imm, result);
+        }
+
+        self.gpr[self.inst.rt] = result;
+    }
+
+    fn inst_addiu(&mut self) {
+        println!("addiu r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+                
+        // no integer overflow exception occurs with ADDIU
+        self.gpr[self.inst.rt] = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+    }
+
+    fn inst_andi(&mut self) {
+        println!("andi r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+        self.gpr[self.inst.rt] = self.gpr[self.inst.rs] & self.inst.imm;
+    }
+
+    fn inst_cop0(&mut self) {
+        let cop0_op = (self.inst.v >> 21) & 0x1F;
+        match cop0_op {
+            0b00_100 => {
+                println!("mtc0 r{}, cp0gpr{} (r{}=${:08X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
+                self.cp0gpr[self.inst.rd] = self.gpr[self.inst.rt];
+
+                if self.inst.rd == 12 {
+                    if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
+                        panic!("CPU: unsupported 64-bit mode or little endian mode");
+                    }
+                }
+            },
+
+            _ => panic!("CPU: unknown cop0 op: 0b{:02b}_{:03b}", cop0_op >> 3, cop0_op & 0x07)
+        }
+    }
+
+    fn inst_cop1(&mut self) {
+        let cop1_op = (self.inst.v >> 21) & 0x1F;
+        match cop1_op {
+            0b00_110 => {
+                println!("ctc1 r{}, fcr{}", self.inst.rt, self.inst.rd);
+                self.fcr[self.inst.rd] = self.gpr[self.inst.rt];
+            },
+            _ => panic!("CPU: unknown cop1 op: 0b{:02b}_{:03b}", cop1_op >> 3, cop1_op & 0x07)
+        }
+    }
+
+    fn inst_beq(&mut self) {
+        println!("beq r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm);
+        let condition = self.gpr[self.inst.rs] == self.gpr[self.inst.rt];
+        self.branch(condition);
+    }
+
+    fn inst_beql(&mut self) {
+        println!("beql r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm);
+        let condition = self.gpr[self.inst.rs] == self.gpr[self.inst.rt];
+        self.branch_likely(condition);
+    }
+
+    fn inst_blezl(&mut self) {
+        println!("blezl r{}, ${:04X}", self.inst.rs, self.inst.imm);
+        let condition = (self.gpr[self.inst.rs] & 0x8000_0000) != 0 || (self.gpr[self.inst.rs] == 0);
+        self.branch_likely(condition);
+    }
+
+    fn inst_bne(&mut self) {
+        println!("bne r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm);
+        let condition = self.gpr[self.inst.rs] != self.gpr[self.inst.rt];
+        self.branch(condition);
+    }
+
+    fn inst_bnel(&mut self) {
+        println!("bnel r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm);
+        let condition = self.gpr[self.inst.rs] != self.gpr[self.inst.rt];
+        self.branch_likely(condition);
+    }
+
+    fn inst_cache(&mut self) {
+        println!("cache ${:02X},${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+    }
+
+    fn inst_jal(&mut self) {
+        let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
+        println!("jal ${:08X}", dest);
+        self.gpr[31] = self.pc;
+        self.pc = dest;
+    }
+
+    fn inst_lui(&mut self) {
+        println!("lui r{}, ${:04X}", self.inst.rt, self.inst.imm);
+        self.gpr[self.inst.rt] = self.inst.imm << 16;
+    }
+
+    fn inst_lbu(&mut self) {
+        println!("lbu r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        self.gpr[self.inst.rt] = self.read_u8(address as usize);
+    }
+
+    fn inst_lw(&mut self) {
+        println!("lw r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+        self.gpr[self.inst.rt] = self.bus.read_u32(address as usize);
+    }
+
+    fn inst_ori(&mut self) {
+        println!("ori r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+        self.gpr[self.inst.rt] = self.gpr[self.inst.rs] | self.inst.imm;
+    }
+
+    fn inst_regimm(&mut self) {
+        self.inst.regimm = (self.inst.v >> 16) & 0x1F;
+        self.regimm_table[self.inst.regimm as usize](self);
+    }
+
+    fn inst_slti(&mut self) {
+        println!("slti r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+
+        if (self.gpr[self.inst.rs] as i32) < (self.inst.signed_imm as i32) {
+            self.gpr[self.inst.rt] = 1;
+        } else {
+            self.gpr[self.inst.rt] = 0;
+        }
+    }
+
+    fn inst_special(&mut self) {
+        self.inst.special = self.inst.v & 0x3F;
+        self.special_table[self.inst.special as usize](self);
+    }
+
+    fn inst_sb(&mut self) {
+        println!("sb r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        self.write_u8((self.gpr[self.inst.rt] & 0xFF) as u8, address as usize);
+    }
+
+
+    fn inst_sw(&mut self) {
+        println!("sw r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+
+        self.bus.write_u32(self.gpr[self.inst.rt], address as usize);
+    }
+
+    fn inst_swl(&mut self) {
+        println!("swl r{}, ${:4X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let bytes_to_write = 4 - (address & 0x03);
+        match bytes_to_write {
+            1 => self.write_u8(((self.gpr[self.inst.rt] & 0xFF00_0000) >> 24) as u8, address),
+            2 => self.write_u16(((self.gpr[self.inst.rt] & 0xFFFF_0000) >> 16) as u16, address),
+            3 => self.write_u24((self.gpr[self.inst.rt] & 0xFFFF_FF00) >> 8, address),
+            4 => self.bus.write_u32(self.gpr[self.inst.rt], address),
+            _ => panic!("not possible"),
+        };
+    }
+
+    fn inst_swr(&mut self) {
+        println!("swr r{}, ${:4X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let bytes_to_write = 1 + (address & 0x03);
+        match bytes_to_write {
+            1 => self.write_u8((self.gpr[self.inst.rt] & 0x0000_00FF) as u8, address & !0x03),
+            2 => self.write_u16((self.gpr[self.inst.rt] & 0x0000_FFFF) as u16, address & !0x03),
+            3 => self.write_u24((self.gpr[self.inst.rt] & 0x00FF_FFFF) as u32, address & !0x03),
+            4 => self.bus.write_u32(self.gpr[self.inst.rt], address & !0x03),
+            _ => panic!("not possible"),
+        };
+    }
+
+    fn inst_xori(&mut self) {
+        println!("xori r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+        self.gpr[self.inst.rt] = self.gpr[self.inst.rs] ^ self.inst.imm;
+    }
+
+    fn regimm_unknown(&mut self) {
+        panic!("CPU: unimplemented regimm op: 0b{:02b}_{:03b}", self.inst.regimm >> 3, self.inst.regimm & 0x07);
+    }
+
+    fn regimm_invalid(&mut self) {
+        panic!("CPU: invalid regimm op: 0b{:02b}_{:03b}", self.inst.regimm >> 3, self.inst.regimm & 0x07);
+    }
+
+    fn regimm_bgezal(&mut self) {
+        println!("bgezal r{}, ${:04X}", self.inst.rs, self.inst.imm);
+
+        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
+
+        let condition = (self.gpr[self.inst.rs] & 0x8000_0000) == 0;
+        self.branch(condition);
+    }
+
+    fn regimm_bgezl(&mut self) {
+        println!("bgezl r{}, ${:04X}", self.inst.rs, self.inst.imm);
+
+        let condition = (self.gpr[self.inst.rs] & 0x8000_0000) == 0;
+        self.branch_likely(condition);
+    }
+
+    fn special_unknown(&mut self) {
+        panic!("CPU: unimplemented special op: 0b{:03b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07);
+    }
+
+    fn special_invalid(&mut self) {
+        panic!("CPU: invalid special op: 0b{:03b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07);
+    }
+
+    fn special_add(&mut self) {
+        println!("add r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // add does cause an overflow exception
+        let rs = self.gpr[self.inst.rs];
+        let rt = self.gpr[self.inst.rt];
+
+        let result = rs.wrapping_add(rt);
+        // if addends had the same sign but the result differs, overflow occurred
+        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
+            panic!("overflow exception occurred");
+        } else {
+            self.gpr[self.inst.rd] = result;
+        }
+    }
+
+    fn special_addu(&mut self) {
+        println!("addu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // addu does not cause an overflow exception
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
+    }
+
+    fn special_and(&mut self) {
+        println!("and r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
+    }
+
+    fn special_jr(&mut self) {
+        println!("jr r{}", self.inst.rs);
+        self.pc = self.gpr[self.inst.rs];
+    }
+
+    fn special_mfhi(&mut self) {
+        println!("mfhi r{}", self.inst.rd);
+        self.gpr[self.inst.rd] = self.hi;
+    }
+
+    fn special_mflo(&mut self) {
+        println!("mflo r{}", self.inst.rd);
+        self.gpr[self.inst.rd] = self.lo;
+    }
+
+    fn special_multu(&mut self) {
+        println!("multu r{}, r{}", self.inst.rs, self.inst.rt);
+        let result = (self.gpr[self.inst.rs] as u64) * (self.gpr[self.inst.rt] as u64);
+        // multu results are available in the next instruction since the multiply
+        // was started earlier in the pipeline
+        self.lo = (result & 0xFFFF_FFFF) as u32;
+        self.hi = ((result >> 32) & 0xFFFF_FFFF) as u32;
+    }
+
+    fn special_nor(&mut self) {
+        println!("nor r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        self.gpr[self.inst.rd] = !(self.gpr[self.inst.rs] | self.gpr[self.inst.rt]);
+    }
+
+    fn special_or(&mut self) {
+        println!("or r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] | self.gpr[self.inst.rt];
+    }
+
+    fn special_sll(&mut self) {
+        println!("sll r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
+    }
+
+    fn special_sllv(&mut self) {
+        println!("sllv r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (self.gpr[self.inst.rs] & 0x1F);
+    }
+
+    fn special_slt(&mut self) {
+        println!("slt r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        // set rd to 1 if rs < rt, otherwise 0
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rs] as i32) < (self.gpr[self.inst.rt] as i32)) as u32;
+    }
+
+    fn special_sltu(&mut self) {
+        println!("sltu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        // set rd to 1 if rs < rt, otherwise 0
+        self.gpr[self.inst.rd] = (self.gpr[self.inst.rs] < self.gpr[self.inst.rt]) as u32;
+    }
+
+    fn special_srl(&mut self) {
+        println!("srl r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> self.inst.sa;
+    }
+
+    fn special_srlv(&mut self) {
+        println!("srlv r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x1F);
+    }
+
+    fn special_subu(&mut self) {
+        println!("subu r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+        // subu does not cause an overflow exception
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
+    }
+
+    fn special_xor(&mut self) {
+        println!("xor r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
+
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] ^ self.gpr[self.inst.rt];
     }
 }
