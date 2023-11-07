@@ -30,8 +30,10 @@ impl Addressable for RdramInterface {
         match offset {
             // RDRAM memory space
             0x0000_0000..=0x03EF_FFFF => {
-                let rdram_address = offset & 0x03FF_FFFF;
-                self.ram[(rdram_address >> 2) as usize]
+                let rdram_address = ((offset & 0x03FF_FFFF) >> 2) as usize;
+                if rdram_address < self.ram.len() {
+                    self.ram[rdram_address]
+                } else { 0 }
             },
 
             // RDRAM registers

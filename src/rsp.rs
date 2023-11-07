@@ -4,6 +4,9 @@ use crate::*;
 /// Resides on the die of the RCP.
 pub struct Rsp {
     mem: Vec<u32>,
+
+    pc: u32,
+
     si_status: u32,
 }
 
@@ -11,6 +14,7 @@ impl Rsp {
     pub fn new() -> Rsp {
         Rsp {
             mem: vec![0u32; 2*1024], // 8KiB
+            pc: 0xbfc0_0000,
             si_status: 0b0000_0000_0000_0001, // bit 0 (HALTED) set
         }
     }
@@ -31,17 +35,32 @@ impl Rsp {
                 (self.si_status & 0x04) >> 2
             },
 
-            _ => panic!("Unknown RSP register read ${:08X}", offset)
+            // SP_PC
+            0x8_0000 => {
+                println!("RSP: read SP_PC");
+
+                self.pc
+            },
+
+            _ => panic!("RSP: unknown register read ${:08X}", offset)
         }
     }
 
-    fn write_register(&mut self, _value: u32, offset: usize) {
+    fn write_register(&mut self, value: u32, offset: usize) {
         match offset {
             // SP_STATUS 
             0x4_0010 => {
                 println!("RSP: write SP_STATUS");
             },
-            _ => panic!("Unknown RSP register write ${:08X}", offset)
+
+            // SP_PC
+            0x8_0000 => {
+                println!("RSP: write SP_PC value=${:08X}", value);
+
+                self.pc = value;
+            },
+
+            _ => panic!("RSP: unknown register write ${:08X}", offset)
         };
     }
 }

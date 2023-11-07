@@ -1,5 +1,6 @@
 use std::cmp;
 use std::fs;
+use std::str;
 
 use crate::*;
 
@@ -11,6 +12,8 @@ pub struct PeripheralInterface {
     dma_status: u32,
 
     cartridge_rom: Vec<u8>,
+
+    debug_buffer: Vec<u8>,
 }
 
 impl PeripheralInterface {
@@ -22,6 +25,8 @@ impl PeripheralInterface {
             cart_addr: 0,
             dma_status: 0,
             cartridge_rom: cartridge_rom,
+
+            debug_buffer: vec![0; 0x200],
         }
     }
 
@@ -142,7 +147,7 @@ impl Addressable for PeripheralInterface {
             println!("CART: read32 offset=${:08X}", cartridge_rom_offset);
 
             if cartridge_rom_offset >= self.cartridge_rom.len() {
-                0xFFFFFFFF
+                0x00000000
             } else {
                 ((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
                 | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
@@ -150,7 +155,7 @@ impl Addressable for PeripheralInterface {
                 | (self.cartridge_rom[cartridge_rom_offset + 3] as u32)
             }
         } else {
-            panic!("PI: invalid read")
+            panic!("PI: invalid read at ${:08X}", offset)
         }
     }
 
@@ -159,8 +164,20 @@ impl Addressable for PeripheralInterface {
 
         if offset < 0x0500_0000 {
             self.write_register(value, offset)
+        } else if offset == 0x13FF_0014 {
+            let slice = &self.debug_buffer[0..(value as usize)];
+            let msg = str::from_utf8(slice).unwrap();
+            println!("DEBUG: message: {}", msg);
+            WriteReturnSignal::None
+        } else if offset >= 0x13FF_0020 && offset <= 0x13FF_0220 {
+            let buffer_offset = offset - 0x13FF_0020;
+            self.debug_buffer[buffer_offset+0] = ((value >> 24) & 0xFF) as u8;
+            self.debug_buffer[buffer_offset+1] = ((value >> 16) & 0xFF) as u8;
+            self.debug_buffer[buffer_offset+2] = ((value >>  8) & 0xFF) as u8;
+            self.debug_buffer[buffer_offset+3] = ((value >>  0) & 0xFF) as u8;
+            WriteReturnSignal::None
         } else {
-            panic!("PI: write32 value=${:08X} offset=${:08X}", value, offset);
+            panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);
         }
     }
 }

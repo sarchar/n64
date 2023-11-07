@@ -33,6 +33,9 @@ impl Addressable for MipsInterface {
                 println!("MI: write MI_MODE value=${:08X}", value);
             },
 
+            0x0_000C => {
+                println!("MI: write MI_MASK value=${:08X}", value);
+            },
             _ => panic!("MI: unhandled write32 ${:08X}", offset),
         };
 

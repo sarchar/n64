@@ -18,6 +18,8 @@ pub struct Rcp {
     pi: PeripheralInterface,
     ri: RdramInterface,
     mi: MipsInterface,
+
+    debug_count: u32,
 }
 
 impl Rcp {
@@ -29,6 +31,8 @@ impl Rcp {
             mi: MipsInterface::new(),
             pif: pif,
             pi: pi,
+
+            debug_count: 1,
         }
     }
 
@@ -102,7 +106,10 @@ impl Rcp {
             7 => self.ri.write_u32(value, 0x0400_0000 | (offset & 0x000F_FFFF)),
 
             // SI 0x0480_0000-0x048F_FFFF
-            8 => panic!("Serial interface (SI) write"),
+            8 => {
+                println!("SERIAL: interface (SI) write value=${:08X} offset=${:08X}", value, offset);
+                WriteReturnSignal::None
+            },
 
             // 0x0409_0000-0x04FF_FFFF unmapped
             _ => panic!("invalid RCP write"),
@@ -191,8 +198,6 @@ impl Addressable for Rcp {
     }
 
     fn write_u32(&mut self, value: u32, address: usize) -> WriteReturnSignal {
-        if address == 0xB3FF0020 { panic!(""); }
-
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
         if address == 0x800003f0 {
