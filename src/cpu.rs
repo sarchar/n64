@@ -1,7 +1,7 @@
 use crate::*;
 
 const COP0_STATUS: usize = 12;
-//const Cop0_Config: usize = 16;
+const COP0_CONFIG: usize = 16;
 const COP0_LLADDR: usize = 17;
 
 struct InstructionDecode {
@@ -37,10 +37,10 @@ pub struct Cpu<T: Addressable> {
     lo: u32,
     hi: u32,
 
-    cp0gpr: [u32; 32],
+    cp0gpr: [u64; 32],
     llbit: bool,
 
-    fcr: [u32; 32],
+    fcr: [u64; 32],
     fgpr: [f64; 32],
 
     next_instruction: u32,    // emulates delay slot
@@ -70,10 +70,10 @@ impl<T: Addressable> Cpu<T> {
             hi  : 0,
             pc  : 0,
 
-            cp0gpr: [0u32; 32],
+            cp0gpr: [0u64; 32],
             llbit: false,
 
-            fcr: [0u32; 32],
+            fcr: [0u64; 32],
             fgpr: [0f64; 32],
 
             next_instruction: 0,
@@ -125,6 +125,9 @@ impl<T: Addressable> Cpu<T> {
 
     pub fn reset(&mut self) {
         self.pc = 0xBFC0_0000;
+
+        // COP0
+        self.cp0gpr[COP0_CONFIG] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
 
         // fetch next_instruction before starting the loop
         self.next_instruction = self.read_u32(self.pc as usize);
@@ -205,7 +208,11 @@ impl<T: Addressable> Cpu<T> {
     }
 
     pub fn step(&mut self) {
-        assert!((self.pc & 0x03) == 0);
+        // TODO temp check until address exceptions are implement
+        if (self.pc & 0x03) != 0 {
+            eprintln!("CPU: unaligned PC read");
+            self.pc &= !0x03;
+        }
 
         if self.pc == 0xA4001420 {
             self.bus.print_debug_ipl2();
@@ -267,7 +274,7 @@ impl<T: Addressable> Cpu<T> {
         let result = src.wrapping_add(self.inst.signed_imm as u32);
         let is_pos = (self.inst.imm & 0x8000) == 0;
         if self.inst.imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
-            panic!("overflow detected: src=${:08X} imm=${:04X} result=${:08X}", src, self.inst.imm as u32, result);
+            eprintln!("CPU: addi overflow detected: src=${:08X} imm=${:04X} result=${:08X}", src, self.inst.imm as u32, result);
         }
 
         self.gpr[self.inst.rt] = (result as i32) as u64;
@@ -290,12 +297,27 @@ impl<T: Addressable> Cpu<T> {
         match cop0_op {
             0b00_000 => {
                 println!("mfc0 r{}, cp0r{}", self.inst.rt, self.inst.rd);
-                self.gpr[self.inst.rt] = self.cp0gpr[self.inst.rd] as u64;
+                self.gpr[self.inst.rt] = (self.cp0gpr[self.inst.rd] as i32) as u64;
+            },
+
+            0b00_001 => {
+                println!("dmfc0 r{}, cp0r{}", self.inst.rt, self.inst.rd);
+                self.gpr[self.inst.rt] = self.cp0gpr[self.inst.rd];
             },
 
             0b00_100 => {
                 println!("mtc0 r{}, cp0r{} (r{}=${:08X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt] as u32);
-                self.cp0gpr[self.inst.rd] = self.gpr[self.inst.rt] as u32;
+                let val = self.gpr[self.inst.rt];
+
+                // fix bits of the Config register
+                self.cp0gpr[self.inst.rd] = match self.inst.rd {
+                    COP0_CONFIG => {
+                        let read_only_mask = 0xF0FF7FF0u64;
+                        (val & !read_only_mask) | (self.cp0gpr[COP0_CONFIG] & read_only_mask)
+                    },
+
+                    _ => { val },
+                };
 
                 if self.inst.rd == COP0_STATUS {
                     if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
@@ -303,6 +325,22 @@ impl<T: Addressable> Cpu<T> {
                     }
                 }
             },
+
+            0b00_101 => {
+                println!("dmtc0 r{}, cp0r{} (r{}=${:08X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt] as u32);
+                let val = self.gpr[self.inst.rt];
+
+                self.cp0gpr[self.inst.rd] = match self.inst.rd {
+                    _ => { val },
+                };
+
+                if self.inst.rd == COP0_STATUS {
+                    if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
+                        panic!("CPU: unsupported 64-bit mode or little endian mode");
+                    }
+                }
+            },
+
 
             0b10_000..=0b11_111 => {
                 let special = self.inst.v & 0x3F;
@@ -322,9 +360,30 @@ impl<T: Addressable> Cpu<T> {
     fn inst_cop1(&mut self) {
         let cop1_op = (self.inst.v >> 21) & 0x1F;
         match cop1_op {
+            0b00_001 => {
+                println!("mfc1 r{}, fgpr{} (r{}=${:X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
+                // TODO pretty sure this is not correct and should transfer half the register?
+                // see datasheet for MFCz
+                self.gpr[self.inst.rt] = if (self.inst.rd & 0x01) == 0 {
+                    (self.fgpr[self.inst.rd >> 1].to_bits() as i32) as u64
+                } else {
+                    ((self.fgpr[self.inst.rd >> 1].to_bits() >> 32) as i32) as u64
+                };
+            },
+
+            0b00_010 => {
+                println!("cfc1 r{}, fcr{}", self.inst.rt, self.inst.rd);
+                self.gpr[self.inst.rt] = (self.fcr[self.inst.rd] as i32) as u64;
+            },
+
+            0b00_101 => {
+                println!("dmtc1 r{}, fgpr{} (r{}=${:X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
+                self.fgpr[self.inst.rd] = f64::from_bits(self.gpr[self.inst.rt]);
+            },
+
             0b00_110 => {
                 println!("ctc1 r{}, fcr{}", self.inst.rt, self.inst.rd);
-                self.fcr[self.inst.rd] = self.gpr[self.inst.rt] as u32;
+                self.fcr[self.inst.rd] = self.gpr[self.inst.rt];
             },
             _ => panic!("CPU: unknown cop1 op: 0b{:02b}_{:03b}", cop1_op >> 3, cop1_op & 0x07)
         }
@@ -399,6 +458,11 @@ impl<T: Addressable> Cpu<T> {
 
     fn inst_j(&mut self) {
         let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
+
+        if (dest & 0x03) != 0 {
+            eprintln!("CPU: j address exception");
+        }
+
         println!("j ${:08X}", dest);
         self.pc = dest;
     }
@@ -406,6 +470,11 @@ impl<T: Addressable> Cpu<T> {
     fn inst_jal(&mut self) {
         let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
         println!("jal ${:08X}", dest);
+
+        if (dest & 0x03) != 0 {
+            eprintln!("CPU: jal address exception");
+        }
+
         self.gpr[31] = (self.pc as i32) as u64;
         self.pc = dest;
     }
@@ -469,7 +538,7 @@ impl<T: Addressable> Cpu<T> {
 
         // the "linked part" sets the LLAddr register in cop0 to the physical address
         // of the read, and the LLbit to 1
-        self.cp0gpr[COP0_LLADDR] = (address & 0x1FFF_FFFF) as u32; // TODO use proper physical address
+        self.cp0gpr[COP0_LLADDR] = address & 0x1FFF_FFFF; // TODO use proper physical address
         self.llbit = true;
     }
 
@@ -501,7 +570,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            panic!("address exception!");
+            eprintln!("CPU: lw address exception!");
         }
 
         self.gpr[self.inst.rt] = (self.read_u32(address as usize) as i32) as u64;
@@ -527,7 +596,7 @@ impl<T: Addressable> Cpu<T> {
     fn inst_sc(&mut self) {
         println!("sc r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as u32;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
             panic!("address exception!");
         }
@@ -572,7 +641,7 @@ impl<T: Addressable> Cpu<T> {
         let mem = if (address & 0xF000_0000) != 0xA000_0000 {
             self.read_u64(address & !0x07)  // this read "simulates" the cache miss and fetch and 
                                             // doesn't happen for uncached addresses
-        } else { panic!("test"); 0 };
+        } else { panic!("test"); /*0*/ };
 
         // combine register and mem
         let shift = (address & 0x07) << 3;
@@ -595,7 +664,7 @@ impl<T: Addressable> Cpu<T> {
         let mem = if (address & 0xF000_0000) != 0xA000_0000 {
             self.read_u64(address & !0x07)  // this read "simulates" the cache miss and fetch and 
                                             // doesn't happen for uncached addresses
-        } else { panic!("test"); 0 };
+        } else { panic!("test"); /*0*/ };
 
         // combine register and mem
         let shift = 56 - ((address & 0x07) << 3);
@@ -635,7 +704,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            panic!("address exception!");
+            eprintln!("CPU: sw address exception");
         }
 
         self.write_u32(self.gpr[self.inst.rt] as u32, address as usize);
@@ -649,7 +718,7 @@ impl<T: Addressable> Cpu<T> {
         let mem = if (address & 0xF000_0000) != 0xA000_0000 {
             self.read_u32(address & !0x03)  // this read "simulates" the cache miss and fetch and 
                                             // doesn't happen for uncached addresses
-        } else { panic!("test"); 0 };
+        } else { panic!("test"); /*0*/ };
 
         // combine register and mem
         let shift = (address & 0x03) << 3;
@@ -671,7 +740,7 @@ impl<T: Addressable> Cpu<T> {
         let mem = if (address & 0xF000_0000) != 0xA000_0000 {
             self.read_u32(address & !0x03)  // this read "simulates" the cache miss and fetch and 
                                             // doesn't happen for uncached addresses
-        } else { panic!("test"); 0 };
+        } else { panic!("test"); /*0*/ };
 
         // combine register and mem
         let shift = 24 - ((address & 0x03) << 3);
@@ -778,7 +847,7 @@ impl<T: Addressable> Cpu<T> {
         let dest = self.gpr[self.inst.rs] as u32;
 
         if (dest & 0x03) != 0 {
-            panic!("address exception!");
+            eprintln!("CPU: jalr address exception!");
         }
 
         self.pc = dest;
@@ -786,7 +855,13 @@ impl<T: Addressable> Cpu<T> {
 
     fn special_jr(&mut self) {
         println!("jr r{}", self.inst.rs);
-        self.pc = self.gpr[self.inst.rs] as u32;
+        let dest = self.gpr[self.inst.rs] as u32;
+
+        if (dest & 0x03) != 0 {
+            eprintln!("CPU: jr address exception!");
+        }
+
+        self.pc = dest;
     }
 
     fn special_mfhi(&mut self) {

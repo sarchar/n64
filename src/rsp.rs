@@ -14,7 +14,7 @@ impl Rsp {
     pub fn new() -> Rsp {
         Rsp {
             mem: vec![0u32; 2*1024], // 8KiB
-            pc: 0xbfc0_0000,
+            pc: 0x0000_0000,
             si_status: 0b0000_0000_0000_0001, // bit 0 (HALTED) set
         }
     }
