@@ -35,8 +35,8 @@ pub struct Cpu<T: Addressable> {
     pc: u32,
 
     gpr: [u64; 32],
-    lo: u32,
-    hi: u32,
+    lo: u64,
+    hi: u64,
 
     cp0gpr: [u64; 32],
     llbit: bool,
@@ -87,7 +87,7 @@ impl<T: Addressable> Cpu<T> {
    /* 001_ */   Cpu::<T>::inst_addi   , Cpu::<T>::inst_addiu  , Cpu::<T>::inst_slti   , Cpu::<T>::inst_sltiu  , Cpu::<T>::inst_andi   , Cpu::<T>::inst_ori    , Cpu::<T>::inst_xori   , Cpu::<T>::inst_lui    ,
    /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
    /* 011_ */   Cpu::<T>::inst_daddi  , Cpu::<T>::inst_daddiu , Cpu::<T>::inst_ldl    , Cpu::<T>::inst_ldr    , Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
-   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown,
+   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwl    , Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwr    , Cpu::<T>::inst_unknown,
    /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_sdl    , Cpu::<T>::inst_sdr    , Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
    /* 110_ */   Cpu::<T>::inst_ll     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_ld     ,
    /* 111_ */   Cpu::<T>::inst_sc     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_sdc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_sd
@@ -95,16 +95,15 @@ impl<T: Addressable> Cpu<T> {
 
             special_table: [
                     //   _000                       _001                       _010                       _011                       _100                       _101                       _110                       _111
-   /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_sra    , Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_unknown,
+   /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_sra    , Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_srav   ,
    /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_jalr   , Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_sync   ,
-   /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
-   /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown,
+   /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_dsllv  , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrlv  , Cpu::<T>::special_dsrav  ,
+   /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_div    , Cpu::<T>::special_divu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_ddiv   , Cpu::<T>::special_ddivu  ,
    /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_sub    , Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
    /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_dadd   , Cpu::<T>::special_daddu  , Cpu::<T>::special_dsub   , Cpu::<T>::special_dsubu  ,
    /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
-   /* 111_ */   Cpu::<T>::special_dsll   , Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_dsll32 , Cpu::<T>::special_invalid, Cpu::<T>::special_dslr32 , Cpu::<T>::special_unknown,
+   /* 111_ */   Cpu::<T>::special_dsll   , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrl   , Cpu::<T>::special_dsra   , Cpu::<T>::special_dsll32 , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrl32 , Cpu::<T>::special_dsra32 ,
             ],
-
 
             regimm_table: [
                     //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
@@ -481,11 +480,29 @@ impl<T: Addressable> Cpu<T> {
         self.pc = dest;
     }
 
+    fn inst_lb(&mut self) {
+        println!("lb r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        self.gpr[self.inst.rt] = (self.read_u8(address as usize) as u8) as u64;
+    }
+
     fn inst_lbu(&mut self) {
         println!("lbu r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         self.gpr[self.inst.rt] = self.read_u8(address as usize) as u64;
+    }
+
+    fn inst_ld(&mut self) {
+        println!("ld r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+
+        self.gpr[self.inst.rt] = self.read_u64(address as usize);
     }
 
     fn inst_ldl(&mut self) {
@@ -549,24 +566,6 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = self.inst.signed_imm << 16;
     }
 
-    fn inst_lb(&mut self) {
-        println!("lb r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
-
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        self.gpr[self.inst.rt] = (self.read_u8(address as usize) as u8) as u64;
-    }
-
-    fn inst_ld(&mut self) {
-        println!("ld r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
-
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        if (address & 0x03) != 0 {
-            panic!("address exception!");
-        }
-
-        self.gpr[self.inst.rt] = self.read_u64(address as usize);
-    }
-
     fn inst_lw(&mut self) {
         println!("lw r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
@@ -577,6 +576,45 @@ impl<T: Addressable> Cpu<T> {
 
         self.gpr[self.inst.rt] = (self.read_u32(address as usize) as i32) as u64;
     }
+
+    fn inst_lwl(&mut self) {
+        println!("lwl r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // fetch the u32 at the specified address
+        let mem = self.read_u32(address & !0x03);
+
+        // combine register and mem
+        let shift = (address & 0x03) << 3;
+        let new = if shift == 0 {
+            mem
+        } else {
+            ((self.gpr[self.inst.rt] as u32) & (u32::MAX >> (32 - shift))) | (mem << shift)
+        };
+
+        // set value
+        self.gpr[self.inst.rt] = (new as i32) as u64; 
+    }
+
+    fn inst_lwr(&mut self) {
+        println!("lwr r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // fetch the u32 at the specified address
+        let mem = self.read_u32(address & !0x03);
+
+        // combine register and mem
+        let shift = (address & 0x03) << 3;
+        let new = if shift == 24 { // handle case where no shift occurs
+            mem 
+        } else {
+            ((self.gpr[self.inst.rt] as u32) & (u32::MAX << (8 + shift))) | (mem >> (24 - shift))
+        };
+
+        // set value
+        self.gpr[self.inst.rt] = (new as i32) as u64; 
+    }
+
 
     fn inst_ori(&mut self) {
         println!("ori r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
@@ -850,10 +888,81 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
     }
 
+    fn divide(&mut self, dividend: i64, divisor: i64) {
+        if divisor != 0 {
+            if dividend == i64::MIN && divisor == -1 {
+                (self.lo, self.hi) = (i64::MIN as u64, 0)
+            } else {
+                // ideally the compiler will optmize this to a divmod operation
+                (self.lo, self.hi) = ((dividend / divisor) as u64, (dividend % divisor) as u64)
+            }
+        } else {
+            // with divisor == 0, set self.lo (the quotient) to 1 or -1 basd on the sign
+            // of the dividend
+            self.lo = if dividend < 0 { 1 } else { u64::MAX };
+            self.hi = dividend as u64;
+        }
+    }
+
+    fn divide_unsigned(&mut self, dividend: u64, divisor: u64) {
+        if divisor != 0 {
+            // ideally the compiler will optmize this to a divmod operation
+            (self.lo, self.hi) = (dividend / divisor, dividend % divisor)
+        } else {
+            self.lo = u64::MAX;
+            self.hi = dividend as u64;
+        }
+    }
+
+    fn special_ddiv(&mut self) {
+        println!("ddiv r{}, r{}", self.inst.rs, self.inst.rt);
+
+        let rs = self.gpr[self.inst.rs] as i64;
+        let rt = self.gpr[self.inst.rt] as i64;
+        self.divide(rs, rt);
+    }
+
+    fn special_ddivu(&mut self) {
+        println!("ddivu r{}, r{}", self.inst.rs, self.inst.rt);
+
+        // unsigned 64 bit values
+        self.divide_unsigned(self.gpr[self.inst.rs], self.gpr[self.inst.rt]);
+    }
+
+    fn special_div(&mut self) {
+        println!("div r{}, r{}", self.inst.rs, self.inst.rt);
+
+        // must be 32-bit sign extended values
+        let rs = (self.gpr[self.inst.rs] as i32) as i64;
+        let rt = (self.gpr[self.inst.rt] as i32) as i64;
+        self.divide(rs, rt);
+
+        // with the 32 bit divide the sign needs to come from bit 31
+        self.lo = (self.lo as i32) as u64;
+        self.hi = (self.hi as i32) as u64;
+    }
+
+    fn special_divu(&mut self) {
+        println!("divu r{}, r{}", self.inst.rs, self.inst.rt);
+
+        // unsigned 32 bit values
+        let rs = self.gpr[self.inst.rs] & 0xFFFF_FFFF;
+        let rt = self.gpr[self.inst.rt] & 0xFFFF_FFFF;
+        self.divide_unsigned(rs, rt);
+
+        // with the 32 bit divide the sign needs to come from bit 31
+        self.lo = (self.lo as i32) as u64;
+        self.hi = (self.hi as i32) as u64;
+    }
 
     fn special_dsll(&mut self) {
         println!("dsll r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
+    }
+
+    fn special_dsllv(&mut self) {
+        println!("dsll r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (self.gpr[self.inst.rs] & 0x3F);
     }
 
     fn special_dsll32(&mut self) {
@@ -861,9 +970,34 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (32 + self.inst.sa);
     }
 
-    fn special_dslr32(&mut self) {
+    fn special_dsra(&mut self) {
+        println!("dsra r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i64) >> self.inst.sa) as u64;
+    }
+
+    fn special_dsrav(&mut self) {
+        println!("dsrav r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i64) >> (self.gpr[self.inst.rs] & 0x3F)) as u64;
+    }
+
+    fn special_dsra32(&mut self) {
+        println!("dsra32 r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i64) >> (32 + self.inst.sa)) as u64;
+    }
+
+    fn special_dsrl32(&mut self) {
         println!("dslr32 r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (32 + self.inst.sa);
+    }
+
+    fn special_dsrl(&mut self) {
+        println!("dsrl r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> self.inst.sa;
+    }
+
+    fn special_dsrlv(&mut self) {
+        println!("dsrlv r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x3F);
     }
 
     fn special_dsub(&mut self) {
@@ -912,12 +1046,12 @@ impl<T: Addressable> Cpu<T> {
 
     fn special_mfhi(&mut self) {
         println!("mfhi r{}", self.inst.rd);
-        self.gpr[self.inst.rd] = (self.hi as i32) as u64;
+        self.gpr[self.inst.rd] = self.hi;
     }
 
     fn special_mflo(&mut self) {
         println!("mflo r{}", self.inst.rd);
-        self.gpr[self.inst.rd] = (self.lo as i32) as u64;
+        self.gpr[self.inst.rd] = self.lo;
     }
 
     fn special_mult(&mut self) {
@@ -928,8 +1062,8 @@ impl<T: Addressable> Cpu<T> {
 
         // multu results are available in the next instruction since the multiply
         // was started earlier in the pipeline
-        self.lo = result as u32;
-        self.hi = (result >> 32) as u32;
+        self.lo = result & 0xFFFF_FFFF;
+        self.hi = result >> 32;
     }
 
     fn special_multu(&mut self) {
@@ -940,8 +1074,8 @@ impl<T: Addressable> Cpu<T> {
 
         // multu results are available in the next instruction since the multiply
         // was started earlier in the pipeline
-        self.lo = result as u32;
-        self.hi = (result >> 32) as u32;
+        self.lo = result & 0xFFFF_FFFF;
+        self.hi = result >> 32;
     }
 
     fn special_nor(&mut self) {
@@ -984,21 +1118,31 @@ impl<T: Addressable> Cpu<T> {
 
     fn special_sra(&mut self) {
         println!("sra r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
-        // truncate to u32, convert to signed, shift (fills 1s in the upper bits) and sign extend to u64
-        self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) as i32) >> self.inst.sa) as u64;
 
-        // check for correctness (TODO remove later)
-        if ((self.gpr[self.inst.rt] as u32) as i32) < 0 { assert!((self.gpr[self.inst.rd] as i64) < 0); }
+        // TODO I'm very confused here. The VR4300 datasheet is very clear that a 32-bit signed
+        // integer is right shifted, and at the end 64-bit sign extended, but n64-systemtest
+        // seems to check that it's just a 64 shift and then truncated to 32 bits and then sign
+        // extended.  I've left the "working" one in place but the one I think is correct (at least
+        // until someone explains to my why it isn't!) below.
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] >> self.inst.sa) as i32) as u64;
+
+        // truncate to u32, convert to signed, shift (fills 1s in the upper bits) and sign extend to u64
+        //self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) as i32) >> self.inst.sa) as u64;
+    }
+
+    fn special_srav(&mut self) {
+        println!("srav r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x1F)) as i32) as u64;
     }
 
     fn special_srl(&mut self) {
         println!("srl r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
-        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as u32) >> self.inst.sa) as u64;
+        self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) >> self.inst.sa) as i32) as u64;
     }
 
     fn special_srlv(&mut self) {
         println!("srlv r{}, r{}, r{}", self.inst.rd, self.inst.rt, self.inst.rs);
-        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as u32) >> (self.gpr[self.inst.rs] & 0x1F)) as u64;
+        self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) >> (self.gpr[self.inst.rs] & 0x1F)) as i32) as u64;
     }
 
     fn special_sub(&mut self) {
