@@ -32,7 +32,7 @@ const _ExceptionCode_Sys  : u64 = 8;  // Syscall exception
 const _ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
 const _ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
 const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
-const _ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
+const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
 const _ExceptionCode_Tr   : u64 = 13; // Trap instruction
 const _ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 const _ExceptionCode_WATCH: u64 = 23; // Watch exception
@@ -287,6 +287,10 @@ impl<T: Addressable> Cpu<T> {
         self.exception(exception_code);
     }
 
+    fn overflow_exception(&mut self) {
+        self.exception(ExceptionCode_Ov);
+    }
+
     fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_CpU);
@@ -417,11 +421,12 @@ impl<T: Addressable> Cpu<T> {
         println!("addi r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
 
         // integer overflow exception occurs with ADDI, unlike ADDIU
-        let src = self.gpr[self.inst.rs] as u32;
-        let result = src.wrapping_add(self.inst.signed_imm as u32);
-        let is_pos = (self.inst.imm & 0x8000) == 0;
-        if self.inst.imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
-            eprintln!("CPU: addi overflow detected: src=${:08X} imm=${:04X} result=${:08X}", src, self.inst.imm as u32, result);
+        let rs = self.gpr[self.inst.rs] as u32;
+        let rt = self.inst.signed_imm as u32;
+        let result = rs.wrapping_add(rt);
+        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
+            eprintln!("CPU: addi overflow detected: rs=${:08X} imm=${:04X} result=${:08X}", rs, rt, result);
+            self.overflow_exception();
         }
 
         self.gpr[self.inst.rt] = (result as i32) as u64;
@@ -689,7 +694,8 @@ impl<T: Addressable> Cpu<T> {
         let result = src.wrapping_add(self.inst.signed_imm);
         let is_pos = (self.inst.imm & 0x8000) == 0;
         if self.inst.imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
-            panic!("overflow detected: src=${:16} imm=${:04X} result=${:16}", src, self.inst.imm, result);
+            eprintln!("CPU: daddi overflow detected: src=${:16} imm=${:04X} result=${:16}", src, self.inst.imm, result);
+            self.overflow_exception();
         }
 
         self.gpr[self.inst.rt] = result;
@@ -1175,7 +1181,7 @@ impl<T: Addressable> Cpu<T> {
         let result = rs.wrapping_add(rt);
         // if addends had the same sign but the result differs, overflow occurred
         if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
-            panic!("overflow exception occurred");
+            self.overflow_exception();
         } else {
             self.gpr[self.inst.rd] = (result as i32) as u64;
         }
