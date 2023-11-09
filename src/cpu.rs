@@ -1,9 +1,43 @@
+#![allow(non_upper_case_globals)]
+
 use crate::*;
 
-const COP0_STATUS: usize = 12;
-const COP0_EPC   : usize = 14; // Exception Program Counter
-const COP0_CONFIG: usize = 16;
-const COP0_LLADDR: usize = 17;
+// Exception handling registers
+const Cop0_Context : usize = 4;
+const Cop0_BadVAddr: usize = 8; // Bad Virtual Address
+const Cop0_Count   : usize = 9;
+const Cop0_Compare : usize = 11;
+const Cop0_Status  : usize = 12;
+const Cop0_Cause   : usize = 13;
+const Cop0_EPC     : usize = 14; // Exception Program Counter
+const _COP0_WATCHLO : usize = 18;
+const _COP0_WATCHHI : usize = 19;
+const Cop0_XContext: usize = 20;
+const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
+
+const Cop0_Config: usize = 16;
+const Cop0_LLAddr: usize = 17;
+
+const STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
+
+const ExceptionCode_Int  : u64 = 0;  // interrupt
+const _ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
+const _ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
+const _ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
+const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruction fetch)
+const ExceptionCode_AdES : u64 = 5;  // Address Error exception (store)
+const _ExceptionCode_IBE  : u64 = 6;  // Bus Error exception (instruction fetch)
+const _ExceptionCode_DBE  : u64 = 7;  // Bus Error exception (data reference: load or store)
+const _ExceptionCode_Sys  : u64 = 8;  // Syscall exception
+const _ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
+const _ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
+const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
+const _ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
+const _ExceptionCode_Tr   : u64 = 13; // Trap instruction
+const _ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
+const _ExceptionCode_WATCH: u64 = 23; // Watch exception
+
+const InterruptCode_Timer: u64 = 0x80;
 
 struct InstructionDecode {
     v : u32,      // full 32-bit instruction
@@ -33,18 +67,20 @@ pub struct Cpu<T: Addressable> {
     bus: T,
 
     pc: u32,
+    next_instruction: u32,    // emulates delay slot
+    next_instruction_pc: u32, // for printing correct delay slot addresses
+    is_delay_slot: bool,      // true if the currently executing instruction is in a delay slot
+    next_is_delay_slot: bool, // set to true on branching instructions
 
     gpr: [u64; 32],
     lo: u64,
     hi: u64,
 
     cp0gpr: [u64; 32],
+    half_clock: u32,
     llbit: bool,
 
     cop1: cop1::Cop1,
-
-    next_instruction: u32,    // emulates delay slot
-    next_instruction_pc: u32, // for printing correct delay slot addresses
 
     instruction_table: [CpuInstruction<T>; 64],
     special_table: [CpuInstruction<T>; 64],
@@ -65,18 +101,21 @@ impl<T: Addressable> Cpu<T> {
         let mut cpu = Cpu {
             bus: bus,
 
+            pc  : 0,
+            next_instruction: 0,
+            next_instruction_pc: 0,
+            is_delay_slot: false,
+            next_is_delay_slot: false,
+
             gpr : [0u64; 32],
             lo  : 0,
             hi  : 0,
-            pc  : 0,
 
             cp0gpr: [0u64; 32],
+            half_clock: 0,
             llbit: false,
 
             cop1: cop1::Cop1::new(),
-
-            next_instruction: 0,
-            next_instruction_pc: 0,
 
             // Sorry for making these so wide, but it maps to the instruction decode table in the datasheet better!
             instruction_table: [
@@ -95,7 +134,7 @@ impl<T: Addressable> Cpu<T> {
                     //   _000                       _001                       _010                       _011                       _100                       _101                       _110                       _111
    /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_sra    , Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_srav   ,
    /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_jalr   , Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_sync   ,
-   /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_unknown, Cpu::<T>::special_mflo   , Cpu::<T>::special_unknown, Cpu::<T>::special_dsllv  , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrlv  , Cpu::<T>::special_dsrav  ,
+   /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_mthi   , Cpu::<T>::special_mflo   , Cpu::<T>::special_mtlo   , Cpu::<T>::special_dsllv  , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrlv  , Cpu::<T>::special_dsrav  ,
    /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_div    , Cpu::<T>::special_divu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_ddiv   , Cpu::<T>::special_ddivu  ,
    /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_sub    , Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
    /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_dadd   , Cpu::<T>::special_daddu  , Cpu::<T>::special_dsub   , Cpu::<T>::special_dsubu  ,
@@ -126,16 +165,23 @@ impl<T: Addressable> Cpu<T> {
 
         // COP0
         // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
-        self.cp0gpr[COP0_CONFIG] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
+        self.cp0gpr[Cop0_Config] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
+        self.cp0gpr[Cop0_Status] = 0x200004; // BEV=1, ERL=1, SR=0 (SR will need to be 1 on soft reset), IE=0
 
         // fetch next_instruction before starting the loop
-        self.next_instruction = self.read_u32(self.pc as usize);
-        self.next_instruction_pc = self.pc;
-        self.pc += 4;
+        self.prefetch();
+        self.next_is_delay_slot = false;
     }
 
-    pub fn pc(&self) -> &u32 {
-        &self.pc
+    fn ie(&self) -> bool {
+        (self.cp0gpr[Cop0_Status] & 0x01) != 0
+    }
+
+    fn interrupts_enabled(&self, interrupt_number: u64) -> bool {
+        // interrupts are enabled when IE is set and EXL (exception level) and ERL (error level) are 0
+        // (and also when the IM bit is set for the specified interrupt)
+        let check = (0x100 << interrupt_number) | 0x07;
+        (self.cp0gpr[Cop0_Status] & check) == (check & !0x06)
     }
 
     fn read_u8(&mut self, address: usize) -> u32 {
@@ -184,6 +230,81 @@ impl<T: Addressable> Cpu<T> {
         self.write_u32(value as u32, address + 4)
     }
 
+    // prefetch the next instruction
+    fn prefetch(&mut self) {
+        self.next_instruction = self.read_u32(self.pc as usize);
+        self.next_instruction_pc = self.pc;
+        self.pc += 4;
+    }
+
+    fn exception(&mut self, exception_code: u64) {
+        // clear BD, exception code and bits that should be 0
+        self.cp0gpr[Cop0_Cause] &= !0xC0FF_00FF;
+
+        // set the exception code
+        self.cp0gpr[Cop0_Cause] |= exception_code << 2;
+
+        // set the EXL bit to prevent another exception
+        self.cp0gpr[Cop0_Status] |= 0x02;
+
+        // set the Exception Program Counter to the currently executing instruction
+        // which is pc-8.  pc-8 will always be the currently executing instruction
+        // because 1) branch instructions do not cause exceptions, 2) jump instructions 
+        // only cause exceptions when the address is invalid (and therefore haven't 
+        // changed pc yet), and 3) no other instructions modify pc. Moreover, if we're
+        // in a delay slot, we need to subtract another 4
+        self.cp0gpr[Cop0_EPC] = (if self.is_delay_slot {
+            // also set the BD flag
+            self.cp0gpr[Cop0_Cause] |= 0x8000_0000;
+            self.pc.wrapping_sub(12)
+        } else {
+            self.pc.wrapping_sub(8)
+        } as i32) as u64;
+
+        // set PC and discard the delay slot. PC is set to the vector base determined by the BEV
+        // bit in Cop0_Status.
+        // TODO TLB miss needs to branch to base plus offset 0x000
+        // TODO XTLB miss needs to branch to base plus offset 0x080
+        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 { 0x8000_0000 } else { 0xBFC0_0200 } + 0x180;
+
+        // we need to throw away next_instruction, so prefetch the new instruction now
+        self.prefetch();
+    }
+
+    fn address_exception(&mut self, address: u64, is_write: bool) {
+        println!("CPU: address exception!");
+
+        self.cp0gpr[Cop0_BadVAddr] = address;
+        let bad_vpn2 = address >> 13;
+        self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
+
+        // TODO the XContext needs the page table
+        self.cp0gpr[Cop0_XContext] = ((self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) << 10) 
+                                     | ((address >> 31) & 0x1_8000_0000) 
+                                     | ((bad_vpn2 & 0x7FF_FFFF) << 4);
+
+        let exception_code = if is_write { ExceptionCode_AdES } else { ExceptionCode_AdEL };
+        self.exception(exception_code);
+    }
+
+    fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) {
+        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
+        self.exception(ExceptionCode_CpU);
+        eprintln!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
+    }
+
+    fn interrupt(&mut self, interrupt_signal: u64) {
+        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
+
+        eprintln!("CPU: interrupt!");
+        self.exception(ExceptionCode_Int);
+    }
+
+    #[inline(always)]
+    fn timer_interrupt(&mut self) {
+        self.interrupt(InterruptCode_Timer);
+    }
+
     #[inline(always)]
     fn branch(&mut self, condition: bool) {
         if condition {
@@ -191,6 +312,9 @@ impl<T: Addressable> Cpu<T> {
             // plus the sign extended and left-shifted immediate offset
             self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u32) << 2);
         }
+
+        // note that the next instruction to execute is a delay slot instruction
+        self.next_is_delay_slot = true;
     }
 
     // branch likely instructions discards the delay slot when the branch is not taken
@@ -198,26 +322,50 @@ impl<T: Addressable> Cpu<T> {
     fn branch_likely(&mut self, condition: bool) {
         if condition {
             self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u32) << 2);
+
+            // note that the next instruction to execute is a delay slot instruction
+            self.next_is_delay_slot = true;
         } else {
             // we need to throw away next_instruction when branch is not taken
-            self.next_instruction = self.read_u32(self.pc as usize); // pc already points after the delay slot
-            self.next_instruction_pc = self.pc;
-            self.pc += 4;
+            self.prefetch();
         }
     }
 
     pub fn step(&mut self) {
-        // TODO temp check until address exceptions are implement
-        if (self.pc & 0x03) != 0 {
-            eprintln!("CPU: unaligned PC read");
-            self.pc &= !0x03;
-        }
-
         if self.pc == 0xA4001420 {
             self.bus.print_debug_ipl2();
         } else if self.pc == 0x8000_02B4 {
             println!("CPU: Starting cartridge ROM!");
         }
+
+        // increment Cop0_Count at half PClock and trigger exception
+        self.half_clock ^= 1;
+        self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + self.half_clock) as u64;
+        if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
+            // Timer interrupt enable, bit 7 of IM field 
+            if self.interrupts_enabled(STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG) { // TODO move to self.timer_interrupt()
+                eprintln!("COP0: timer interrupt");
+                self.timer_interrupt();
+            }
+        }
+
+        // TODO temp check until address exceptions are implement
+        if (self.pc & 0x03) != 0 {
+            println!("CPU: unaligned PC read at PC=${:08X}", self.pc);
+
+            // I don't fully understand the pipeline, so this is a bit of a hack
+            // to get the address exception correct when reading new instructions
+            // Note, the address that caused the error and the EPC are different
+            let bad_vaddr = self.pc; // for BadVAddr
+            self.pc += 8;            // for Cop0_EPC
+            self.address_exception((bad_vaddr as i32) as u64, false);
+
+            return;
+        }
+
+        // in delay slot flag
+        self.is_delay_slot = self.next_is_delay_slot;
+        self.next_is_delay_slot = false;
 
         // current instruction
         let inst = self.next_instruction;
@@ -292,11 +440,17 @@ impl<T: Addressable> Cpu<T> {
     }
 
     fn inst_cop(&mut self) {
-        let copno = (self.inst.v >> 26) & 0x03;
+        let copno = ((self.inst.v >> 26) & 0x03) as u64;
         let cop = match copno {
             1 => &mut self.cop1,
             _ => panic!("unsupported"),
         };
+
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & (0x1000_0000 << copno)) == 0 {
+            self.coprocessor_unusable_exception(copno);
+            return;
+        }
 
         if (self.inst.v & (1 << 25)) != 0 {
             cop.special(self.inst.v);
@@ -374,31 +528,64 @@ impl<T: Addressable> Cpu<T> {
                 let val = self.gpr[self.inst.rt];
 
                 // fix bits of the Config register
-                self.cp0gpr[self.inst.rd] = match self.inst.rd {
-                    COP0_CONFIG => {
+                self.cp0gpr[self.inst.rd] = (match self.inst.rd {
+                    Cop0_Config => {
                         let read_only_mask = 0xF0FF7FF0u64;
-                        (val & !read_only_mask) | (self.cp0gpr[COP0_CONFIG] & read_only_mask)
+                        (val & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
+                    },
+
+                    Cop0_Compare => {
+                        // TODO clear timer interrupt see 6.3.4
+                        // truncate to 32-bits
+                        (val as u32) as u64
+                    },
+
+                    Cop0_Cause => {
+                        // handle software interrupts 
+                        if (val & 0x300) != 0 {
+                            panic!("CPU: cop0 software interrupt");
+                        }
+
+                        // Only bits IP1 and IP0 are writable
+                        (self.cp0gpr[Cop0_Cause] & !0x300) | (val & 0x300)
                     },
 
                     _ => { val },
-                };
+                } as i32) as u64;
 
-                if self.inst.rd == COP0_STATUS {
-                    if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
-                        panic!("CPU: unsupported 64-bit mode or little endian mode");
-                    }
-                }
+                // TODO testing
+                match self.inst.rd {
+                    Cop0_Status => {
+                        if (self.cp0gpr[Cop0_Status] & 0x0200_00E0) != 0 {
+                            panic!("CPU: unsupported 64-bit mode or little endian mode");
+                        }
+
+                        if (self.cp0gpr[Cop0_Status] & 0x18) != 0 {
+                            panic!("CPU: unsupported user or supervisor mode");
+                        }
+
+                        if (self.cp0gpr[Cop0_Status] & 0x800000) != 0 {
+                            panic!("CPU: unsupported instruction trace mode");
+                        }
+
+                        if (self.cp0gpr[Cop0_Status] & 0x200000) != 0 {
+                            panic!("CPU: exception vector change");
+                        }
+                    },
+
+                    _ => {},
+                };
             },
 
             0b00_101 => {
-                println!("dmtc0 r{}, cp0r{} (r{}=${:08X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt] as u32);
+                println!("dmtc0 r{}, cp0r{} (r{}=${:018X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
                 let val = self.gpr[self.inst.rt];
 
                 self.cp0gpr[self.inst.rd] = match self.inst.rd {
                     _ => { val },
                 };
 
-                if self.inst.rd == COP0_STATUS {
+                if self.inst.rd == Cop0_Status {
                     if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
                         panic!("CPU: unsupported 64-bit mode or little endian mode");
                     }
@@ -413,11 +600,30 @@ impl<T: Addressable> Cpu<T> {
                         println!("COP0: tlbwi");
                     },
 
-                    _ => panic!("COP0: unknown cp0 function"),
+                    0b011_000 => {
+                        assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
+                        println!("eret");
+
+                        // If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
+                        // ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
+                        if (self.cp0gpr[Cop0_Status] & 0x04) != 0 {
+                            panic!("COP0: error bit set"); // TODO
+                        } else {
+                            self.pc = self.cp0gpr[Cop0_EPC] as u32;
+                            self.cp0gpr[Cop0_Status] &= !0x02;
+                        }
+
+                        self.prefetch();
+
+                        // clear LLbit so that SC writes fail
+                        self.llbit = false;
+                    },
+
+                    _ => panic!("COP0: unknown cp0 function 0b{:03b}_{:03b}", special >> 3, special & 0x07),
                 }
             },
 
-            _ => panic!("CPU: unknown cop0 op: 0b{:02b}_{:03b} (0b{:032b}", cop0_op >> 3, cop0_op & 0x07, self.inst.v)
+            _ => panic!("CPU: unknown cop0 op: 0b{:02b}_{:03b} (0b{:032b})", cop0_op >> 3, cop0_op & 0x07, self.inst.v)
         }
     }
 
@@ -498,25 +704,23 @@ impl<T: Addressable> Cpu<T> {
 
     fn inst_j(&mut self) {
         let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
-
-        if (dest & 0x03) != 0 {
-            eprintln!("CPU: j address exception");
-        }
-
         println!("j ${:08X}", dest);
+
         self.pc = dest;
+
+        // note that the next instruction to execute is a delay slot instruction
+        self.next_is_delay_slot = true;
     }
 
     fn inst_jal(&mut self) {
         let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
         println!("jal ${:08X}", dest);
 
-        if (dest & 0x03) != 0 {
-            eprintln!("CPU: jal address exception");
-        }
-
         self.gpr[31] = (self.pc as i32) as u64;
         self.pc = dest;
+
+        // note that the next instruction to execute is a delay slot instruction
+        self.next_is_delay_slot = true;
     }
 
     fn inst_lb(&mut self) {
@@ -537,8 +741,8 @@ impl<T: Addressable> Cpu<T> {
         println!("ld r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        if (address & 0x03) != 0 {
-            panic!("address exception!");
+        if (address & 0x07) != 0 {
+            self.address_exception(address, false);
         }
 
         self.gpr[self.inst.rt] = self.read_u64(address as usize);
@@ -590,7 +794,7 @@ impl<T: Addressable> Cpu<T> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
 
         if (address & 0x01) != 0 {
-            eprintln!("CPU: lhu address exception!");
+            self.address_exception(address, false);
         }
 
         let word = self.read_u32((address & !0x02) as usize) as u64;
@@ -602,13 +806,13 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            panic!("address exception!");
+            self.address_exception(address, false);
         }
         self.gpr[self.inst.rt] = (self.read_u32(address as usize) as i32) as u64;
 
         // the "linked part" sets the LLAddr register in cop0 to the physical address
         // of the read, and the LLbit to 1
-        self.cp0gpr[COP0_LLADDR] = address & 0x1FFF_FFFF; // TODO use proper physical address
+        self.cp0gpr[Cop0_LLAddr] = address & 0x1FFF_FFFF; // TODO use proper physical address
         self.llbit = true;
     }
 
@@ -622,7 +826,8 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            eprintln!("CPU: lw address exception!");
+            self.address_exception(address, false);
+            return;
         }
 
         self.gpr[self.inst.rt] = (self.read_u32(address as usize) as i32) as u64;
@@ -633,7 +838,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            eprintln!("CPU: lw address exception!");
+            self.address_exception(address, false);
         }
 
         self.gpr[self.inst.rt] = self.read_u32(address as usize) as u64;
@@ -681,8 +886,8 @@ impl<T: Addressable> Cpu<T> {
         println!("ldc1 r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         
-        if (address & 0x03) != 0 {
-            eprintln!("CPU: ldc1 address exception!");
+        if (address & 0x07) != 0 {
+            self.address_exception(address, false);
         }
 
         let value = self.read_u64(address as usize);
@@ -694,7 +899,7 @@ impl<T: Addressable> Cpu<T> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         
         if (address & 0x03) != 0 {
-            eprintln!("CPU: lwc1 address exception!");
+            self.address_exception(address, false);
         }
 
         let value = self.read_u32(address as usize);
@@ -736,10 +941,10 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            panic!("address exception!");
+            self.address_exception(address, true);
         }
 
-        if self.llbit && ((address & 0x1FFF_FFFF) == self.cp0gpr[COP0_LLADDR]) {
+        if self.llbit && ((address & 0x1FFF_FFFF) == self.cp0gpr[Cop0_LLAddr]) {
             self.write_u32(self.gpr[self.inst.rt] as u32, address as usize);
             self.gpr[self.inst.rt] = 1;
         } else {
@@ -752,7 +957,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x07) != 0 {
-            panic!("address exception!");
+            self.address_exception(address, true);
         }
 
         self.write_u64(self.gpr[self.inst.rt], address as usize);
@@ -763,7 +968,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x07) != 0 {
-            panic!("address exception!");
+            self.address_exception(address, true);
         }
 
         // TODO: need to catch invalid sitatuations (see datasheet)
@@ -777,7 +982,7 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            panic!("address exception!");
+            self.address_exception(address, true);
         }
 
         // TODO: need to catch invalid sitatuations (see datasheet)
@@ -858,7 +1063,8 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
-            eprintln!("CPU: sw address exception");
+            self.address_exception(address, true);
+            return;
         }
 
         self.write_u32(self.gpr[self.inst.rt] as u32, address as usize);
@@ -1147,22 +1353,20 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rd] = (self.pc as i32) as u64; // pc pointing to after the delay slot already
         let dest = self.gpr[self.inst.rs] as u32;
 
-        if (dest & 0x03) != 0 {
-            eprintln!("CPU: jalr address exception!");
-        }
-
         self.pc = dest;
+
+        // note that the next instruction to execute is a delay slot instruction
+        self.next_is_delay_slot = true;
     }
 
     fn special_jr(&mut self) {
         println!("jr r{}", self.inst.rs);
-        let dest = self.gpr[self.inst.rs] as u32;
+        let dest = self.gpr[self.inst.rs];
 
-        if (dest & 0x03) != 0 {
-            eprintln!("CPU: jr address exception!");
-        }
+        self.pc = dest as u32;
 
-        self.pc = dest;
+        // note that the next instruction to execute is a delay slot instruction
+        self.next_is_delay_slot = true;
     }
 
     fn special_mfhi(&mut self) {
@@ -1173,6 +1377,16 @@ impl<T: Addressable> Cpu<T> {
     fn special_mflo(&mut self) {
         println!("mflo r{}", self.inst.rd);
         self.gpr[self.inst.rd] = self.lo;
+    }
+
+    fn special_mthi(&mut self) {
+        println!("mthi r{}", self.inst.rd);
+        self.hi = self.gpr[self.inst.rd];
+    }
+
+    fn special_mtlo(&mut self) {
+        println!("mtlo r{}", self.inst.rd);
+        self.lo = self.gpr[self.inst.rd];
     }
 
     fn special_mult(&mut self) {
