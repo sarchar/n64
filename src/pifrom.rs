@@ -55,7 +55,7 @@ impl Addressable for PifRom {
 
     fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         if offset < 0x7C0 {
-            panic!("invalid PIF write");
+            eprintln!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
         } else if offset == 0x7FC {
             //panic!("PIF: write command port");
             if (value & 0x10) != 0 {
@@ -75,7 +75,7 @@ impl Addressable for PifRom {
             if ram_offset < 16 {
                 self.ram[ram_offset as usize] = value;
             } else {
-                panic!("invalid PIF write");
+                panic!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
             }
         }
 

@@ -41,8 +41,7 @@ pub struct Cpu<T: Addressable> {
     cp0gpr: [u64; 32],
     llbit: bool,
 
-    fcr: [u64; 32],
-    fgpr: [f64; 32],
+    cop1: cop1::Cop1,
 
     next_instruction: u32,    // emulates delay slot
     next_instruction_pc: u32, // for printing correct delay slot addresses
@@ -74,8 +73,7 @@ impl<T: Addressable> Cpu<T> {
             cp0gpr: [0u64; 32],
             llbit: false,
 
-            fcr: [0u64; 32],
-            fgpr: [0f64; 32],
+            cop1: cop1::Cop1::new(),
 
             next_instruction: 0,
             next_instruction_pc: 0,
@@ -85,12 +83,12 @@ impl<T: Addressable> Cpu<T> {
                     // _000                     _001                     _010                    _011                    _100                    _101                    _110                    _111
    /* 000_ */   Cpu::<T>::inst_special, Cpu::<T>::inst_regimm , Cpu::<T>::inst_j      , Cpu::<T>::inst_jal    , Cpu::<T>::inst_beq    , Cpu::<T>::inst_bne    , Cpu::<T>::inst_blez   , Cpu::<T>::inst_bgtz   ,
    /* 001_ */   Cpu::<T>::inst_addi   , Cpu::<T>::inst_addiu  , Cpu::<T>::inst_slti   , Cpu::<T>::inst_sltiu  , Cpu::<T>::inst_andi   , Cpu::<T>::inst_ori    , Cpu::<T>::inst_xori   , Cpu::<T>::inst_lui    ,
-   /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
+   /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop    , Cpu::<T>::inst_cop2   , Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
    /* 011_ */   Cpu::<T>::inst_daddi  , Cpu::<T>::inst_daddiu , Cpu::<T>::inst_ldl    , Cpu::<T>::inst_ldr    , Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
-   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwl    , Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwr    , Cpu::<T>::inst_unknown,
-   /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_sdl    , Cpu::<T>::inst_sdr    , Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
-   /* 110_ */   Cpu::<T>::inst_ll     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_ld     ,
-   /* 111_ */   Cpu::<T>::inst_sc     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_sdc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_sd
+   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwl    , Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_lhu    , Cpu::<T>::inst_lwr    , Cpu::<T>::inst_lwu    ,
+   /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_sh     , Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_sdl    , Cpu::<T>::inst_sdr    , Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
+   /* 110_ */   Cpu::<T>::inst_ll     , Cpu::<T>::inst_lwc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_ldc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_ld     ,
+   /* 111_ */   Cpu::<T>::inst_sc     , Cpu::<T>::inst_swc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_sdc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_sd
             ],
 
             special_table: [
@@ -107,7 +105,7 @@ impl<T: Addressable> Cpu<T> {
 
             regimm_table: [
                     //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
-   /* 00_ */    Cpu::<T>::regimm_bltz   , Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_bgezl  , Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
+   /* 00_ */    Cpu::<T>::regimm_bltz   , Cpu::<T>::regimm_bgez   , Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_bgezl  , Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
    /* 01_ */    Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid,
    /* 10_ */    Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_bgezal , Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_unknown, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
    /* 11_ */    Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid, Cpu::<T>::regimm_invalid,
@@ -293,6 +291,71 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] & self.inst.imm;
     }
 
+    fn inst_cop(&mut self) {
+        let copno = (self.inst.v >> 26) & 0x03;
+        let cop = match copno {
+            1 => &mut self.cop1,
+            _ => panic!("unsupported"),
+        };
+
+        if (self.inst.v & (1 << 25)) != 0 {
+            cop.special(self.inst.v);
+        } else {
+            let func = (self.inst.v >> 21) & 0x0F;
+            match func {
+                0b00_000 => {
+                    println!("mfc1 r{}, cgpr{}", self.inst.rt, self.inst.rd);
+
+                    // TODO see datasheet for MFCz but this seemds weird. We use dmfc (double from
+                    // cop) and then select low or high word based on the register index
+                    self.gpr[self.inst.rt] = (if (self.inst.rd & 0x01) == 0 {
+                        cop.dmfc(self.inst.rd & !0x01) & 0xFFFF_FFFF
+                    } else {
+                        (cop.dmfc(self.inst.rd & !0x01) >> 32) & 0xFFFF_FFFF
+                    } as i32) as u64;
+                },
+
+                0b00_001 => {
+                    println!("dmfc{} r{}, cgpr{}", copno, self.inst.rt, self.inst.rd);
+                    self.gpr[self.inst.rt] = cop.dmfc(self.inst.rd);
+                },
+
+                0b00_010 => {
+                    println!("cfc1 r{}, cr{}", self.inst.rt, self.inst.rd);
+                    self.gpr[self.inst.rt] = cop.cfc(self.inst.rd);
+                },
+
+                0b00_100 => {
+                    println!("mtc{} r{}, cgpr{} (r{}=${:08X})", copno, self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
+                    cop.mtc(self.gpr[self.inst.rt] as u32, self.inst.rd);
+                },
+
+                0b00_101 => {
+                    println!("dmtc{} r{}, cgpr{} (r{}=${:16X})", copno, self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
+                    cop.dmtc(self.gpr[self.inst.rt], self.inst.rd);
+                },
+
+                0b00_110 => {
+                    println!("ctc{} r{}, cr{}", copno, self.inst.rt, self.inst.rd);
+                    cop.ctc(self.gpr[self.inst.rt], self.inst.rd);
+                },
+
+                /*
+                0b01_000 => {
+                    let branch = (self.inst.v >> 16) & 0x1F;
+                    match branch {
+                        _ => eprintln!("COP1: unhandled branch mode ${:05b}", branch),
+                    };
+                }
+                */
+
+                _ => panic!("CPU: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
+            };
+        }
+    }
+
+    // convert into inst_cop at some point
+    // all the cop should implement a common cop trait (mfc/mtc/ctc/etc)
     fn inst_cop0(&mut self) {
         let cop0_op = (self.inst.v >> 21) & 0x1F;
         match cop0_op {
@@ -358,37 +421,13 @@ impl<T: Addressable> Cpu<T> {
         }
     }
 
-    fn inst_cop1(&mut self) {
-        let cop1_op = (self.inst.v >> 21) & 0x1F;
-        match cop1_op {
-            0b00_001 => {
-                println!("mfc1 r{}, fgpr{} (r{}=${:X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
-                // TODO pretty sure this is not correct and should transfer half the register?
-                // see datasheet for MFCz
-                self.gpr[self.inst.rt] = if (self.inst.rd & 0x01) == 0 {
-                    (self.fgpr[self.inst.rd >> 1].to_bits() as i32) as u64
-                } else {
-                    ((self.fgpr[self.inst.rd >> 1].to_bits() >> 32) as i32) as u64
-                };
-            },
-
-            0b00_010 => {
-                println!("cfc1 r{}, fcr{}", self.inst.rt, self.inst.rd);
-                self.gpr[self.inst.rt] = (self.fcr[self.inst.rd] as i32) as u64;
-            },
-
-            0b00_101 => {
-                println!("dmtc1 r{}, fgpr{} (r{}=${:X})", self.inst.rt, self.inst.rd, self.inst.rt, self.gpr[self.inst.rt]);
-                self.fgpr[self.inst.rd] = f64::from_bits(self.gpr[self.inst.rt]);
-            },
-
-            0b00_110 => {
-                println!("ctc1 r{}, fcr{}", self.inst.rt, self.inst.rd);
-                self.fcr[self.inst.rd] = self.gpr[self.inst.rt];
-            },
-            _ => panic!("CPU: unknown cop1 op: 0b{:02b}_{:03b}", cop1_op >> 3, cop1_op & 0x07)
-        }
+    fn inst_cop2(&mut self) {
+        let cop2_op = (self.inst.v >> 21) & 0x1F;
+        match cop2_op {
+            _ => eprintln!("CPU: unknown cop2 op: 0b{:02b}_{:03b} (0b{:032b})", cop2_op >> 3, cop2_op & 0x07, self.inst.v)
+        };
     }
+
 
     fn inst_beq(&mut self) {
         println!("beq r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm);
@@ -546,6 +585,18 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = new; 
     }
 
+    fn inst_lhu(&mut self) {
+        println!("lhu r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+
+        if (address & 0x01) != 0 {
+            eprintln!("CPU: lhu address exception!");
+        }
+
+        let word = self.read_u32((address & !0x02) as usize) as u64;
+        self.gpr[self.inst.rt] = (word >> (16 - ((address & 0x02) << 3))) & 0x0000_FFFF;
+    }
+
     fn inst_ll(&mut self) {
         println!("ll r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
 
@@ -575,6 +626,17 @@ impl<T: Addressable> Cpu<T> {
         }
 
         self.gpr[self.inst.rt] = (self.read_u32(address as usize) as i32) as u64;
+    }
+
+    fn inst_lwu(&mut self) {
+        println!("lw r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            eprintln!("CPU: lw address exception!");
+        }
+
+        self.gpr[self.inst.rt] = self.read_u32(address as usize) as u64;
     }
 
     fn inst_lwl(&mut self) {
@@ -615,6 +677,29 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = (new as i32) as u64; 
     }
 
+    fn inst_ldc1(&mut self) {
+        println!("ldc1 r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        
+        if (address & 0x03) != 0 {
+            eprintln!("CPU: ldc1 address exception!");
+        }
+
+        let value = self.read_u64(address as usize);
+        self.cop1.ldc(self.inst.rt, value);
+    }
+
+    fn inst_lwc1(&mut self) {
+        println!("lwc1 r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        
+        if (address & 0x03) != 0 {
+            eprintln!("CPU: lwc1 address exception!");
+        }
+
+        let value = self.read_u32(address as usize);
+        self.cop1.lwc(self.inst.rt, value);
+    }
 
     fn inst_ori(&mut self) {
         println!("ori r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
@@ -631,6 +716,19 @@ impl<T: Addressable> Cpu<T> {
 
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         self.write_u8(self.gpr[self.inst.rt] as u8, address as usize);
+    }
+    
+    fn inst_sh(&mut self) {
+        println!("sb r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        let word = self.read_u32((address & !0x01) as usize) as u64;
+
+        if (address & 0x02) != 0 {
+            self.write_u32((((self.gpr[self.inst.rt] & 0xFFFF) << 16) | (word & 0x0000FFFF)) as u32, (address & !0x02) as usize);
+        } else {
+            self.write_u32(((self.gpr[self.inst.rt] & 0xFFFF) | (word & 0xFFFF0000)) as u32, (address & !0x02) as usize);
+        }
     }
 
     fn inst_sc(&mut self) {
@@ -670,8 +768,24 @@ impl<T: Addressable> Cpu<T> {
 
         // TODO: need to catch invalid sitatuations (see datasheet)
 
-        self.write_u64(self.fgpr[self.inst.rt].to_bits(), address as usize);
+        let value = self.cop1.sdc(self.inst.rt);
+        self.write_u64(value, address as usize);
     }
+
+    fn inst_swc1(&mut self) {
+        println!("swc1 r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x03) != 0 {
+            panic!("address exception!");
+        }
+
+        // TODO: need to catch invalid sitatuations (see datasheet)
+
+        let value = self.cop1.swc(self.inst.rt);
+        self.write_u32(value, address as usize);
+    }
+
 
     fn inst_sdl(&mut self) {
         println!("sdl r{}, ${:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
@@ -812,6 +926,13 @@ impl<T: Addressable> Cpu<T> {
 
         // addresses are sign extended
         self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
+
+        let condition = (self.gpr[self.inst.rs] as i64) >= 0;
+        self.branch(condition);
+    }
+
+    fn regimm_bgez(&mut self) {
+        println!("bgez r{}, ${:04X}", self.inst.rs, self.inst.imm);
 
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
         self.branch(condition);

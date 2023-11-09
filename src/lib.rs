@@ -26,6 +26,7 @@ pub trait Addressable {
     fn print_debug_ipl2(&self) {}
 }
 
+pub mod cop1;
 pub mod cpu;
 pub mod mips;
 pub mod peripheral;

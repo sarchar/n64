@@ -191,6 +191,9 @@ impl Addressable for PeripheralInterface {
             self.debug_buffer[buffer_offset+2] = ((value >>  8) & 0xFF) as u8;
             self.debug_buffer[buffer_offset+3] = ((value >>  0) & 0xFF) as u8;
             WriteReturnSignal::None
+        } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
+            eprintln!("PI: wrote to ROM value=${:08X} offset=${:08X}", value, offset);
+            WriteReturnSignal::None
         } else {
             panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);
         }
