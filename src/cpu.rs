@@ -425,7 +425,7 @@ impl<T: Addressable> Cpu<T> {
         let rt = self.inst.signed_imm as u32;
         let result = rs.wrapping_add(rt);
         if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000) != 0 {
-            eprintln!("CPU: addi overflow detected: rs=${:08X} imm=${:04X} result=${:08X}", rs, rt, result);
+            println!("CPU: addi overflow detected: rs=${:08X} imm=${:04X} result=${:08X}", rs, rt, result);
             self.overflow_exception();
         }
 
@@ -690,11 +690,11 @@ impl<T: Addressable> Cpu<T> {
         println!("daddi r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
 
         // integer overflow exception occurs with ADDI, unlike ADDIU
-        let src = self.gpr[self.inst.rs] as u64;
-        let result = src.wrapping_add(self.inst.signed_imm);
-        let is_pos = (self.inst.imm & 0x8000) == 0;
-        if self.inst.imm != 0 && ((is_pos && result < src) || (!is_pos && result > src)) {
-            eprintln!("CPU: daddi overflow detected: src=${:16} imm=${:04X} result=${:16}", src, self.inst.imm, result);
+        let rs = self.gpr[self.inst.rs] as u64;
+        let rt = self.inst.signed_imm;
+        let result = rs.wrapping_add(rt);
+        if ((!(rs ^ rt) & (rs ^ result)) & 0x8000_0000_0000_0000) != 0 {
+            println!("CPU: daddi overflow detected: rs=${:16} imm=${:04X} result=${:16}", rs, rt, result);
             self.overflow_exception();
         }
 
