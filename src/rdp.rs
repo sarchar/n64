@@ -19,8 +19,9 @@ impl Addressable for Rdp {
         }
     }
 
-    fn write_u32(&mut self, _value: u32, _offset: usize) -> WriteReturnSignal {
-        panic!("RDP: write32");
+    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+        println!("RDP: write32 value=${:08X} offset=${:08X}", value, offset);
+        WriteReturnSignal::None
     }
 }
 

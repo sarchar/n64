@@ -29,7 +29,8 @@ impl PifRom {
 
 impl Addressable for PifRom {
     fn read_u32(&mut self, offset: usize) -> u32 {
-        println!("PIF: read ${:08X}", offset);
+        println!("PIF: read32 offset=${:08X}", offset);
+
         if offset < 1984 {
             ((self.boot_rom[offset+0] as u32) << 24)
             | ((self.boot_rom[offset+1] as u32) << 16)

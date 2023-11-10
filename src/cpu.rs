@@ -33,7 +33,7 @@ const _ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
 const _ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
 const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
 const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
-const _ExceptionCode_Tr   : u64 = 13; // Trap instruction
+const ExceptionCode_Tr   : u64 = 13; // Trap instruction
 const _ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
@@ -124,7 +124,7 @@ impl<T: Addressable> Cpu<T> {
    /* 001_ */   Cpu::<T>::inst_addi   , Cpu::<T>::inst_addiu  , Cpu::<T>::inst_slti   , Cpu::<T>::inst_sltiu  , Cpu::<T>::inst_andi   , Cpu::<T>::inst_ori    , Cpu::<T>::inst_xori   , Cpu::<T>::inst_lui    ,
    /* 010_ */   Cpu::<T>::inst_cop0   , Cpu::<T>::inst_cop    , Cpu::<T>::inst_cop2   , Cpu::<T>::inst_invalid, Cpu::<T>::inst_beql   , Cpu::<T>::inst_bnel   , Cpu::<T>::inst_blezl  , Cpu::<T>::inst_unknown,
    /* 011_ */   Cpu::<T>::inst_daddi  , Cpu::<T>::inst_daddiu , Cpu::<T>::inst_ldl    , Cpu::<T>::inst_ldr    , Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid, Cpu::<T>::inst_invalid,
-   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_unknown, Cpu::<T>::inst_lwl    , Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_lhu    , Cpu::<T>::inst_lwr    , Cpu::<T>::inst_lwu    ,
+   /* 100_ */   Cpu::<T>::inst_lb     , Cpu::<T>::inst_lh     , Cpu::<T>::inst_lwl    , Cpu::<T>::inst_lw     , Cpu::<T>::inst_lbu    , Cpu::<T>::inst_lhu    , Cpu::<T>::inst_lwr    , Cpu::<T>::inst_lwu    ,
    /* 101_ */   Cpu::<T>::inst_sb     , Cpu::<T>::inst_sh     , Cpu::<T>::inst_swl    , Cpu::<T>::inst_sw     , Cpu::<T>::inst_sdl    , Cpu::<T>::inst_sdr    , Cpu::<T>::inst_swr    , Cpu::<T>::inst_cache  ,
    /* 110_ */   Cpu::<T>::inst_ll     , Cpu::<T>::inst_lwc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_ldc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_ld     ,
    /* 111_ */   Cpu::<T>::inst_sc     , Cpu::<T>::inst_swc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_invalid, Cpu::<T>::inst_unknown, Cpu::<T>::inst_sdc1   , Cpu::<T>::inst_unknown, Cpu::<T>::inst_sd
@@ -135,10 +135,10 @@ impl<T: Addressable> Cpu<T> {
    /* 000_ */   Cpu::<T>::special_sll    , Cpu::<T>::special_invalid, Cpu::<T>::special_srl    , Cpu::<T>::special_sra    , Cpu::<T>::special_sllv   , Cpu::<T>::special_invalid, Cpu::<T>::special_srlv   , Cpu::<T>::special_srav   ,
    /* 001_ */   Cpu::<T>::special_jr     , Cpu::<T>::special_jalr   , Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_sync   ,
    /* 010_ */   Cpu::<T>::special_mfhi   , Cpu::<T>::special_mthi   , Cpu::<T>::special_mflo   , Cpu::<T>::special_mtlo   , Cpu::<T>::special_dsllv  , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrlv  , Cpu::<T>::special_dsrav  ,
-   /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_div    , Cpu::<T>::special_divu   , Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_ddiv   , Cpu::<T>::special_ddivu  ,
+   /* 011_ */   Cpu::<T>::special_mult   , Cpu::<T>::special_multu  , Cpu::<T>::special_div    , Cpu::<T>::special_divu   , Cpu::<T>::special_dmult  , Cpu::<T>::special_dmultu , Cpu::<T>::special_ddiv   , Cpu::<T>::special_ddivu  ,
    /* 100_ */   Cpu::<T>::special_add    , Cpu::<T>::special_addu   , Cpu::<T>::special_sub    , Cpu::<T>::special_subu   , Cpu::<T>::special_and    , Cpu::<T>::special_or     , Cpu::<T>::special_xor    , Cpu::<T>::special_nor    ,
    /* 101_ */   Cpu::<T>::special_invalid, Cpu::<T>::special_invalid, Cpu::<T>::special_slt    , Cpu::<T>::special_sltu   , Cpu::<T>::special_dadd   , Cpu::<T>::special_daddu  , Cpu::<T>::special_dsub   , Cpu::<T>::special_dsubu  ,
-   /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
+   /* 110_ */   Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_unknown, Cpu::<T>::special_teq    , Cpu::<T>::special_invalid, Cpu::<T>::special_unknown, Cpu::<T>::special_invalid,
    /* 111_ */   Cpu::<T>::special_dsll   , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrl   , Cpu::<T>::special_dsra   , Cpu::<T>::special_dsll32 , Cpu::<T>::special_invalid, Cpu::<T>::special_dsrl32 , Cpu::<T>::special_dsra32 ,
             ],
 
@@ -173,10 +173,6 @@ impl<T: Addressable> Cpu<T> {
         self.next_is_delay_slot = false;
     }
 
-    fn ie(&self) -> bool {
-        (self.cp0gpr[Cop0_Status] & 0x01) != 0
-    }
-
     fn interrupts_enabled(&self, interrupt_number: u64) -> bool {
         // interrupts are enabled when IE is set and EXL (exception level) and ERL (error level) are 0
         // (and also when the IM bit is set for the specified interrupt)
@@ -184,10 +180,14 @@ impl<T: Addressable> Cpu<T> {
         (self.cp0gpr[Cop0_Status] & check) == (check & !0x06)
     }
 
-    fn read_u8(&mut self, address: usize) -> u32 {
-        let word = self.read_u32(address & !0x03);
-        let shift = 24 - ((address & 0x03) << 3);
-        (word >> shift) & 0xFF
+    #[inline(always)]
+    fn read_u8(&mut self, address: usize) -> u8 {
+        self.bus.read_u8(address)
+    }
+
+    #[inline(always)]
+    fn read_u16(&mut self, address: usize) -> u16 {
+        self.bus.read_u16(address)
     }
 
     #[inline(always)]
@@ -195,28 +195,20 @@ impl<T: Addressable> Cpu<T> {
         self.bus.read_u32(address)
     }
 
+    // The VR4300 has to do two reads to get a doubleword
     #[inline(always)]
     fn read_u64(&mut self, address: usize) -> u64 {
         ((self.read_u32(address) as u64) << 32) | (self.read_u32(address + 4) as u64)
     }
 
-    // The cpu would perform the external bus read if the address access
-    // is uncached or there's a cache miss. otherwise, the value from cache would be used
-    // so the programmer needs to be aware of side effects when reading/writing bytes
-    // R-M-W for write_u8
+    #[inline(always)]
     fn write_u8(&mut self, value: u8, address: usize) -> WriteReturnSignal {
-        let aligned_address = address & !0x03;
+        self.bus.write_u8(value, address)
+    }
 
-        // on cacheable addresses, we need to have the old data in order to change a byte
-        let word = if (address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u32(aligned_address)  // this read "simulates" the cache miss and fetch and 
-                                            // doesn't happen for uncached addresses
-        } else { 0 };
-
-        let shift = 24 - ((address & 0x03) << 3);
-        let mask = 0xFFu32 << shift;
-        let nv = (word & !mask) | ((value as u32) << shift);
-        self.write_u32(nv, aligned_address)
+    #[inline(always)]
+    fn _write_u16(&mut self, value: u16, address: usize) -> WriteReturnSignal {
+        self.bus.write_u16(value, address)
     }
 
     #[inline(always)]
@@ -289,6 +281,10 @@ impl<T: Addressable> Cpu<T> {
 
     fn overflow_exception(&mut self) {
         self.exception(ExceptionCode_Ov);
+    }
+
+    fn trap_exception(&mut self) {
+        self.exception(ExceptionCode_Tr);
     }
 
     fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) {
@@ -499,14 +495,12 @@ impl<T: Addressable> Cpu<T> {
                     cop.ctc(self.gpr[self.inst.rt], self.inst.rd);
                 },
 
-                /*
                 0b01_000 => {
                     let branch = (self.inst.v >> 16) & 0x1F;
                     match branch {
                         _ => eprintln!("COP1: unhandled branch mode ${:05b}", branch),
                     };
-                }
-                */
+                },
 
                 _ => panic!("CPU: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
             };
@@ -689,7 +683,7 @@ impl<T: Addressable> Cpu<T> {
      fn inst_daddi(&mut self) {
         println!("daddi r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
 
-        // integer overflow exception occurs with ADDI, unlike ADDIU
+        // integer overflow exception occurs with DADDI, unlike DADDIU
         let rs = self.gpr[self.inst.rs] as u64;
         let rt = self.inst.signed_imm;
         let result = rs.wrapping_add(rt);
@@ -795,6 +789,17 @@ impl<T: Addressable> Cpu<T> {
         self.gpr[self.inst.rt] = new; 
     }
 
+    fn inst_lh(&mut self) {
+        println!("lh r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+
+        if (address & 0x01) != 0 {
+            self.address_exception(address, false);
+        }
+
+        self.gpr[self.inst.rt] = (self.read_u16((address & !0x02) as usize) as i16) as u64;
+    }
+
     fn inst_lhu(&mut self) {
         println!("lhu r{}, 0x{:04X}(r{})", self.inst.rt, self.inst.imm, self.inst.rs);
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
@@ -803,8 +808,7 @@ impl<T: Addressable> Cpu<T> {
             self.address_exception(address, false);
         }
 
-        let word = self.read_u32((address & !0x02) as usize) as u64;
-        self.gpr[self.inst.rt] = (word >> (16 - ((address & 0x02) << 3))) & 0x0000_FFFF;
+        self.gpr[self.inst.rt] = self.read_u16((address & !0x02) as usize) as u64;
     }
 
     fn inst_ll(&mut self) {
@@ -1288,6 +1292,31 @@ impl<T: Addressable> Cpu<T> {
         self.hi = (self.hi as i32) as u64;
     }
 
+    fn special_dmult(&mut self) {
+        println!("dmult r{}, r{}", self.inst.rs, self.inst.rt);
+
+        // use 64-bit signed integers and get 128-bit result
+        let result = ((self.gpr[self.inst.rs] as i64) as i128) * ((self.gpr[self.inst.rt] as i64) as i128);
+
+        // multu results are available in the next instruction since the multiply
+        // was started earlier in the pipeline
+        self.lo = result as u64;
+        self.hi = (result >> 64) as u64;
+    }
+
+    fn special_dmultu(&mut self) {
+        println!("dmultu r{}, r{}", self.inst.rs, self.inst.rt);
+
+        // must be 32-bit unsigned numbers
+        let result = (self.gpr[self.inst.rs] as u128) * (self.gpr[self.inst.rt] as u128);
+
+        // multu results are available in the next instruction since the multiply
+        // was started earlier in the pipeline
+        self.lo = result as u64;
+        self.hi = (result >> 64) as u64;
+    }
+
+
     fn special_dsll(&mut self) {
         println!("dsll r{}, r{}, {}", self.inst.rd, self.inst.rt, self.inst.sa);
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
@@ -1429,6 +1458,14 @@ impl<T: Addressable> Cpu<T> {
         println!("or r{}, r{}, r{}", self.inst.rd, self.inst.rs, self.inst.rt);
 
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] | self.gpr[self.inst.rt];
+    }
+
+    fn special_teq(&mut self) {
+        println!("teq r{}, r{}", self.inst.rs, self.inst.rt);
+
+        if self.gpr[self.inst.rs] == self.gpr[self.inst.rt] {
+            self.trap_exception();
+        }
     }
 
     fn special_sll(&mut self) {

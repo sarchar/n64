@@ -161,6 +161,14 @@ impl Addressable for PeripheralInterface {
         }
     }
 
+    fn read_u16(&mut self, offset: usize) -> u16 {
+        // 16-bit read from CART is buggy
+        let i = (offset & 0x02) >> 1;
+        let ret = ((self.read_u32((offset & !0x03) + i) & 0xFFFF0000) >> 16) as u16;
+        eprintln!("PI: read16 offset=${:08X} return=${:04X}", offset, ret);
+        ret
+    }
+
     fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
         println!("PI: write32 value=${:08X} offset=${:08X}", value, offset);
 
