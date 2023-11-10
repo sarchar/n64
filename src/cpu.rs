@@ -177,6 +177,19 @@ impl<T: Addressable> Cpu<T> {
         &self.next_instruction_pc
     }
 
+    pub fn regs(&self) -> &[u64] {
+        &self.gpr
+    }
+
+    pub fn abi_name(&self, i: usize) -> &str {
+        const NAMES: [&str; 32] = [
+            "r0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+            "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "s8", "ra"
+        ];
+
+        NAMES[i]
+    }
+
     fn interrupts_enabled(&self, interrupt_number: u64) -> bool {
         // interrupts are enabled when IE is set and EXL (exception level) and ERL (error level) are 0
         // (and also when the IM bit is set for the specified interrupt)
@@ -398,15 +411,6 @@ impl<T: Addressable> Cpu<T> {
         // r0 must always be zero
         self.gpr[0] = 0;
 
-        // dump all registers after each instruction
-        //.for k in 0..8 {
-        //.    print!("r ");
-        //.    for j in 0..4 {
-        //.        print!("R{:02}: ${:08X}_{:08X} ", k*4+j, self.gpr[(k*4+j) as usize] >> 32, self.gpr[(k*4+j) as usize] & 0xFFFF_FFFF);
-        //.    }
-        //.    println!("");
-        //.}
-        //.println!("-");
     }
 
     fn inst_invalid(&mut self) {
