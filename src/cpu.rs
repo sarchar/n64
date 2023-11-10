@@ -173,6 +173,10 @@ impl<T: Addressable> Cpu<T> {
         self.next_is_delay_slot = false;
     }
 
+    pub fn next_instruction_pc(&self) -> &u32 {
+        &self.next_instruction_pc
+    }
+
     fn interrupts_enabled(&self, interrupt_number: u64) -> bool {
         // interrupts are enabled when IE is set and EXL (exception level) and ERL (error level) are 0
         // (and also when the IM bit is set for the specified interrupt)
