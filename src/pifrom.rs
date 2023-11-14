@@ -28,33 +28,33 @@ impl PifRom {
 }
 
 impl Addressable for PifRom {
-    fn read_u32(&mut self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("PIF: read32 offset=${:08X}", offset);
 
         if offset < 1984 {
-            ((self.boot_rom[offset+0] as u32) << 24)
-            | ((self.boot_rom[offset+1] as u32) << 16)
-            | ((self.boot_rom[offset+2] as u32) << 8)
-            | (self.boot_rom[offset+3] as u32)
+            Ok(((self.boot_rom[offset+0] as u32) << 24)
+               | ((self.boot_rom[offset+1] as u32) << 16)
+               | ((self.boot_rom[offset+2] as u32) << 8)
+               | (self.boot_rom[offset+3] as u32))
         } else if offset == 0x7FC {
             // HACK! data is always available (bit 7 set)
             if self.command_finished { 
                 self.command_finished = false;
-                0x00000080 
+                Ok(0x00000080)
             } else { 
-                0x00000000 
+                Ok(0x00000000)
             }
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
-                self.ram[ram_offset as usize]
+                Ok(self.ram[ram_offset as usize])
             } else {
                 panic!("unhandled PIF read offset=${:08X}", offset)
             }
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x7C0 {
             eprintln!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
         } else if offset == 0x7FC {
@@ -80,7 +80,7 @@ impl Addressable for PifRom {
             }
         }
 
-        WriteReturnSignal::None
+        Ok(WriteReturnSignal::None)
     }
 }
 

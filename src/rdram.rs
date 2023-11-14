@@ -11,9 +11,9 @@ impl RdramInterface {
         }
     }
 
-    fn read_register(&mut self, offset: usize) -> u32 {
+    fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("RDRAM: read_register offset=${:08X}", offset);
-        0
+        Ok(0)
     }
 
     fn write_register(&mut self, value: u32, offset: usize, broadcast: bool) -> &mut Self {
@@ -24,7 +24,7 @@ impl RdramInterface {
 }
 
 impl Addressable for RdramInterface {
-    fn read_u32(&mut self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("RDRAM: read32 offset=${:08X}", offset);
 
         match offset {
@@ -32,8 +32,8 @@ impl Addressable for RdramInterface {
             0x0000_0000..=0x03EF_FFFF => {
                 let rdram_address = ((offset & 0x03FF_FFFF) >> 2) as usize;
                 if rdram_address < self.ram.len() {
-                    self.ram[rdram_address]
-                } else { 0 }
+                    Ok(self.ram[rdram_address])
+                } else { Ok(0) }
             },
 
             // RDRAM registers
@@ -46,19 +46,19 @@ impl Addressable for RdramInterface {
             0x0400_000C => {
                 // TODO
                 println!("RI: read RI_SELECT");
-                0
+                Ok(0)
             },
 
             // RI_REFRESH
             0x0400_0010 => {
                 println!("RI: read RI_REFRESH");
-                0
+                Ok(0)
             },
             _ => panic!("RDRAM: unhandled read32 ${:08X}", offset),
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         println!("RDRAM: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
@@ -115,7 +115,7 @@ impl Addressable for RdramInterface {
             _ => panic!("RDRAM: unhandled write32 ${:08X}", offset),
         };
 
-        WriteReturnSignal::None
+        Ok(WriteReturnSignal::None)
     }
 }
 

@@ -32,7 +32,7 @@ impl PeripheralInterface {
         }
     }
 
-    fn read_register(&mut self, offset: usize) -> u32 {
+    fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         match offset & 0xF_FFFF {
             // PI_STATUS
             0x0_0010 => {
@@ -41,14 +41,14 @@ impl PeripheralInterface {
                 if self.dma_status == 0x01 {
                     self.dma_status = 0x08;
                 }
-                ret
+                Ok(ret)
             },
             _ => panic!("PI: unhandled register read ${:08X}", offset),
         }
     }
 
-    fn write_register(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
-        match offset & 0xF_FFFF {
+    fn write_register(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        let result = match offset & 0xF_FFFF {
             // PI_DRAM_ADDR
             0x0_0000 => {
                 println!("PI: write PI_DRAM_ADDR value=${:08X}", value);
@@ -125,7 +125,9 @@ impl PeripheralInterface {
             },
 
             _ => panic!("PI: unhandled register write ${:08X}", offset),
-        }
+        };
+
+        Ok(result)
     }
 
     pub fn get_dma_info(&self, dma_info: &DmaInfo) -> &[u8] {
@@ -135,7 +137,7 @@ impl PeripheralInterface {
 }
 
 impl Addressable for PeripheralInterface {
-    fn read_u32(&mut self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("PI: read32 offset=${:08X}", offset);
 
         if offset < 0x0500_0000 {
@@ -149,27 +151,27 @@ impl Addressable for PeripheralInterface {
             println!("CART: read32 offset=${:08X}", cartridge_rom_offset);
 
             if cartridge_rom_offset >= self.cartridge_rom.len() {
-                0x00000000
+                Ok(0x00000000)
             } else {
-                ((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
-                | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
-                | ((self.cartridge_rom[cartridge_rom_offset + 2] as u32) << 8)
-                | (self.cartridge_rom[cartridge_rom_offset + 3] as u32)
+                Ok(((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
+                    | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
+                    | ((self.cartridge_rom[cartridge_rom_offset + 2] as u32) << 8)
+                    | (self.cartridge_rom[cartridge_rom_offset + 3] as u32))
             }
         } else {
             panic!("PI: invalid read at ${:08X}", offset)
         }
     }
 
-    fn read_u16(&mut self, offset: usize) -> u16 {
+    fn read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
         // 16-bit read from CART is buggy
         let i = (offset & 0x02) >> 1;
-        let ret = ((self.read_u32((offset & !0x03) + i) & 0xFFFF0000) >> 16) as u16;
+        let ret = ((self.read_u32((offset & !0x03) + i)? & 0xFFFF0000) >> 16) as u16;
         eprintln!("PI: read16 offset=${:08X} return=${:04X}", offset, ret);
-        ret
+        Ok(ret)
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         println!("PI: write32 value=${:08X} offset=${:08X}", value, offset);
 
         if offset < 0x0500_0000 {
@@ -191,17 +193,17 @@ impl Addressable for PeripheralInterface {
                 }
             }
 
-            WriteReturnSignal::None
+            Ok(WriteReturnSignal::None)
         } else if offset >= 0x13FF_0020 && offset <= 0x13FF_0220 {
             let buffer_offset = offset - 0x13FF_0020;
             self.debug_buffer[buffer_offset+0] = ((value >> 24) & 0xFF) as u8;
             self.debug_buffer[buffer_offset+1] = ((value >> 16) & 0xFF) as u8;
             self.debug_buffer[buffer_offset+2] = ((value >>  8) & 0xFF) as u8;
             self.debug_buffer[buffer_offset+3] = ((value >>  0) & 0xFF) as u8;
-            WriteReturnSignal::None
+            Ok(WriteReturnSignal::None)
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
             eprintln!("PI: wrote to ROM value=${:08X} offset=${:08X}", value, offset);
-            WriteReturnSignal::None
+            Ok(WriteReturnSignal::None)
         } else {
             panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);
         }

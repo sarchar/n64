@@ -19,8 +19,8 @@ impl Rsp {
         }
     }
 
-    fn read_register(&mut self, offset: usize) -> u32 {
-        match offset {
+    fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
+        let value = match offset {
             // SP_STATUS
             0x4_0010 => {
                 println!("RSP: read SP_STATUS");
@@ -43,7 +43,9 @@ impl Rsp {
             },
 
             _ => panic!("RSP: unknown register read ${:08X}", offset)
-        }
+        };
+
+        Ok(value)
     }
 
     fn write_register(&mut self, value: u32, offset: usize) {
@@ -74,13 +76,13 @@ impl Addressable for Rsp {
         println!("m ${:08X} ${:08X} ${:08X} ${:08X}", self.mem[base+12], self.mem[base+13], self.mem[base+14], self.mem[base+15]);
     }
 
-    fn read_u32(&mut self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("RSP: read32 offset=${:08X}", offset);
 
         match offset & 0x000F_0000 {
             0x0000_0000..=0x0003_FFFF => {
                 let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
-                self.mem[mem_offset as usize]
+                Ok(self.mem[mem_offset as usize])
             },
 
             0x0004_0000..=0x000B_FFFF => self.read_register(offset & 0x000F_FFFF),
@@ -88,7 +90,7 @@ impl Addressable for Rsp {
         }
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         println!("RSP: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset & 0x000F_0000 {
@@ -102,7 +104,7 @@ impl Addressable for Rsp {
             _ => panic!("invalid RSP write"),
         };
 
-        WriteReturnSignal::None
+        Ok(WriteReturnSignal::None)
     }
 }
 

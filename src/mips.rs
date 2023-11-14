@@ -10,10 +10,10 @@ impl MipsInterface {
 }
 
 impl Addressable for MipsInterface {
-    fn read_u32(&mut self, offset: usize) -> u32 {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("MI: read32 offset=${:08X}", offset);
 
-        match offset {
+        let result = match offset {
             // MI_VERSION
             // https://n64brew.dev/wiki/MIPS_Interface#0x0430_0004_-_MI_VERSION
             0x0_0004 => {
@@ -22,10 +22,12 @@ impl Addressable for MipsInterface {
             },
 
             _ => panic!("MI: unhandled read32 ${:08X}", offset),
-        }
+        };
+
+        Ok(result)
     }
 
-    fn write_u32(&mut self, value: u32, offset: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         println!("MI: write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
@@ -39,7 +41,7 @@ impl Addressable for MipsInterface {
             _ => panic!("MI: unhandled write32 ${:08X}", offset),
         };
 
-        WriteReturnSignal::None
+        Ok(WriteReturnSignal::None)
     }
 }
 

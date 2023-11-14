@@ -1,6 +1,8 @@
 // Co-processor 1 is the VR4300's FPU
 // This file implements the FPU emulation
 
+use crate::cpu::InstructionFault;
+
 struct InstructionDecode {
     v: u32,
     special: u32,
@@ -38,50 +40,55 @@ impl Cop1 {
     //    &mut self.gpr
     //}
 
-    pub fn ldc(&mut self, ft: usize, value: u64) {
+    pub fn ldc(&mut self, ft: usize, value: u64) -> Result<(), InstructionFault> {
         self.gpr[ft] = f64::from_bits(value);
+        Ok(())
     }
 
-    pub fn lwc(&mut self, ft: usize, value: u32) {
+    pub fn lwc(&mut self, ft: usize, value: u32) -> Result<(), InstructionFault> {
         // TODO the cast from f32 to f64 may not be correct (might need to stay as f32?)
         self.gpr[ft] = f32::from_bits(value) as f64;
+        Ok(())
     }
 
-    pub fn sdc(&mut self, ft: usize) -> u64 {
-        self.gpr[ft].to_bits()
+    pub fn sdc(&mut self, ft: usize) -> Result<u64, InstructionFault> {
+        Ok(self.gpr[ft].to_bits())
     }
 
-    pub fn swc(&mut self, ft: usize) -> u32 {
-        (self.gpr[ft] as f32).to_bits()
+    pub fn swc(&mut self, ft: usize) -> Result<u32, InstructionFault> {
+        Ok((self.gpr[ft] as f32).to_bits())
     }
 
-    pub fn cfc(&mut self, rd: usize) -> u64 {
-        self.cr[rd]
+    pub fn cfc(&mut self, rd: usize) -> Result<u64, InstructionFault> {
+        Ok(self.cr[rd])
     }
 
     // Move Control to Coprocessor
     // store gpr rt into coprocessor control register rd
-    pub fn ctc(&mut self, value: u64, rd: usize) {
+    pub fn ctc(&mut self, value: u64, rd: usize) -> Result<(), InstructionFault> {
         self.cr[rd] = value;
+        Ok(())
     }
 
-    pub fn mtc(&mut self, _value: u32, rd: usize) {
+    pub fn mtc(&mut self, _value: u32, rd: usize) -> Result<(), InstructionFault> {
         if (rd & 0x01) == 0 {
             // write value to low word of fpu gpr
         } else {
             // write high word
         }
+        Ok(())
     }
 
-    pub fn dmfc(&mut self, rd: usize) -> u64 {
-        self.gpr[rd].to_bits()
+    pub fn dmfc(&mut self, rd: usize) -> Result<u64, InstructionFault> {
+        Ok(self.gpr[rd].to_bits())
     }
 
-    pub fn dmtc(&mut self, value: u64, rd: usize) {
+    pub fn dmtc(&mut self, value: u64, rd: usize) -> Result<(), InstructionFault> {
         self.gpr[rd] = f64::from_bits(value);
+        Ok(())
     }
 
-    pub fn special(&mut self, inst: u32) {
+    pub fn special(&mut self, inst: u32) -> Result<(), InstructionFault> {
         self.inst.v       = inst;
         self.inst.special = self.inst.v & 0x3F;
         self.inst.fmt     = (self.inst.v >> 21) & 0x1F;
@@ -168,5 +175,7 @@ impl Cop1 {
             },
             _ => panic!("CPU: unknown cp1 function: 0b{:02b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07)
         };
+
+        Ok(())
     }
 }

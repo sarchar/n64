@@ -21,7 +21,7 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(pif: PifRom, pi: PeripheralInterface) -> Rcp {
+    pub fn new(pif: PifRom, pi: PeripheralInterface) -> impl Addressable {
         Rcp {
             rdp: Rdp::new(),
             rsp: Rsp::new(),
@@ -32,7 +32,7 @@ impl Rcp {
         }
     }
 
-    fn rcp_read_u32(&mut self, offset: usize) -> u32 {
+    fn rcp_read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         println!("RCP: read32 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
@@ -61,7 +61,7 @@ impl Rcp {
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
                 println!("Serial interface (SI) read");
-                0
+                Ok(0)
             }
 
             // 0x0409_0000-0x04FF_FFFF unmapped
@@ -69,7 +69,7 @@ impl Rcp {
         }
     }
 
-    fn rcp_read_u16(&mut self, offset: usize) -> u16 {
+    fn rcp_read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
         println!("RCP: read16 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
@@ -98,7 +98,7 @@ impl Rcp {
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
                 println!("Serial interface (SI) read16");
-                0
+                Ok(0)
             }
 
             // 0x0409_0000-0x04FF_FFFF unmapped
@@ -106,10 +106,10 @@ impl Rcp {
         }
     }
 
-    fn rcp_write_u32(&mut self, value: u32, offset: usize) {
+    fn rcp_write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         println!("RCP: write32 offset=${:08X}", offset);
 
-        let write_return_signal = match (offset & 0x00F0_0000) >> 20 {
+        let ret = match (offset & 0x00F0_0000) >> 20 {
             // RSP range 0x0400_0000-0x040F_FFFF 
             0 => self.rsp.write_u32(value, offset & 0x000F_FFFF),
 
@@ -122,13 +122,13 @@ impl Rcp {
             // VI 0x0440_0000-0x044F_FFFF
             4 => {
                 println!("VI: write32 value=${:08X} offset=${:08X}", value, offset);
-                WriteReturnSignal::None
+                Ok(WriteReturnSignal::None)
             },
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => {
                 println!("AI: write32");
-                WriteReturnSignal::None
+                Ok(WriteReturnSignal::None)
             },
             
             // PI 0x0460_0000-0x046F_FFFF
@@ -141,20 +141,20 @@ impl Rcp {
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
                 println!("SERIAL: interface (SI) write value=${:08X} offset=${:08X}", value, offset);
-                WriteReturnSignal::None
+                Ok(WriteReturnSignal::None)
             },
 
             // 0x0409_0000-0x04FF_FFFF unmapped
             _ => panic!("invalid RCP write"),
         };
 
-        match write_return_signal {
-            WriteReturnSignal::StartDMA(dma_info) => {
+        if let Ok(ref v) = ret {
+            if let WriteReturnSignal::StartDMA(dma_info) = v {
                 self.start_dma(dma_info)
-            },
+            }
+        }
 
-            WriteReturnSignal::None => {},
-        };
+        ret
     }
 
     fn get_physical_address(&self, address: usize) -> (MemorySegment, usize) {
@@ -175,7 +175,7 @@ impl Rcp {
     }
 
     // Slow, maybe at some point we can do more of a direct memory copy
-    fn start_dma(&mut self, dma_info: DmaInfo) {
+    fn start_dma(&mut self, dma_info: &DmaInfo) {
         println!("DMA: performing DMA!");
 
         //assert!(source_data.len() == dma_info.count as usize);
@@ -189,7 +189,7 @@ impl Rcp {
                         | ((source_data[j*4 + 2] as u32) << 8)
                         | ((source_data[j*4 + 3] as u32));
 
-            self.write_u32(word, (dma_info.dest_address + i * 4) as usize);
+            let _ = self.write_u32(word, (dma_info.dest_address + i * 4) as usize);
         }
     }
 }
@@ -202,7 +202,7 @@ impl Addressable for Rcp {
 
     // The RCP handles all bus arbitration, so that's why the primary bus access is
     // part of the Rcp module
-    fn read_u32(&mut self, address: usize) -> u32 {
+    fn read_u32(&mut self, address: usize) -> Result<u32, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: read32 address=${:08X} physical=${:08X}", address, physical_address);
 
@@ -230,7 +230,7 @@ impl Addressable for Rcp {
         }
     }
 
-    fn read_u16(&mut self, address: usize) -> u16 {
+    fn read_u16(&mut self, address: usize) -> Result<u16, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
         eprintln!("BUS: read16 address=${:08X} physical=${:08X}", address, physical_address);
 
@@ -257,11 +257,12 @@ impl Addressable for Rcp {
             _ => panic!("can't happen")
         };
 
-        eprintln!("BUS: return ${:04X}", ret);
+        if let Ok(v) = ret { eprintln!("BUS: return ${:04X}", v); }
+
         ret
     }
 
-    fn write_u32(&mut self, value: u32, address: usize) -> WriteReturnSignal {
+    fn write_u32(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
         println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
         if address == 0x800003f0 {
@@ -270,28 +271,26 @@ impl Addressable for Rcp {
 
         match physical_address & 0xFFF0_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => { self.ri.write_u32(value, physical_address & 0x03FF_FFFF); },
+            0x0000_0000..=0x03F0_0000 => self.ri.write_u32(value, physical_address & 0x03FF_FFFF),
 
             // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => { self.rcp_write_u32(value, physical_address & 0x00FF_FFFF); },
+            0x0400_0000..=0x04F0_0000 => self.rcp_write_u32(value, physical_address & 0x00FF_FFFF),
 
             // the SI external bus sits right in the middle of the PI external bus and needs further decode
             0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
                     // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.write_u32(value, physical_address & 0x000FFFFF);
+                    self.pif.write_u32(value, physical_address & 0x000FFFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.write_u32(value, physical_address & 0x7FFF_FFFF);
+                    self.pi.write_u32(value, physical_address & 0x7FFF_FFFF)
                 }
             },
 
             // 0x8000_0000 and up not mapped
             _ => panic!("can't happen")
-        };
-
-        WriteReturnSignal::None
+        }
     }
 }
 
