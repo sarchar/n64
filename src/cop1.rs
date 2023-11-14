@@ -1,6 +1,8 @@
 // Co-processor 1 is the VR4300's FPU
 // This file implements the FPU emulation
 
+use tracing::debug;
+
 use crate::cpu::InstructionFault;
 
 struct InstructionDecode {
@@ -99,79 +101,79 @@ impl Cop1 {
         match self.inst.special {
             // ADD
             0b000_000 => {
-                eprintln!("COP1: add.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+                debug!(target: "COP1", "add.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
             },
             0b000_001 => {
-                eprintln!("COP1: sub.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+                debug!(target: "COP1", "sub.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
             },
             0b000_010 => {
-                eprintln!("COP1: mul.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+                debug!(target: "COP1", "mul.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
             },
             0b000_011 => {
-                eprintln!("COP1: div.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+                debug!(target: "COP1", "div.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
             },
             0b000_100 => {
-                eprintln!("COP1: sqrt.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "sqrt.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
             },
             0b000_101 => {
-                eprintln!("COP1: abs.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "abs.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
             },
             0b000_110 => {
-                eprintln!("COP1: mov.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "mov.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
             },
             0b000_111 => {
-                eprintln!("COP1: neg.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "neg.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
             },
             0b001_000 => {
-                eprintln!("COP1: round.l f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "round.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_001 => {
-                eprintln!("COP1: trunc.l f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "trunc.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_010 => {
-                eprintln!("COP1: ceil.l f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "ceil.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_011 => {
-                eprintln!("COP1: floor.l f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "floor.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_100 => {
-                eprintln!("COP1: round.w f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "round.w f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_101 => {
-                eprintln!("COP1: trunc.w f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "trunc.w f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_110 => {
-                eprintln!("COP1: ceil.w f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "ceil.w f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b001_111 => {
-                eprintln!("COP1: floor.w f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "floor.w f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b100_000 => {
-                eprintln!("COP1: cvt.s f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "cvt.s f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b100_001 => {
-                eprintln!("COP1: cvt.d f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "cvt.d f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b100_100 => {
-                eprintln!("COP1: cvt.w f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "cvt.w f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b100_101 => {
-                eprintln!("COP1: cvt.l f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "cvt.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_001 => {
-                eprintln!("COP1: c.un f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "c.un f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_010 => {
-                eprintln!("COP1: c.eq f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "c.eq f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_100 => {
-                eprintln!("COP1: c.olt f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "c.olt f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_101 => {
-                eprintln!("COP1: c.ult f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "c.ult f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_110 => {
-                eprintln!("COP1: c.le f{}, f{}", self.inst.fd, self.inst.fs);
+                debug!(target: "COP1", "c.le f{}, f{}", self.inst.fd, self.inst.fs);
             },
             _ => panic!("CPU: unknown cp1 function: 0b{:02b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07)
         };

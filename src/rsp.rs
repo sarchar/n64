@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::*;
 
 /// N64 Reality Signal Processor
@@ -23,13 +25,13 @@ impl Rsp {
         let value = match offset {
             // SP_STATUS
             0x4_0010 => {
-                println!("RSP: read SP_STATUS");
+                debug!(target: "RSP", "read SP_STATUS");
                 self.si_status
             },
 
             // SP_DMA_BUSY
             0x4_0018 => {
-                println!("RSP: read SP_DMA_BUSY");
+                debug!(target: "RSP", "read SP_DMA_BUSY");
 
                 // mirror of DMA_BUSY in self.si_status
                 (self.si_status & 0x04) >> 2
@@ -37,7 +39,7 @@ impl Rsp {
 
             // SP_PC
             0x8_0000 => {
-                println!("RSP: read SP_PC");
+                debug!(target: "RSP", "read SP_PC");
 
                 self.pc
             },
@@ -52,12 +54,12 @@ impl Rsp {
         match offset {
             // SP_STATUS 
             0x4_0010 => {
-                println!("RSP: write SP_STATUS");
+                debug!(target: "RSP", "write SP_STATUS");
             },
 
             // SP_PC
             0x8_0000 => {
-                println!("RSP: write SP_PC value=${:08X}", value);
+                debug!(target: "RSP", "write SP_PC value=${:08X}", value);
 
                 self.pc = value;
             },
@@ -77,7 +79,7 @@ impl Addressable for Rsp {
     }
 
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("RSP: read32 offset=${:08X}", offset);
+        debug!(target: "RSP", "read32 offset=${:08X}", offset);
 
         match offset & 0x000F_0000 {
             0x0000_0000..=0x0003_FFFF => {
@@ -91,7 +93,7 @@ impl Addressable for Rsp {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        println!("RSP: write32 value=${:08X} offset=${:08X}", value, offset);
+        debug!(target: "RSP", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset & 0x000F_0000 {
             0x0000_0000..=0x0003_FFFF => {

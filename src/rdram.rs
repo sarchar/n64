@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::*;
 
 pub struct RdramInterface {
@@ -12,12 +14,12 @@ impl RdramInterface {
     }
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("RDRAM: read_register offset=${:08X}", offset);
+        debug!(target: "RDRAM", "read_register offset=${:08X}", offset);
         Ok(0)
     }
 
     fn write_register(&mut self, value: u32, offset: usize, broadcast: bool) -> &mut Self {
-        println!("RDRAM: write_register value=${:08X} offset=${:08X} broadcast={}", value, offset, broadcast);
+        debug!(target: "RDRAM", "write_register value=${:08X} offset=${:08X} broadcast={}", value, offset, broadcast);
 
         self
     }
@@ -25,7 +27,7 @@ impl RdramInterface {
 
 impl Addressable for RdramInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("RDRAM: read32 offset=${:08X}", offset);
+        debug!(target: "RDRAM", "read32 offset=${:08X}", offset);
 
         match offset {
             // RDRAM memory space
@@ -45,13 +47,13 @@ impl Addressable for RdramInterface {
             // RI_SELECT
             0x0400_000C => {
                 // TODO
-                println!("RI: read RI_SELECT");
+                debug!(target: "RDRAM", "read RI_SELECT");
                 Ok(0)
             },
 
             // RI_REFRESH
             0x0400_0010 => {
-                println!("RI: read RI_REFRESH");
+                debug!(target: "RDRAM", "read RI_REFRESH");
                 Ok(0)
             },
             _ => panic!("RDRAM: unhandled read32 ${:08X}", offset),
@@ -59,7 +61,7 @@ impl Addressable for RdramInterface {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        println!("RDRAM: write32 value=${:08X} offset=${:08X}", value, offset);
+        debug!(target: "RDRAM", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
             // RDRAM memory space
@@ -83,32 +85,32 @@ impl Addressable for RdramInterface {
 
             // RI_MODE
             0x0400_0000 => {
-                println!("RI: write RI_MODE value=${:08X}", value);
+                debug!(target: "RDRAM", "write RI_MODE value=${:08X}", value);
                 assert!(value == 0 || value == 0x0E);
             },
 
             // RI_CONFIG
             0x0400_0004 => {
-                println!("RI: write RI_CONFIG value=${:08X}", value);
+                debug!(target: "RDRAM", "write RI_CONFIG value=${:08X}", value);
                 assert!(value == 0x40);
             },
 
             // RI_CURRENT_LOAD
             0x0400_0008 => { 
-                println!("RI: write RI_CURRENT_LOAD value=${:08X}", value);
+                debug!(target: "RDRAM", "write RI_CURRENT_LOAD value=${:08X}", value);
                 assert!(value == 0);
             },
 
 
             // RI_SELECT
             0x0400_000C => {
-                println!("RI: write RI_SELECT value=${:08X}", value);
+                debug!(target: "RDRAM", "write RI_SELECT value=${:08X}", value);
                 assert!(value == 0x14);
             },
 
             // RI_REFRESH
             0x0400_0010 => {
-                println!("RI: write RI_REFRESH value=${:08X}", value);
+                debug!(target: "RDRAM", "write RI_REFRESH value=${:08X}", value);
                 assert!(value == 0x00063634);
             },
 

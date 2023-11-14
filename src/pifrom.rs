@@ -1,4 +1,5 @@
 use std::fs;
+use tracing::{debug, error};
 
 use crate::*;
 
@@ -29,7 +30,7 @@ impl PifRom {
 
 impl Addressable for PifRom {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("PIF: read32 offset=${:08X}", offset);
+        debug!(target: "PIF", "read32 offset=${:08X}", offset);
 
         if offset < 1984 {
             Ok(((self.boot_rom[offset+0] as u32) << 24)
@@ -56,18 +57,18 @@ impl Addressable for PifRom {
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x7C0 {
-            eprintln!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
+            error!(target: "PIF", "invalid write value=${:08X} offset=${:08X}", value, offset);
         } else if offset == 0x7FC {
             //panic!("PIF: write command port");
             if (value & 0x10) != 0 {
-                println!("PIF: disable PIF-ROM access");
+                debug!(target: "PIF", "disable PIF-ROM access");
             } else if (value & 0x20) != 0 {
-                println!("PIF: CPU checksum ready");
+                debug!(target: "PIF", "CPU checksum ready");
                 self.command_finished = true;
             } else if (value & 0x40) != 0 {
-                println!("PIF: run checksum");
+                debug!(target: "PIF", "run checksum");
             } else if (value & 0x08) != 0 {
-                println!("PIF: Yay! BOOT IS DONE!");
+                debug!(target: "PIF", "Yay! BOOT IS DONE!");
             } else if (value & 0x07) != 0 {
                 panic!("PIF: not implemented PIF command ${:08X}", value);
             }

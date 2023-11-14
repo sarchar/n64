@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::*;
 
 use crate::rdp::Rdp;
@@ -33,7 +35,7 @@ impl Rcp {
     }
 
     fn rcp_read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("RCP: read32 offset=${:08X}", offset);
+        debug!(target: "RCP", "read32 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
             // RSP range 0x0400_0000-0x040F_FFFF 
@@ -60,7 +62,7 @@ impl Rcp {
 
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
-                println!("Serial interface (SI) read");
+                debug!(target: "RCP", "unimplemented serial interface (SI) read");
                 Ok(0)
             }
 
@@ -70,7 +72,7 @@ impl Rcp {
     }
 
     fn rcp_read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
-        println!("RCP: read16 offset=${:08X}", offset);
+        debug!(target: "RCP", "read16 offset=${:08X}", offset);
 
         match (offset & 0x00F0_0000) >> 20 {
             // RSP range 0x0400_0000-0x040F_FFFF 
@@ -97,7 +99,7 @@ impl Rcp {
 
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
-                println!("Serial interface (SI) read16");
+                debug!(target: "RCP", "unimplemented serial interface (SI) read16");
                 Ok(0)
             }
 
@@ -107,7 +109,7 @@ impl Rcp {
     }
 
     fn rcp_write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        println!("RCP: write32 offset=${:08X}", offset);
+        debug!(target: "RCP", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         let ret = match (offset & 0x00F0_0000) >> 20 {
             // RSP range 0x0400_0000-0x040F_FFFF 
@@ -121,13 +123,13 @@ impl Rcp {
 
             // VI 0x0440_0000-0x044F_FFFF
             4 => {
-                println!("VI: write32 value=${:08X} offset=${:08X}", value, offset);
+                debug!(target: "RCP", "unimplemented VI: write32");
                 Ok(WriteReturnSignal::None)
             },
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => {
-                println!("AI: write32");
+                debug!(target: "RCP", "unimplemented AI: write32");
                 Ok(WriteReturnSignal::None)
             },
             
@@ -140,7 +142,7 @@ impl Rcp {
 
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
-                println!("SERIAL: interface (SI) write value=${:08X} offset=${:08X}", value, offset);
+                debug!(target: "RCP", "unimplemented SI: write32");
                 Ok(WriteReturnSignal::None)
             },
 
@@ -176,7 +178,7 @@ impl Rcp {
 
     // Slow, maybe at some point we can do more of a direct memory copy
     fn start_dma(&mut self, dma_info: &DmaInfo) {
-        println!("DMA: performing DMA!");
+        debug!(target: "RCP::DMA", "performing DMA!");
 
         //assert!(source_data.len() == dma_info.count as usize);
         assert!((dma_info.count % 4) == 0);
@@ -204,7 +206,7 @@ impl Addressable for Rcp {
     // part of the Rcp module
     fn read_u32(&mut self, address: usize) -> Result<u32, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
-        println!("BUS: read32 address=${:08X} physical=${:08X}", address, physical_address);
+        debug!(target: "RCP", "bus read32 address=${:08X} physical=${:08X}", address, physical_address);
 
         match physical_address & 0xFC00_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
@@ -232,9 +234,9 @@ impl Addressable for Rcp {
 
     fn read_u16(&mut self, address: usize) -> Result<u16, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
-        eprintln!("BUS: read16 address=${:08X} physical=${:08X}", address, physical_address);
+        debug!(target: "RCP", "bus read16 address=${:08X} physical=${:08X}", address, physical_address);
 
-        let ret = match physical_address & 0xFC00_0000 {
+        match physical_address & 0xFC00_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
             0x0000_0000 => self.ri.read_u16(physical_address & 0x03FF_FFFF),
 
@@ -255,19 +257,12 @@ impl Addressable for Rcp {
 
             // 0x8000_0000 and up not mapped
             _ => panic!("can't happen")
-        };
-
-        if let Ok(v) = ret { eprintln!("BUS: return ${:04X}", v); }
-
-        ret
+        }
     }
 
     fn write_u32(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
-        println!("BUS: write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
-        if address == 0x800003f0 {
-            panic!("writing mem size");
-        }
+        debug!(target: "RCP", "bus write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
 
         match physical_address & 0xFFF0_0000 {
             // RDRAM 0x00000000-0x03FFFFFF

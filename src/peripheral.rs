@@ -2,6 +2,8 @@ use std::cmp;
 use std::fs;
 use std::str;
 
+use tracing::{debug,info};
+
 use crate::*;
 
 /// N64 Peripheral Interface
@@ -14,7 +16,7 @@ pub struct PeripheralInterface {
     cartridge_rom: Vec<u8>,
 
     debug_buffer: Vec<u8>,
-    debug_newline: bool,
+    debug_string: String,
 }
 
 impl PeripheralInterface {
@@ -28,7 +30,7 @@ impl PeripheralInterface {
             cartridge_rom: cartridge_rom,
 
             debug_buffer: vec![0; 0x200],
-            debug_newline: true,
+            debug_string: String::new(),
         }
     }
 
@@ -36,7 +38,7 @@ impl PeripheralInterface {
         match offset & 0xF_FFFF {
             // PI_STATUS
             0x0_0010 => {
-                println!("PI: read PI_STATUS");
+                debug!(target: "PI", "read PI_STATUS");
                 let ret = self.dma_status;
                 if self.dma_status == 0x01 {
                     self.dma_status = 0x08;
@@ -51,7 +53,7 @@ impl PeripheralInterface {
         let result = match offset & 0xF_FFFF {
             // PI_DRAM_ADDR
             0x0_0000 => {
-                println!("PI: write PI_DRAM_ADDR value=${:08X}", value);
+                debug!(target: "PI", "write PI_DRAM_ADDR value=${:08X}", value);
                 self.dram_addr = value;
 
                 WriteReturnSignal::None
@@ -59,7 +61,7 @@ impl PeripheralInterface {
 
             // PI_CART_ADDR
             0x0_0004 => {
-                println!("PI: write PI_CART_ADDR value=${:08X}", value);
+                debug!(target: "PI", "write PI_CART_ADDR value=${:08X}", value);
                 self.cart_addr = value;
 
                 WriteReturnSignal::None
@@ -67,7 +69,7 @@ impl PeripheralInterface {
 
             // PI_WR_LEN
             0x0_000C => {
-                println!("PI: write PI_WR_LEN value=${:08X}", value);
+                debug!(target: "PI", "write PI_WR_LEN value=${:08X}", value);
 
                 assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000); // right now only cartridge rom is valid for dma
 
@@ -93,34 +95,34 @@ impl PeripheralInterface {
 
             // PI_STATUS
             0x0_0010 => {
-                println!("PI: write PI_STATUS value=${:08X}", value);
-                if (value & 0x01) != 0 { println!("PI: DMA reset"); }
-                if (value & 0x02) != 0 { println!("PI: clear interrupt flag"); }
+                debug!(target: "PI", "write PI_STATUS value=${:08X}", value);
+                if (value & 0x01) != 0 { debug!(target: "PI", "DMA reset"); }
+                if (value & 0x02) != 0 { debug!(target: "PI", "clear interrupt flag"); }
 
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_LAT
             0x0_0014 => {
-                println!("PI: write PI_BSD_DOM1_LAT");
+                debug!(target: "PI", "write PI_BSD_DOM1_LAT");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_PWD
             0x0_0018 => {
-                println!("PI: write PI_BSD_DOM1_PWD");
+                debug!(target: "PI", "write PI_BSD_DOM1_PWD");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_PGS
             0x0_001C => {
-                println!("PI: write PI_BSD_DOM1_PGS");
+                debug!(target: "PI", "write PI_BSD_DOM1_PGS");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_RLS
             0x0_0020 => {
-                println!("PI: write PI_BSD_DOM1_RLS");
+                debug!(target: "PI", "write PI_BSD_DOM1_RLS");
                 WriteReturnSignal::None
             },
 
@@ -138,7 +140,7 @@ impl PeripheralInterface {
 
 impl Addressable for PeripheralInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("PI: read32 offset=${:08X}", offset);
+        debug!(target: "PI", "read32 offset=${:08X}", offset);
 
         if offset < 0x0500_0000 {
             self.read_register(offset)
@@ -148,7 +150,7 @@ impl Addressable for PeripheralInterface {
             panic!("Cartridge SRAM/FlashRAM read")
         } else if offset < 0x1FC0_0000 {
             let cartridge_rom_offset = offset & 0x0FFF_FFFF;
-            println!("CART: read32 offset=${:08X}", cartridge_rom_offset);
+            debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);
 
             if cartridge_rom_offset >= self.cartridge_rom.len() {
                 Ok(0x00000000)
@@ -159,6 +161,8 @@ impl Addressable for PeripheralInterface {
                     | (self.cartridge_rom[cartridge_rom_offset + 3] as u32))
             }
         } else {
+            // Right now, GoldenEye crashes reading $70000510 because virtual memory isn't
+            // implemented
             panic!("PI: invalid read at ${:08X}", offset)
         }
     }
@@ -167,12 +171,12 @@ impl Addressable for PeripheralInterface {
         // 16-bit read from CART is buggy
         let i = (offset & 0x02) >> 1;
         let ret = ((self.read_u32((offset & !0x03) + i)? & 0xFFFF0000) >> 16) as u16;
-        eprintln!("PI: read16 offset=${:08X} return=${:04X}", offset, ret);
+        debug!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
         Ok(ret)
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        println!("PI: write32 value=${:08X} offset=${:08X}", value, offset);
+        debug!(target: "PI", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         if offset < 0x0500_0000 {
             self.write_register(value, offset)
@@ -181,15 +185,11 @@ impl Addressable for PeripheralInterface {
             let msg = str::from_utf8(slice).unwrap();
 
             for c in msg.chars() {
-                if self.debug_newline {
-                    eprint!("DEBUG: message: ");
-                    self.debug_newline = false;
-                }
-
-                eprint!("{}", c);
-
                 if c == '\n' {
-                    self.debug_newline = true;
+                    info!(target: "PI", "message: {}", self.debug_string);
+                    self.debug_string = String::new();
+                } else {
+                    self.debug_string.push(c);
                 }
             }
 
@@ -202,7 +202,7 @@ impl Addressable for PeripheralInterface {
             self.debug_buffer[buffer_offset+3] = ((value >>  0) & 0xFF) as u8;
             Ok(WriteReturnSignal::None)
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
-            eprintln!("PI: wrote to ROM value=${:08X} offset=${:08X}", value, offset);
+            debug!(target: "PI", "wrote to ROM value=${:08X} offset=${:08X}", value, offset);
             Ok(WriteReturnSignal::None)
         } else {
             panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);

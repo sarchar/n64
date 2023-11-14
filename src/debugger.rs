@@ -9,6 +9,8 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use rustyline::Result as RustylineResult;
 
+use tracing_core::Level;
+
 use crate::*;
 //use crate::cpu::Cpu;
 
@@ -42,6 +44,8 @@ pub struct Debugger {
     breakpoints: Rc<RefCell<Breakpoints>>,
 
     system: System,
+
+    change_logging: Box<dyn Fn(&str, Level) -> ()>,
 }
 
 impl Breakpoints {
@@ -102,7 +106,8 @@ impl Breakpoints {
 }
 
 impl Debugger {
-    pub fn new(mut system: System) -> Debugger {
+
+    pub fn new(mut system: System, change_logging: Box<dyn Fn(&str, Level) -> ()>) -> Debugger {
         let cpu_running = Arc::new(AtomicBool::new(false));
         let r = cpu_running.clone();
 
@@ -118,12 +123,13 @@ impl Debugger {
         system.cpu.bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
 
         Debugger {
-            alive        : true,
-            ctrlc_count  : 0,
-            cpu_run_til  : None,
-            cpu_running  : cpu_running,
-            breakpoints  : breakpoints,
-            system       : system,
+            alive         : true,
+            ctrlc_count   : 0,
+            cpu_run_til   : None,
+            cpu_running   : cpu_running,
+            breakpoints   : breakpoints,
+            system        : system,
+            change_logging: change_logging,
         }
     }
 
@@ -203,6 +209,7 @@ impl Debugger {
                  | "break" | "bp"           => { self.breakpoint(&parts) },
                 "db" | "del" | "dbr" 
                  | "dbrea" | "dbreak"       => { self.delete_breakpoint(&parts) },
+                "log"                       => { self.logging(&parts) },
 
                 _ => {
                     Err(format!("unsupported debugger command \"{}\"", parts[0]))
@@ -377,6 +384,30 @@ impl Debugger {
         Ok(())
     }
 
+    fn logging(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+        if parts.len() < 2 || parts.len() > 3 {
+            return Err(format!("usage: loglevel debug|info|warn|error|trace (module=level[,module=level])"));
+        }
+
+        let default_level = match parts[1].to_lowercase().as_str() {
+            "info" => Level::INFO,
+            "debug" => Level::DEBUG,
+            "warn" => Level::WARN,
+            "error" => Level::ERROR,
+            "trace" => Level::TRACE,
+            _ => { return Err(format!("invalid default level \"{}\"", parts[2])); }
+        };
+
+        let format_str = if parts.len() == 3 {
+            parts[2]
+        } else {
+            ""
+        };
+
+        (self.change_logging)(format_str, default_level);
+
+        Ok(())
+    }
 }
 
 pub struct DebuggerBus {
