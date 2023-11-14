@@ -2,7 +2,7 @@ use std::cmp;
 use std::fs;
 use std::str;
 
-use tracing::{debug,info};
+use tracing::{debug,info,warn};
 
 use crate::*;
 
@@ -163,7 +163,8 @@ impl Addressable for PeripheralInterface {
         } else {
             // Right now, GoldenEye crashes reading $70000510 because virtual memory isn't
             // implemented
-            panic!("PI: invalid read at ${:08X}", offset)
+            warn!(target: "PI", "invalid read at ${:08X}", offset);
+            Err(ReadWriteFault::Invalid)
         }
     }
 

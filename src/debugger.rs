@@ -12,6 +12,7 @@ use rustyline::Result as RustylineResult;
 use tracing_core::Level;
 
 use crate::*;
+
 //use crate::cpu::Cpu;
 
 const BP_READ : u8 = 0x01;
@@ -141,8 +142,20 @@ impl Debugger {
         }
 
         let mut lastline = String::from("");
+        let mut last_printed_pc = 0;
         while self.alive {
-            let prompt = format!("<PC:${:08X}>@ ", self.system.cpu.next_instruction_pc());
+            let next_instruction_pc = *self.system.cpu.next_instruction_pc();
+            if last_printed_pc != next_instruction_pc {
+                let inst = cpu::Cpu::disassemble(next_instruction_pc, *self.system.cpu.next_instruction(), true);
+                print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
+                if *self.system.cpu.next_is_delay_slot() {
+                    print!(" (delay slot)");
+                }
+                println!("");
+                last_printed_pc = next_instruction_pc;
+            }
+
+            let prompt = format!("<PC:${:08X}>@ ", next_instruction_pc);
             let readline = rl.readline(&prompt);
 
             match readline {
@@ -210,6 +223,7 @@ impl Debugger {
                 "db" | "del" | "dbr" 
                  | "dbrea" | "dbreak"       => { self.delete_breakpoint(&parts) },
                 "log"                       => { self.logging(&parts) },
+                "l" | "li" | "lis" | "list" => { self.listing(&parts) },
 
                 _ => {
                     Err(format!("unsupported debugger command \"{}\"", parts[0]))
@@ -236,6 +250,10 @@ impl Debugger {
         }
 
         while self.cpu_running.load(Ordering::SeqCst) {
+            //let address = *self.system.cpu.next_instruction_pc();
+            //let inst = cpu::Cpu::disassemble(address, *self.system.cpu.next_instruction(), true);
+            //println!("${:08X}: {}", address, inst);
+
             // Break loop on any instruction error
             if let Err(_) = self.system.step() {
                 break;
@@ -303,7 +321,7 @@ impl Debugger {
         
         for k in 0..8 {
             for j in 0..4 {
-                print!("R{:02}(${}): ${:08X}_{:08X} ", k*4+j, self.system.cpu.abi_name(k*4+j), regs[(k*4+j) as usize] >> 32, regs[(k*4+j) as usize] & 0xFFFF_FFFF);
+                print!("R{:02}(${}): ${:08X}_{:08X} ", k*4+j, cpu::Cpu::abi_name(k*4+j), regs[(k*4+j) as usize] >> 32, regs[(k*4+j) as usize] & 0xFFFF_FFFF);
             }
             println!("");
         }
@@ -318,7 +336,7 @@ impl Debugger {
         
         for k in 0..4 {
             for j in 0..8 {
-                print!("R{:02}(${}): {:08X} ", k*8+j, self.system.cpu.abi_name(k*8+j), regs[(k*8+j) as usize] & 0xFFFF_FFFF);
+                print!("R{:02}(${}): {:08X} ", k*8+j, cpu::Cpu::abi_name(k*8+j), regs[(k*8+j) as usize] & 0xFFFF_FFFF);
             }
             println!("");
         }
@@ -405,6 +423,42 @@ impl Debugger {
         };
 
         (self.change_logging)(format_str, default_level);
+
+        Ok(())
+    }
+
+    fn listing(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+        let start_pc = self.system.cpu.next_instruction_pc(); // TODO set from an argument
+        let mut count = 10;
+
+        if parts.len() >= 3 {
+            return Err(format!("usage: l[ist] [count (default 10)]"));
+        }
+
+        if parts.len() == 2 {
+            count = match parse_int(&parts[1]) {
+                Err(err) => { return Err(err); },
+                Ok(v) => { if v < 0 { return Err(format!("number must be positive")); } v as u32 },
+            };
+        }
+
+        for i in 0..count {
+            let addr = start_pc + i * 4;
+            print!("${:08X}: ", addr);
+
+            if let Ok(op) = self.system.cpu.bus.borrow_mut().read_u32(addr as usize) {
+                let inst = cpu::Cpu::disassemble(addr, op, true);
+                print!("{}", inst);
+            } else {
+                print!("<unaccessable>");
+            }
+
+            if addr == *self.system.cpu.next_instruction_pc() {
+                print!(" <-");
+            }
+
+            println!("");
+        }
 
         Ok(())
     }
