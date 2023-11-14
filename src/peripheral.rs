@@ -2,7 +2,7 @@ use std::cmp;
 use std::fs;
 use std::str;
 
-use tracing::{debug,info,warn};
+use tracing::{debug,info,warn,error};
 
 use crate::*;
 
@@ -147,7 +147,8 @@ impl Addressable for PeripheralInterface {
         } else if offset < 0x0800_0000 {
             panic!("N64DD read")
         } else if offset < 0x1000_0000 {
-            panic!("Cartridge SRAM/FlashRAM read")
+            error!(target: "PI", "unimplemented Cartridge SRAM/FlashRAM read");
+            Ok(0)
         } else if offset < 0x1FC0_0000 {
             let cartridge_rom_offset = offset & 0x0FFF_FFFF;
             debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);

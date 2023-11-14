@@ -1,4 +1,4 @@
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::*;
 
@@ -44,7 +44,11 @@ impl Rsp {
                 self.pc
             },
 
-            _ => panic!("RSP: unknown register read ${:08X}", offset)
+            _ => {
+                error!(target: "RSP", "unknown register read offset=${:08X}", offset);
+
+                0
+            },
         };
 
         Ok(value)
@@ -64,7 +68,7 @@ impl Rsp {
                 self.pc = value;
             },
 
-            _ => panic!("RSP: unknown register write ${:08X}", offset)
+            _ => error!(target: "RSP", "unknown register write offset=${:08X}", offset)
         };
     }
 }

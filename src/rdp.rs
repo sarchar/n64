@@ -1,6 +1,6 @@
 use crate::*;
 
-use tracing::debug;
+use tracing::{debug, error};
 
 pub struct Rdp {
 }
@@ -17,7 +17,10 @@ impl Addressable for Rdp {
         match offset {
             // DP_STATUS 
             0x0010_000C => Ok(0),
-            _ => panic!("invalid RDP read"),
+            _ => {
+                error!(target: "RDP", "invalid or unimplemented RDP read from offset=${:08X}", offset);
+                Ok(0)
+            },
         }
     }
 

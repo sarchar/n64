@@ -1,7 +1,7 @@
 // Co-processor 1 is the VR4300's FPU
 // This file implements the FPU emulation
 
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::cpu::InstructionFault;
 
@@ -160,11 +160,17 @@ impl Cop1 {
             0b100_101 => {
                 debug!(target: "COP1", "cvt.l f{}, f{}", self.inst.fd, self.inst.fs);
             },
+            0b110_000 => {
+                debug!(target: "COP1", "c.f f{}, f{}", self.inst.fd, self.inst.fs);
+            },
             0b110_001 => {
                 debug!(target: "COP1", "c.un f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_010 => {
                 debug!(target: "COP1", "c.eq f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b110_011 => {
+                debug!(target: "COP1", "c.ueq f{}, f{}", self.inst.fd, self.inst.fs);
             },
             0b110_100 => {
                 debug!(target: "COP1", "c.olt f{}, f{}", self.inst.fd, self.inst.fs);
@@ -175,7 +181,34 @@ impl Cop1 {
             0b110_110 => {
                 debug!(target: "COP1", "c.le f{}, f{}", self.inst.fd, self.inst.fs);
             },
-            _ => panic!("CPU: unknown cp1 function: 0b{:02b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07)
+            0b110_111 => {
+                debug!(target: "COP1", "c.ule f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_000 => {
+                debug!(target: "COP1", "c.sf f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_001 => {
+                debug!(target: "COP1", "c.ngle f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_010 => {
+                debug!(target: "COP1", "c.seq f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_011 => {
+                debug!(target: "COP1", "c.ngl f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_100 => {
+                debug!(target: "COP1", "c.lt f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_101 => {
+                debug!(target: "COP1", "c.nge f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_110 => {
+                debug!(target: "COP1", "c.le f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            0b111_111 => {
+                debug!(target: "COP1", "c.ngt f{}, f{}", self.inst.fd, self.inst.fs);
+            },
+            _ => error!(target: "CPU", "COP1: unknown cp1 function: 0b{:02b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07)
         };
 
         Ok(())

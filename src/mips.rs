@@ -1,4 +1,4 @@
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::*;
 
@@ -23,7 +23,10 @@ impl Addressable for MipsInterface {
                 0x0202_0102
             },
 
-            _ => panic!("MI: unhandled read32 ${:08X}", offset),
+            _ => {
+                error!(target: "MI", "unimplemented read32 offset=${:08X}", offset);
+                0
+            },
         };
 
         Ok(result)

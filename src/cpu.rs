@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::*;
 
@@ -33,9 +33,9 @@ const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruc
 const ExceptionCode_AdES : u64 = 5;  // Address Error exception (store)
 const _ExceptionCode_IBE  : u64 = 6;  // Bus Error exception (instruction fetch)
 const _ExceptionCode_DBE  : u64 = 7;  // Bus Error exception (data reference: load or store)
-const _ExceptionCode_Sys  : u64 = 8;  // Syscall exception
-const _ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
-const _ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
+const ExceptionCode_Sys  : u64 = 8;  // Syscall exception
+const ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
+const ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
 const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
 const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
 const ExceptionCode_Tr   : u64 = 13; // Trap instruction
@@ -135,35 +135,35 @@ impl Cpu {
 
             // Sorry for making these so wide, but it maps to the instruction decode table in the datasheet better!
             instruction_table: [
-                // _000               _001               _010               _011               _100               _101               _110               _111
-   /* 000_ */   Cpu::inst_special, Cpu::inst_regimm , Cpu::inst_j      , Cpu::inst_jal    , Cpu::inst_beq    , Cpu::inst_bne    , Cpu::inst_blez   , Cpu::inst_bgtz   ,
-   /* 001_ */   Cpu::inst_addi   , Cpu::inst_addiu  , Cpu::inst_slti   , Cpu::inst_sltiu  , Cpu::inst_andi   , Cpu::inst_ori    , Cpu::inst_xori   , Cpu::inst_lui    ,
-   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop    , Cpu::inst_cop2   , Cpu::inst_invalid, Cpu::inst_beql   , Cpu::inst_bnel   , Cpu::inst_blezl  , Cpu::inst_unknown,
-   /* 011_ */   Cpu::inst_daddi  , Cpu::inst_daddiu , Cpu::inst_ldl    , Cpu::inst_ldr    , Cpu::inst_invalid, Cpu::inst_invalid, Cpu::inst_invalid, Cpu::inst_invalid,
-   /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh     , Cpu::inst_lwl    , Cpu::inst_lw     , Cpu::inst_lbu    , Cpu::inst_lhu    , Cpu::inst_lwr    , Cpu::inst_lwu    ,
-   /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh     , Cpu::inst_swl    , Cpu::inst_sw     , Cpu::inst_sdl    , Cpu::inst_sdr    , Cpu::inst_swr    , Cpu::inst_cache  ,
-   /* 110_ */   Cpu::inst_ll     , Cpu::inst_lwc1   , Cpu::inst_unknown, Cpu::inst_invalid, Cpu::inst_unknown, Cpu::inst_ldc1   , Cpu::inst_unknown, Cpu::inst_ld     ,
-   /* 111_ */   Cpu::inst_sc     , Cpu::inst_swc1   , Cpu::inst_unknown, Cpu::inst_invalid, Cpu::inst_unknown, Cpu::inst_sdc1   , Cpu::inst_unknown, Cpu::inst_sd
+                //  _000               _001              _010               _011                _100                _101                _110                _111
+   /* 000_ */   Cpu::inst_special, Cpu::inst_regimm, Cpu::inst_j      , Cpu::inst_jal     , Cpu::inst_beq     , Cpu::inst_bne     , Cpu::inst_blez    , Cpu::inst_bgtz    ,
+   /* 001_ */   Cpu::inst_addi   , Cpu::inst_addiu , Cpu::inst_slti   , Cpu::inst_sltiu   , Cpu::inst_andi    , Cpu::inst_ori     , Cpu::inst_xori    , Cpu::inst_lui     ,
+   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop   , Cpu::inst_cop2   , Cpu::inst_reserved, Cpu::inst_beql    , Cpu::inst_bnel    , Cpu::inst_blezl   , Cpu::inst_bgtzl   ,
+   /* 011_ */   Cpu::inst_daddi  , Cpu::inst_daddiu, Cpu::inst_ldl    , Cpu::inst_ldr     , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
+   /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh    , Cpu::inst_lwl    , Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_lwr     , Cpu::inst_lwu     ,
+   /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh    , Cpu::inst_swl    , Cpu::inst_sw      , Cpu::inst_sdl     , Cpu::inst_sdr     , Cpu::inst_swr     , Cpu::inst_cache   ,
+   /* 110_ */   Cpu::inst_ll     , Cpu::inst_lwc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_ldc1    , Cpu::inst_unknown , Cpu::inst_ld      ,
+   /* 111_ */   Cpu::inst_sc     , Cpu::inst_swc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_sdc1    , Cpu::inst_unknown , Cpu::inst_sd
             ],
 
             special_table: [
-                    //   _000                       _001                       _010                       _011                       _100                       _101                       _110                       _111
-   /* 000_ */   Cpu::special_sll    , Cpu::special_invalid, Cpu::special_srl    , Cpu::special_sra    , Cpu::special_sllv   , Cpu::special_invalid, Cpu::special_srlv   , Cpu::special_srav   ,
-   /* 001_ */   Cpu::special_jr     , Cpu::special_jalr   , Cpu::special_invalid, Cpu::special_invalid, Cpu::special_unknown, Cpu::special_unknown, Cpu::special_invalid, Cpu::special_sync   ,
-   /* 010_ */   Cpu::special_mfhi   , Cpu::special_mthi   , Cpu::special_mflo   , Cpu::special_mtlo   , Cpu::special_dsllv  , Cpu::special_invalid, Cpu::special_dsrlv  , Cpu::special_dsrav  ,
+               //   _000                  _001                  _010                  _011                  _100                  _101                  _110                  _111
+   /* 000_ */   Cpu::special_sll    , Cpu::inst_reserved  , Cpu::special_srl    , Cpu::special_sra    , Cpu::special_sllv   , Cpu::inst_reserved  , Cpu::special_srlv   , Cpu::special_srav   ,
+   /* 001_ */   Cpu::special_jr     , Cpu::special_jalr   , Cpu::inst_reserved  , Cpu::inst_reserved  , Cpu::special_syscall, Cpu::special_break  , Cpu::inst_reserved  , Cpu::special_sync   ,
+   /* 010_ */   Cpu::special_mfhi   , Cpu::special_mthi   , Cpu::special_mflo   , Cpu::special_mtlo   , Cpu::special_dsllv  , Cpu::inst_reserved  , Cpu::special_dsrlv  , Cpu::special_dsrav  ,
    /* 011_ */   Cpu::special_mult   , Cpu::special_multu  , Cpu::special_div    , Cpu::special_divu   , Cpu::special_dmult  , Cpu::special_dmultu , Cpu::special_ddiv   , Cpu::special_ddivu  ,
    /* 100_ */   Cpu::special_add    , Cpu::special_addu   , Cpu::special_sub    , Cpu::special_subu   , Cpu::special_and    , Cpu::special_or     , Cpu::special_xor    , Cpu::special_nor    ,
-   /* 101_ */   Cpu::special_invalid, Cpu::special_invalid, Cpu::special_slt    , Cpu::special_sltu   , Cpu::special_dadd   , Cpu::special_daddu  , Cpu::special_dsub   , Cpu::special_dsubu  ,
-   /* 110_ */   Cpu::special_unknown, Cpu::special_unknown, Cpu::special_unknown, Cpu::special_unknown, Cpu::special_teq    , Cpu::special_invalid, Cpu::special_unknown, Cpu::special_invalid,
-   /* 111_ */   Cpu::special_dsll   , Cpu::special_invalid, Cpu::special_dsrl   , Cpu::special_dsra   , Cpu::special_dsll32 , Cpu::special_invalid, Cpu::special_dsrl32 , Cpu::special_dsra32 ,
+   /* 101_ */   Cpu::inst_reserved  , Cpu::inst_reserved  , Cpu::special_slt    , Cpu::special_sltu   , Cpu::special_dadd   , Cpu::special_daddu  , Cpu::special_dsub   , Cpu::special_dsubu  ,
+   /* 110_ */   Cpu::special_tge    , Cpu::special_tgeu   , Cpu::special_tlt    , Cpu::special_tltu   , Cpu::special_teq    , Cpu::inst_reserved  , Cpu::special_tne    , Cpu::inst_reserved  ,
+   /* 111_ */   Cpu::special_dsll   , Cpu::inst_reserved  , Cpu::special_dsrl   , Cpu::special_dsra   , Cpu::special_dsll32 , Cpu::inst_reserved  , Cpu::special_dsrl32 , Cpu::special_dsra32 ,
             ],
 
             regimm_table: [
                     //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
-   /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::regimm_bgezl  , Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid,
-   /* 01_ */    Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_invalid, Cpu::regimm_unknown, Cpu::regimm_invalid,
-   /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid,
-   /* 11_ */    Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid, Cpu::regimm_invalid,
+   /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::regimm_bgezl  , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
+   /* 01_ */    Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::inst_reserved , Cpu::regimm_unknown, Cpu::inst_reserved ,
+   /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::regimm_bgezall, Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
+   /* 11_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
             ],
 
             inst: InstructionDecode {
@@ -352,8 +352,20 @@ impl Cpu {
         self.exception(exception_code)
     }
 
+    fn breakpoint_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.exception(ExceptionCode_Bp)
+    }
+
     fn overflow_exception(&mut self) -> Result<(), ReadWriteFault> {
         self.exception(ExceptionCode_Ov)
+    }
+
+    fn reserved_instruction_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.exception(ExceptionCode_RI)
+    }
+
+    fn syscall_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.exception(ExceptionCode_Sys)
     }
 
     fn trap_exception(&mut self) -> Result<(), ReadWriteFault> {
@@ -478,9 +490,10 @@ impl Cpu {
         result
     }
 
-    fn inst_invalid(&mut self) -> Result<(), InstructionFault> {
-        error!(target: "CPU", "invalid function ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
-        Err(InstructionFault::Invalid)
+    fn inst_reserved(&mut self) -> Result<(), InstructionFault> {
+        warn!(target: "CPU", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        self.reserved_instruction_exception()?;
+        Ok(())
     }
 
     fn inst_unknown(&mut self) -> Result<(), InstructionFault> {
@@ -517,8 +530,12 @@ impl Cpu {
     fn inst_cop(&mut self) -> Result<(), InstructionFault> {
         let copno = ((self.inst.v >> 26) & 0x03) as u64;
         let cop = match copno {
+            0 => panic!("TODO"),
             1 => &mut self.cop1,
-            _ => panic!("unsupported"),
+            _ => {
+                self.coprocessor_unusable_exception(3)?;
+                return Ok(());
+            },
         };
 
         // if the co-processor isn't enabled, generate an exception
@@ -551,6 +568,11 @@ impl Cpu {
 
                 0b00_010 => {
                     self.gpr[self.inst.rt] = cop.cfc(self.inst.rd)?;
+                    Ok(())
+                },
+
+                0b00_011 | 0b00_111 => { // dcfc1, dctc1
+                    error!(target: "CPU", "dcfc1/dctc1 should cause a fpe");
                     Ok(())
                 },
 
@@ -663,7 +685,20 @@ impl Cpu {
             0b10_000..=0b11_111 => {
                 let special = self.inst.v & 0x3F;
                 match special {
+                    0b000_001 => { // tlbr
+                        debug!(target: "CPU", "COP0: tlbr");
+                    },
+
                     0b000_010 => { // tlbwi
+                        debug!(target: "CPU", "COP0: tlbwi");
+                    },
+
+                    0b000_110 => { // tlbwr
+                        debug!(target: "CPU", "COP0: tlbwr");
+                    },
+
+                    0b001_000 => { // tlbwi
+                        debug!(target: "CPU", "COP0: tlbp");
                     },
 
                     0b011_000 => { // eret
@@ -728,6 +763,11 @@ impl Cpu {
 
     fn inst_blezl(&mut self) -> Result<(), InstructionFault> {
         let condition = (self.gpr[self.inst.rs] as i64) <= 0;
+        self.branch_likely(condition)
+    }
+
+    fn inst_bgtzl(&mut self) -> Result<(), InstructionFault> {
+        let condition = (self.gpr[self.inst.rs] as i64) > 0;
         self.branch_likely(condition)
     }
 
@@ -1174,16 +1214,22 @@ impl Cpu {
         panic!("CPU: unimplemented regimm op: 0b{:02b}_{:03b}", self.inst.regimm >> 3, self.inst.regimm & 0x07);
     }
 
-    fn regimm_invalid(&mut self) -> Result<(), InstructionFault> {
-        panic!("CPU: invalid regimm op: 0b{:02b}_{:03b}", self.inst.regimm >> 3, self.inst.regimm & 0x07);
-    }
-
     fn regimm_bgezal(&mut self) -> Result<(), InstructionFault> {
         // addresses are sign extended
         self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
 
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
         self.branch(condition);
+
+        Ok(())
+    }
+
+    fn regimm_bgezall(&mut self) -> Result<(), InstructionFault> {
+        // addresses are sign extended
+        self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
+
+        let condition = (self.gpr[self.inst.rs] as i64) >= 0;
+        self.branch_likely(condition)?;
 
         Ok(())
     }
@@ -1205,14 +1251,6 @@ impl Cpu {
         self.branch(condition);
 
         Ok(())
-    }
-
-    fn special_unknown(&mut self) -> Result<(), InstructionFault> {
-        panic!("CPU: unimplemented special op: 0b{:03b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07);
-    }
-
-    fn special_invalid(&mut self) -> Result<(), InstructionFault> {
-        panic!("CPU: invalid special op: 0b{:03b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07);
     }
 
     fn special_add(&mut self) -> Result<(), InstructionFault> {
@@ -1241,6 +1279,11 @@ impl Cpu {
     fn special_and(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
 
+        Ok(())
+    }
+
+    fn special_break(&mut self) -> Result<(), InstructionFault> {
+        self.breakpoint_exception()?;
         Ok(())
     }
 
@@ -1512,6 +1555,41 @@ impl Cpu {
         Ok(())
     }
 
+    fn special_tge(&mut self) -> Result<(), InstructionFault> {
+        if (self.gpr[self.inst.rs] as i64) >= (self.gpr[self.inst.rt] as i64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn special_tgeu(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] >= self.gpr[self.inst.rt] {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn special_tlt(&mut self) -> Result<(), InstructionFault> {
+        if (self.gpr[self.inst.rs] as i64) < (self.gpr[self.inst.rt] as i64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn special_tltu(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] < self.gpr[self.inst.rt] {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn special_tne(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] != self.gpr[self.inst.rt] {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
     fn special_sll(&mut self) -> Result<(), InstructionFault> {
         // 32-bit shift and sign extended into 64 bits
         self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) << self.inst.sa) as i32) as u64;
@@ -1583,6 +1661,11 @@ impl Cpu {
     fn special_subu(&mut self) -> Result<(), InstructionFault> {
         // subu does not cause an overflow exception
         self.gpr[self.inst.rd] = (self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]) as i32) as u64;
+        Ok(())
+    }
+
+    fn special_syscall(&mut self) -> Result<(), InstructionFault> {
+        self.syscall_exception()?;
         Ok(())
     }
 
@@ -1794,6 +1877,8 @@ impl Cpu {
             0b011_001 => i_type_rt_rs("daddiu"),
             0b011_010 => i_type_rt_base("ldl"),
             0b011_011 => i_type_rt_base("ldr"),
+
+            0b011_111 => no_type("<invalid>"),
 
             0b100_000 => i_type_rt_base("lb"),
             0b100_001 => i_type_rt_base("lh"),
