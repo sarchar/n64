@@ -274,7 +274,7 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn _write_u16(&mut self, value: u16, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u16(&mut self, value: u16, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         self.bus.borrow_mut().write_u16(value, address)
     }
 
@@ -868,7 +868,7 @@ impl Cpu {
             self.address_exception(address, false)?;
         }
 
-        self.gpr[self.inst.rt] = self.read_u16((address & !0x02) as usize)? as u64;
+        self.gpr[self.inst.rt] = self.read_u16(address as usize)? as u64;
         Ok(())
     }
 
@@ -990,13 +990,7 @@ impl Cpu {
     
     fn inst_sh(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        let word = self.read_u32((address & !0x01) as usize)? as u64;
-
-        if (address & 0x02) != 0 {
-            self.write_u32((((self.gpr[self.inst.rt] & 0xFFFF) << 16) | (word & 0x0000FFFF)) as u32, (address & !0x02) as usize)?;
-        } else {
-            self.write_u32(((self.gpr[self.inst.rt] & 0xFFFF) | (word & 0xFFFF0000)) as u32, (address & !0x02) as usize)?;
-        }
+        self.write_u16(self.gpr[self.inst.rt] as u16, address as usize)?;
         Ok(())
     }
 

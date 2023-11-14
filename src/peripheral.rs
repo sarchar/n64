@@ -171,7 +171,7 @@ impl Addressable for PeripheralInterface {
     fn read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
         // 16-bit read from CART is buggy
         let i = (offset & 0x02) >> 1;
-        let ret = ((self.read_u32((offset & !0x03) + i)? & 0xFFFF0000) >> 16) as u16;
+        let ret = ((self.read_u32((offset & !0x03) + (i << 2))? & 0xFFFF0000) >> 16) as u16;
         debug!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
         Ok(ret)
     }
