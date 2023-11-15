@@ -2,35 +2,37 @@ use tracing::debug;
 
 use crate::*;
 
-use crate::rdp::Rdp;
-use crate::rsp::Rsp;
-use crate::pifrom::PifRom;
-use crate::peripheral::PeripheralInterface;
-use crate::rdram::RdramInterface;
 use crate::mips::MipsInterface;
+use crate::peripheral::PeripheralInterface;
+use crate::pifrom::PifRom;
+use crate::rdp::Rdp;
+use crate::rdram::RdramInterface;
+use crate::rsp::Rsp;
+use crate::video::VideoInterface;
 
 /// N64 Reality Control Processor
 /// Contains the on-board RSP, RDP and manages the system bus
 pub struct Rcp {
-    rdp: Rdp,
-    rsp: Rsp,
-
     // bus objects
-    pif: PifRom,
-    pi: PeripheralInterface,
-    ri: RdramInterface,
     mi: MipsInterface,
+    pi: PeripheralInterface,
+    pif: PifRom,
+    rdp: Rdp,
+    ri: RdramInterface,
+    rsp: Rsp,
+    vi: VideoInterface,
 }
 
 impl Rcp {
     pub fn new(pif: PifRom, pi: PeripheralInterface) -> impl Addressable {
         Rcp {
-            rdp: Rdp::new(),
-            rsp: Rsp::new(),
-            ri: RdramInterface::new(),
             mi: MipsInterface::new(),
-            pif: pif,
             pi: pi,
+            pif: pif,
+            rdp: Rdp::new(),
+            ri: RdramInterface::new(),
+            rsp: Rsp::new(),
+            vi: VideoInterface::new(),
         }
     }
 
@@ -48,7 +50,7 @@ impl Rcp {
             3 => self.mi.read_u32(offset & 0x000F_FFFF),
 
             // VI 0x0440_0000-0x044F_FFFF
-            4 => panic!("Video interface (VI) read"),
+            4 => self.vi.read_u32(offset & 0x000F_FFFF),
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => panic!("Audio interface (AI) read"),
@@ -85,7 +87,7 @@ impl Rcp {
             3 => self.mi.read_u16(offset & 0x000F_FFFF),
 
             // VI 0x0440_0000-0x044F_FFFF
-            4 => panic!("Video interface (VI) read16"),
+            4 => self.vi.read_u16(offset & 0x000F_FFFF),
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => panic!("Audio interface (AI) read16"),
@@ -122,10 +124,7 @@ impl Rcp {
             3 => self.mi.write_u32(value, offset & 0x000F_FFFF),
 
             // VI 0x0440_0000-0x044F_FFFF
-            4 => {
-                debug!(target: "RCP", "unimplemented VI: write32");
-                Ok(WriteReturnSignal::None)
-            },
+            4 => self.vi.write_u32(value, offset & 0x000F_FFFF),
 
             // AI 0x0450_0000-0x045F_FFFF
             5 => {

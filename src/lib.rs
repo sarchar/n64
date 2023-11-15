@@ -70,6 +70,7 @@ pub mod rcp;
 pub mod rdp;
 pub mod rdram;
 pub mod rsp;
+pub mod video;
 
 pub struct System {
     pub rcp: Rc<RefCell<dyn Addressable>>,

@@ -249,6 +249,9 @@ impl Debugger {
             };
         }
 
+        let start_steps = *self.system.cpu.num_steps();
+        let now = std::time::Instant::now();
+
         while self.cpu_running.load(Ordering::SeqCst) {
             //let address = *self.system.cpu.next_instruction_pc();
             //let inst = cpu::Cpu::disassemble(address, *self.system.cpu.next_instruction(), true);
@@ -275,6 +278,12 @@ impl Debugger {
                 None => {}
             };
         }
+
+        let steps = *self.system.cpu.num_steps() - start_steps;
+        let elapsed = now.elapsed();
+        let duration = (elapsed.as_secs() as f64) + (elapsed.subsec_micros() as f64) / 1000000.0;
+
+        println!("Cpu steps: {}, duration = {}, steps/sec = {}", steps, duration, (steps as f64) / duration);
 
         Ok(())
     }
@@ -404,7 +413,7 @@ impl Debugger {
 
     fn logging(&mut self, parts: &Vec<&str>) -> Result<(), String> {
         if parts.len() < 2 || parts.len() > 3 {
-            return Err(format!("usage: loglevel debug|info|warn|error|trace (module=level[,module=level])"));
+            return Err(format!("usage: loglevel trace|debug|info|warn|error (module=level[,module=level])"));
         }
 
         let default_level = match parts[1].to_lowercase().as_str() {

@@ -96,6 +96,8 @@ pub struct Cpu {
 
     // instruction decode values
     inst: InstructionDecode,
+
+    num_steps: u64,
 }
 
 pub enum InstructionFault {
@@ -116,6 +118,8 @@ type CpuInstruction = fn(&mut Cpu) -> Result<(), InstructionFault>;
 impl Cpu {
     pub fn new(bus: Rc<RefCell<dyn Addressable>>) -> Cpu {
         let mut cpu = Cpu {
+            num_steps: 0,
+
             bus : bus,
             pc  : 0,
             next_instruction: 0,
@@ -191,10 +195,9 @@ impl Cpu {
         Ok(())
     }
 
-    //pub fn replace_bus(&mut self, new_bus: &'a mut T) -> &'a mut T {
-    //    std::mem::swap(self.bus, new_bus);
-    //    new_bus
-    //}
+    pub fn num_steps(&self) -> &u64 {
+        &self.num_steps
+    }
 
     pub fn next_instruction(&self) -> &u32 {
         &self.next_instruction
@@ -418,6 +421,8 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<(), InstructionFault> {
+        self.num_steps += 1;
+
         if self.pc == 0xA4001420 {
             //self.bus.print_debug_ipl2();
         } else if self.pc == 0x8000_02B4 {
@@ -435,7 +440,6 @@ impl Cpu {
             }
         }
 
-        // TODO temp check until address exceptions are implement
         if (self.pc & 0x03) != 0 {
             //println!("CPU: unaligned PC read at PC=${:08X}", self.pc);
 
@@ -470,8 +474,6 @@ impl Cpu {
         self.inst.target     = inst & 0x3FFFFFF;
         self.inst.sa         = (inst >> 6) & 0x1F;
 
-        //.print!("i {:08X}: ", self.next_instruction_pc);
-        //print!("{:08X}, op=0b{:06b}: ", 0xBFC00000+i, inst, op);
         let saved_next_pc = self.next_instruction_pc;
         self.next_instruction_pc = self.pc;
         self.pc += 4;
