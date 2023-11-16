@@ -14,6 +14,7 @@ pub struct PeripheralInterface {
     dma_status: u32,
 
     cartridge_rom: Vec<u8>,
+    cartridge_rom_write: Option<u32>,
 
     debug_buffer: Vec<u8>,
     debug_string: String,
@@ -28,6 +29,7 @@ impl PeripheralInterface {
             cart_addr: 0,
             dma_status: 0,
             cartridge_rom: cartridge_rom,
+            cartridge_rom_write: None,
 
             debug_buffer: vec![0; 0x200],
             debug_string: String::new(),
@@ -153,13 +155,18 @@ impl Addressable for PeripheralInterface {
             let cartridge_rom_offset = offset & 0x0FFF_FFFF;
             debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);
 
-            if cartridge_rom_offset >= self.cartridge_rom.len() {
-                Ok(0x00000000)
+            if let Some(value) = self.cartridge_rom_write {
+                self.cartridge_rom_write = None;
+                Ok(value)
             } else {
-                Ok(((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
-                    | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
-                    | ((self.cartridge_rom[cartridge_rom_offset + 2] as u32) << 8)
-                    | (self.cartridge_rom[cartridge_rom_offset + 3] as u32))
+                if cartridge_rom_offset >= self.cartridge_rom.len() {
+                    Ok(0x00000000)
+                } else {
+                    Ok(((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
+                        | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
+                        | ((self.cartridge_rom[cartridge_rom_offset + 2] as u32) << 8)
+                        | (self.cartridge_rom[cartridge_rom_offset + 3] as u32))
+                }
             }
         } else {
             // Right now, GoldenEye crashes reading $70000510 because virtual memory isn't
@@ -175,6 +182,15 @@ impl Addressable for PeripheralInterface {
         let ret = ((self.read_u32((offset & !0x03) + (i << 2))? & 0xFFFF0000) >> 16) as u16;
         debug!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
         Ok(ret)
+    }
+
+    fn read_u8(&mut self, offset: usize) -> Result<u8, ReadWriteFault> {
+        // 8-bit read only has access to every other 16 bits
+        let half = self.read_u16(offset & !0x01)?;
+        let shift = 8 - ((offset & 0x01) << 3);
+        let ret = (half >> shift) & 0xFF;
+        debug!(target: "PI", "read8 offset=${:08X} return=${:02X}", offset, ret);
+        Ok(ret as u8)
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
@@ -204,7 +220,10 @@ impl Addressable for PeripheralInterface {
             self.debug_buffer[buffer_offset+3] = ((value >>  0) & 0xFF) as u8;
             Ok(WriteReturnSignal::None)
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
-            debug!(target: "PI", "wrote to ROM value=${:08X} offset=${:08X}", value, offset);
+            //debug!(target: "PI", "wrote to ROM value=${:08X} offset=${:08X}", value, offset);
+            if let None = self.cartridge_rom_write {
+                self.cartridge_rom_write = Some(value);
+            }
             Ok(WriteReturnSignal::None)
         } else {
             panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);

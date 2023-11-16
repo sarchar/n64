@@ -1739,6 +1739,10 @@ impl Cpu {
             format!("{} {}", mn, rname(rs))
         };
 
+        let r_type_rd_rs = |mn| {
+            format!("{} {}, {}", mn, rname(rd), rname(rs))
+        };
+
         let r_type_rs_rt = |mn| {
             format!("{} {}, {}", mn, rname(rs), rname(rt))
         };
@@ -1770,7 +1774,7 @@ impl Cpu {
                     0b000_111 => r_type_rd_rt_rs("srav"),
 
                     0b001_000 => r_type_rs("jr"),
-                    0b001_001 => r_type_rs("jalr"),
+                    0b001_001 => r_type_rd_rs("jalr"),
                     0b001_100 => no_type("syscall"),
                     0b001_101 => no_type("break"),
                     0b001_111 => no_type("sync"),
