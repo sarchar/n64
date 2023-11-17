@@ -45,7 +45,7 @@ const ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
 const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
 const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
 const ExceptionCode_Tr   : u64 = 13; // Trap instruction
-const _ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
+const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
 const InterruptCode_Timer: u64 = 0x80;
@@ -112,6 +112,7 @@ pub enum InstructionFault {
     Invalid,
     Unimplemented,
     Break,
+    CoprocessorUnusable,
     ReadWrite(ReadWriteFault),
 }
 
@@ -386,6 +387,10 @@ impl Cpu {
         self.exception(ExceptionCode_Tr)
     }
 
+    fn floating_point_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.exception(ExceptionCode_FPE)
+    }
+
     fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) -> Result<(), ReadWriteFault> {
         //println!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
@@ -562,15 +567,15 @@ impl Cpu {
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
-                0b00_000 => {
-                    // TODO see datasheet for MFCz but this seemds weird. We use dmfc (double from
-                    // cop) and then select low or high word based on the register index
-                    self.gpr[self.inst.rt] = (if (self.inst.rd & 0x01) == 0 {
-                        cop.dmfc(self.inst.rd & !0x01)? & 0xFFFF_FFFF
-                    } else {
-                        (cop.dmfc(self.inst.rd & !0x01)? >> 32) & 0xFFFF_FFFF
-                    } as i32) as u64;
-
+                0b00_000 => { // MFC - move control word from coprocessor
+                    self.gpr[self.inst.rt] = (cop.mfc(self.inst.rd)? as i32) as u64;
+                    //// TODO see datasheet for MFCz but this seemds weird. We use dmfc (double from
+                    //// cop) and then select low or high word based on the register index
+                    //self.gpr[self.inst.rt] = (if (self.inst.rd & 0x01) == 0 {
+                    //    cop.dmfc(self.inst.rd & !0x01)? & 0xFFFF_FFFF
+                    //} else {
+                    //    (cop.dmfc(self.inst.rd & !0x01)? >> 32) & 0xFFFF_FFFF
+                    //} as i32) as u64;
                     Ok(())
                 },
 
@@ -580,16 +585,16 @@ impl Cpu {
                 },
 
                 0b00_010 => {
-                    self.gpr[self.inst.rt] = cop.cfc(self.inst.rd)?;
+                    self.gpr[self.inst.rt] = (cop.cfc(self.inst.rd)? as i32) as u64;
                     Ok(())
                 },
 
-                0b00_011 | 0b00_111 => { // dcfc1, dctc1
-                    error!(target: "CPU", "dcfc1/dctc1 should cause a fpe");
+                0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
+                    self.floating_point_exception()?;
                     Ok(())
                 },
 
-                0b00_100 => {
+                0b00_100 => { // MTC
                     cop.mtc(self.gpr[self.inst.rt] as u32, self.inst.rd)
                 },
 
@@ -597,7 +602,7 @@ impl Cpu {
                     cop.dmtc(self.gpr[self.inst.rt], self.inst.rd)
                 },
 
-                0b00_110 => {
+                0b00_110 => { // CTC - move control word to coprocessor
                     cop.ctc(self.gpr[self.inst.rt], self.inst.rd)
                 },
 
@@ -689,6 +694,7 @@ impl Cpu {
                     },
 
                     Cop0_Status => {
+                        self.cop1.set_fr(((val >> 26) & 0x01) != 0); // notify COP1 on the FR bit change
                         val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
                     },
 
@@ -766,6 +772,7 @@ impl Cpu {
                     },
 
                     Cop0_Status => {
+                        self.cop1.set_fr(((val >> 26) & 0x01) != 0); // notify COP1 on the FR bit change
                         val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
                     },
 
