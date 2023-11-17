@@ -3,21 +3,27 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use tracing::{debug, error, warn};
+#[allow(unused_imports)]
+use tracing::{debug, error, warn, info};
 
 use crate::*;
 
 // Exception handling registers
+const Cop0_Index   : usize = 0;
 const Cop0_Context : usize = 4;
+const Cop0_Wired   : usize = 6;
 const Cop0_BadVAddr: usize = 8; // Bad Virtual Address
 const Cop0_Count   : usize = 9;
 const Cop0_Compare : usize = 11;
 const Cop0_Status  : usize = 12;
 const Cop0_Cause   : usize = 13;
 const Cop0_EPC     : usize = 14; // Exception Program Counter
+const Cop0_PRId    : usize = 15; // Processor Revision Identifier
 const _COP0_WATCHLO : usize = 18;
 const _COP0_WATCHHI : usize = 19;
 const Cop0_XContext: usize = 20;
+const Cop0_PErr    : usize = 26; // Parity Error
+const Cop0_CacheErr: usize = 27;
 const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
 
 const Cop0_Config: usize = 16;
@@ -81,6 +87,8 @@ pub struct Cpu {
     hi: u64,
 
     cp0gpr: [u64; 32],
+    cp0gpr_latch: u64,
+
     half_clock: u32,
     llbit: bool,
 
@@ -132,6 +140,7 @@ impl Cpu {
             hi  : 0,
 
             cp0gpr: [0u64; 32],
+            cp0gpr_latch: 0,
             half_clock: 0,
             llbit: false,
 
@@ -185,6 +194,8 @@ impl Cpu {
 
         // COP0
         // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
+        self.cp0gpr[Cop0_Wired] = 0;
+        self.cp0gpr[Cop0_PRId] = 0x0B22;
         self.cp0gpr[Cop0_Config] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
         self.cp0gpr[Cop0_Status] = 0x200004; // BEV=1, ERL=1, SR=0 (SR will need to be 1 on soft reset), IE=0
 
@@ -608,28 +619,55 @@ impl Cpu {
     fn inst_cop0(&mut self) -> Result<(), InstructionFault> {
         let cop0_op = (self.inst.v >> 21) & 0x1F;
         match cop0_op {
-            0b00_000 => {
-                self.gpr[self.inst.rt] = (self.cp0gpr[self.inst.rd] as i32) as u64;
+            0b00_000 => { // MFC
+                self.gpr[self.inst.rt] = (match self.inst.rd {
+                    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                        self.cp0gpr_latch
+                    },
+
+                    _ => self.cp0gpr[self.inst.rd],
+                } as i32) as u64;
             },
 
-            0b00_001 => {
-                self.gpr[self.inst.rt] = self.cp0gpr[self.inst.rd];
+            0b00_001 => { // DMFC
+                self.gpr[self.inst.rt] = match self.inst.rd {
+                    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                        self.cp0gpr_latch
+                    },
+
+                    _ => self.cp0gpr[self.inst.rd],
+                };
             },
 
-            0b00_100 => {
-                let val = self.gpr[self.inst.rt];
+            0b00_100 => { // MTC
+                let val = (self.gpr[self.inst.rt] as i32) as u64;
 
-                // fix bits of the Config register
-                self.cp0gpr[self.inst.rd] = (match self.inst.rd {
+                // latch value for unused register reads
+                self.cp0gpr_latch = val;
+
+                // fix bits of the various registers
+                self.cp0gpr[self.inst.rd] = match self.inst.rd {
+                    Cop0_Index => {
+                        val & 0x0000_0000_8000_003F // 32-bit register
+                    },
+
+                    Cop0_Context => {
+                        val & 0xFFFF_FFFF_FF80_0000 // 64-bit register
+                    },
+
+                    Cop0_Wired => {
+                        val & 0x3F
+                    },
+
                     Cop0_Config => {
                         let read_only_mask = 0xF0FF7FF0u64;
-                        (val & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
+                        ((val & 0xFFFF_FFFF) & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
                     },
 
                     Cop0_Compare => {
                         // TODO clear timer interrupt see 6.3.4
                         // truncate to 32-bits
-                        (val as u32) as u64
+                        val & 0x0000_0000_FFFF_FFFF
                     },
 
                     Cop0_Cause => {
@@ -642,8 +680,34 @@ impl Cpu {
                         (self.cp0gpr[Cop0_Cause] & !0x300) | (val & 0x300)
                     },
 
+                    Cop0_XContext => {
+                        val & 0xFFFF_FFFE_0000_0000
+                    },
+
+                    Cop0_LLAddr => {
+                        val & 0x0000_0000_FFFF_FFFF // 32-bit register
+                    },
+
+                    Cop0_Status => {
+                        val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
+                    },
+
+                    Cop0_PErr => {
+                        val & 0xFF
+                    },
+
+                    // read-only registers
+                    Cop0_BadVAddr | Cop0_PRId  => {
+                        self.cp0gpr[self.inst.rd]
+                    },
+
+                    // unused registers
+                    7 | 21 | 22 | 23 | 24 | 25 | 31 | Cop0_CacheErr => {
+                        0
+                    },
+
                     _ => { val },
-                } as i32) as u64;
+                };
 
                 // TODO testing
                 match self.inst.rd {
@@ -669,10 +733,56 @@ impl Cpu {
                 };
             },
 
-            0b00_101 => {
+            0b00_101 => { // DMTC
                 let val = self.gpr[self.inst.rt];
 
+                // save write value for unused register reads
+                self.cp0gpr_latch = val;
+
                 self.cp0gpr[self.inst.rd] = match self.inst.rd {
+                    Cop0_Index => {
+                        val & 0x0000_0000_8000_003F // 32-bit register
+                    },
+
+                    Cop0_Context => {
+                        val & 0xFFFF_FFFF_FF80_0000
+                    }
+
+                    Cop0_Wired => {
+                        val & 0x3F
+                    },
+
+                    Cop0_Config => {
+                        let read_only_mask = 0xF0FF7FF0u64;
+                        (val & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
+                    },
+
+                    Cop0_XContext => {
+                        val & 0xFFFF_FFFE_0000_0000
+                    },
+
+                    Cop0_LLAddr => {
+                        val & 0x0000_0000_FFFF_FFFF // 32-bit register
+                    },
+
+                    Cop0_Status => {
+                        val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
+                    },
+
+                    Cop0_PErr => {
+                        val & 0xFF
+                    },
+
+                    // read-only registers
+                    Cop0_BadVAddr | Cop0_PRId => {
+                        self.cp0gpr[self.inst.rd]
+                    },
+
+                    // unused registers
+                    7 | 21 | 22 | 23 | 24 | 25 | 31 | Cop0_CacheErr => {
+                        0
+                    },
+
                     _ => { val },
                 };
 
