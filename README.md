@@ -13,8 +13,8 @@ recommend [n64-systemtest](https://github.com/lemmy-64/n64-systemtest).
 *NOTE*: Since the TLB isn't implemented (yet), the n64-systemtest as-is will
 restart repeatedly. If you want to see the tests conclude, you'll need to
 comment out the tests in `n64-systemtest/src/tests/testlist.rs` relating to the
-TLB. That would be the tests starting with super::tlb::WiredRandom up-to
-super::traps::delay::TNEDelay2.
+TLB. That would be the tests starting with `super::tlb::WiredRandom` up-to
+`super::traps::delay::TNEDelay2`.
 
 # Building
 
@@ -30,3 +30,8 @@ Or if you want to use the debugger,
 $ cargo run --release -- n64-systemtest.z64 -D
 ```
 
+# Screenshots
+
+* First ever graphical output:
+
+![image](https://github.com/sarchar/n64/assets/4928176/01de0e3a-be14-4d40-aa44-223c0f96d9ae)
