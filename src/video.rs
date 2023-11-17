@@ -136,6 +136,10 @@ impl VideoInterface {
     fn _is_pal(&self) -> bool {
         self.burst == PAL_BURST
     }
+
+    pub fn origin(&self) -> u32 {
+        self.origin
+    }
 }
 
 impl Addressable for VideoInterface {

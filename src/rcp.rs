@@ -18,13 +18,13 @@ pub struct Rcp {
     pi: PeripheralInterface,
     pif: PifRom,
     rdp: Rdp,
-    ri: RdramInterface,
+    pub ri: RdramInterface,
     rsp: Rsp,
-    vi: VideoInterface,
+    pub vi: VideoInterface,
 }
 
 impl Rcp {
-    pub fn new(pif: PifRom, pi: PeripheralInterface) -> impl Addressable {
+    pub fn new(pif: PifRom, pi: PeripheralInterface) -> Rcp {
         Rcp {
             mi : MipsInterface::new(),
             pi : pi,

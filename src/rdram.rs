@@ -23,6 +23,10 @@ impl RdramInterface {
 
         self
     }
+
+    pub fn rdram(&self) -> &Vec<u32> {
+        &self.ram
+    }
 }
 
 impl Addressable for RdramInterface {

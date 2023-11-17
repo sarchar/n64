@@ -73,7 +73,7 @@ pub mod rsp;
 pub mod video;
 
 pub struct System {
-    pub rcp: Rc<RefCell<dyn Addressable>>,
+    pub rcp: Rc<RefCell<rcp::Rcp>>,
     pub cpu: cpu::Cpu,
 }
 
