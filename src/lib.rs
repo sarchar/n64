@@ -43,17 +43,20 @@ pub trait Addressable {
         Ok(((word >> shift) & 0xFF) as u8)
     }
 
-    fn write_u16(&mut self, value: u16, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    // The VR4300 has pins selecting the size of the write (byte, halfword, word) but still places
+    // the full register on the data bus. So these functions still take u32 as the value. Some
+    // modules depend on incorrect behavior that needs the full register
+    fn write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         assert!((offset & 0x01) == 0);
         let word = self.read_u32(offset & !0x02)?;
         let shift = 16 - ((offset & 0x03) << 3);
-        self.write_u32(((value as u32) << shift) | (word & (0xFFFF0000 >> shift)), offset & !0x02)
+        self.write_u32(((value & 0xFFFF) << shift) | (word & (0xFFFF0000 >> shift)), offset & !0x02)
     }
 
-    fn write_u8(&mut self, value: u8, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         let word = self.read_u32(offset & !0x03)?;
         let shift = 24 - ((offset & 0x03) << 3);
-        self.write_u32(((value as u32) << shift) | (word & !(0xFFu32 << shift)), offset & !0x03)
+        self.write_u32(((value & 0xFF) << shift) | (word & !(0xFFu32 << shift)), offset & !0x03)
     }
 
     /// TEMP 

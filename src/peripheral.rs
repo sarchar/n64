@@ -12,6 +12,7 @@ pub struct PeripheralInterface {
     dram_addr: u32,
     cart_addr: u32,
     dma_status: u32,
+    io_busy: u32,
 
     cartridge_rom: Vec<u8>,
     cartridge_rom_write: Option<u32>,
@@ -28,6 +29,8 @@ impl PeripheralInterface {
             dram_addr: 0,
             cart_addr: 0,
             dma_status: 0,
+            io_busy: 0,
+
             cartridge_rom: cartridge_rom,
             cartridge_rom_write: None,
 
@@ -41,9 +44,12 @@ impl PeripheralInterface {
             // PI_STATUS
             0x0_0010 => {
                 debug!(target: "PI", "read PI_STATUS");
-                let ret = self.dma_status;
+                let ret = self.dma_status | self.io_busy;
                 if self.dma_status == 0x01 {
                     self.dma_status = 0x08;
+                }
+                if self.io_busy != 0 {
+                    self.io_busy = 0;
                 }
                 Ok(ret)
             },
@@ -223,12 +229,34 @@ impl Addressable for PeripheralInterface {
             //debug!(target: "PI", "wrote to ROM value=${:08X} offset=${:08X}", value, offset);
             if let None = self.cartridge_rom_write {
                 self.cartridge_rom_write = Some(value);
+                // set the IO busy flag of PI_STATUS on cart write
+                self.io_busy = 0x02;
             }
             Ok(WriteReturnSignal::None)
         } else {
             panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);
         }
     }
+
+    fn write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+		// writes to CART are padded with zeroes in the lower bytes
+        if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
+            let shift = 16 - ((offset & 0x03) << 3);
+            self.write_u32(value << shift, offset)
+        } else {
+            Addressable::write_u16(self, value, offset)
+        }
+	}
+
+    fn write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+		// writes to CART are padded with zeroes in the lower bytes
+        if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
+            let shift = 24 - ((offset & 0x03) << 3);
+            self.write_u32(value << shift, offset)
+        } else {
+            Addressable::write_u8(self, value, offset)
+        }
+	}
 }
 
 

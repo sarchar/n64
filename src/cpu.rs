@@ -272,12 +272,12 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u8(&mut self, value: u8, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         self.bus.borrow_mut().write_u8(value, address)
     }
 
     #[inline(always)]
-    fn write_u16(&mut self, value: u16, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         self.bus.borrow_mut().write_u16(value, address)
     }
 
@@ -1026,13 +1026,13 @@ impl Cpu {
 
     fn inst_sb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        self.write_u8(self.gpr[self.inst.rt] as u8, address as usize)?;
+        self.write_u8(self.gpr[self.inst.rt] as u32, address as usize)?;
         Ok(())
     }
     
     fn inst_sh(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        self.write_u16(self.gpr[self.inst.rt] as u16, address as usize)?;
+        self.write_u16(self.gpr[self.inst.rt] as u32, address as usize)?;
         Ok(())
     }
 

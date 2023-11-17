@@ -85,7 +85,7 @@ impl Rcp {
         ret
     }
 
-    fn rcp_write_u16(&mut self, value: u16, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn rcp_write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         trace!(target: "RCP", "write16 value=${:08X} offset=${:08X}", value, offset);
 
         if let (Some(addressable), offset) = self.match_addressable(offset, "write16") {
@@ -95,7 +95,7 @@ impl Rcp {
         }
     }
 
-    fn rcp_write_u8(&mut self, value: u8, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn rcp_write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         trace!(target: "RCP", "write8 value=${:08X} offset=${:08X}", value, offset);
 
         if let (Some(addressable), offset) = self.match_addressable(offset, "write8") {
@@ -303,7 +303,7 @@ impl Addressable for Rcp {
         }
     }
 
-    fn write_u16(&mut self, value: u16, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
         trace!(target: "RCP", "bus write16 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
 
@@ -331,7 +331,7 @@ impl Addressable for Rcp {
         }
     }
 
-    fn write_u8(&mut self, value: u8, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         let (_segment, physical_address) = self.get_physical_address(address);
         trace!(target: "RCP", "bus write16 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
 

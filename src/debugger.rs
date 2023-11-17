@@ -521,7 +521,7 @@ impl Addressable for DebuggerBus {
         self.bus.borrow_mut().read_u16(offset)
     }
 
-    fn write_u16(&mut self, value: u16, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint(offset as u64, BP_WRITE) {
             println!("Breakpoint ${:016X} hit", breakpoint.address);
             return Err(ReadWriteFault::Break);
@@ -539,7 +539,7 @@ impl Addressable for DebuggerBus {
         self.bus.borrow_mut().read_u8(offset)
     }
 
-    fn write_u8(&mut self, value: u8, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint(offset as u64, BP_WRITE) {
             println!("Breakpoint ${:016X} hit", breakpoint.address);
             return Err(ReadWriteFault::Break);
