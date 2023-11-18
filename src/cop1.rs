@@ -35,6 +35,7 @@ extern "C" {
     pub static c_fe_inexact: i32;
     pub static c_fe_invalid: i32;
     pub static c_fe_overflow: i32;
+    pub static c_fe_underflow: i32;
     pub static c_fe_all_except: i32;
 
     fn c_fesetround(round: i32) -> i32;
@@ -44,6 +45,10 @@ extern "C" {
 
     fn c_f32_add(a: f32, b: f32) -> f32;
     fn c_f64_add(a: f64, b: f64) -> f64;
+    fn c_f32_sub(a: f32, b: f32) -> f32;
+    fn c_f64_sub(a: f64, b: f64) -> f64;
+    fn c_f32_mul(a: f32, b: f32) -> f32;
+    fn c_f64_mul(a: f64, b: f64) -> f64;
 }
 
 static fe_upward    : &i32 = unsafe { &c_fe_upward };
@@ -54,6 +59,7 @@ static fe_divbyzero : &i32 = unsafe { &c_fe_divbyzero };
 static fe_inexact   : &i32 = unsafe { &c_fe_inexact };
 static fe_invalid   : &i32 = unsafe { &c_fe_invalid };
 static fe_overflow  : &i32 = unsafe { &c_fe_overflow };
+static fe_underflow : &i32 = unsafe { &c_fe_underflow };
 static fe_all_except: &i32 = unsafe { &c_fe_all_except };
 
 fn fesetround(round: &i32)      -> i32 { unsafe { c_fesetround(*round) } }
@@ -358,14 +364,17 @@ impl Cop1 {
             cause |= FpeCause_Overflow;
         }
 
+        let is_underflow = (excepts & *fe_underflow) != 0;
+
         if result.is_nan() {
             retval = Ok(f32::from_bits(0x7FBFFFFF));
-        } else if result.is_subnormal() {
+        } else if result.is_subnormal() || is_underflow {
             let flush_subnormals = ((self.fcr_control_status >> 24) & 0x01) != 0;
             let underflow_enabled = (self.fcr_control_status & (0x02 << 7)) != 0;
             let inexact_enabled = (self.fcr_control_status & (0x01 << 7)) != 0;
             if !flush_subnormals || underflow_enabled || inexact_enabled {
-                cause |= FpeCause_Unimplemented;
+                // overwrite other exceptions on Unimpl
+                cause = FpeCause_Unimplemented;
             } else {
                 cause |= FpeCause_Inexact | FpeCause_Underflow;
             }
@@ -412,14 +421,22 @@ impl Cop1 {
             cause |= FpeCause_Overflow;
         }
 
+        let my_is_subnormal = |v: f64| -> bool {
+            let v = v.to_bits();
+            (v & 0x7FF0_0000_0000_0000) == 0 && (v & 0x000F_FFFF_FFFF_FFFF) != 0
+        };
+
+        let is_underflow = (excepts & *fe_underflow) != 0;
+
         if result.is_nan() {
             retval = Ok(f64::from_bits(0x7FF7_FFFF_FFFF_FFFF));
-        } else if result.is_subnormal() {
+        } else if my_is_subnormal(result) || is_underflow {
             let flush_subnormals = ((self.fcr_control_status >> 24) & 0x01) != 0;
             let underflow_enabled = (self.fcr_control_status & (0x02 << 7)) != 0;
             let inexact_enabled = (self.fcr_control_status & (0x01 << 7)) != 0;
             if !flush_subnormals || underflow_enabled || inexact_enabled {
-                cause |= FpeCause_Unimplemented;
+                // overwrite other exceptions on Unimpl
+                cause = FpeCause_Unimplemented;
             } else {
                 cause |= FpeCause_Inexact | FpeCause_Underflow;
             }
@@ -489,17 +506,19 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32 - self.fgr[self.inst.ft].as_f32
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(unsafe { c_f32_sub(input_a, input_b) })?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64 - self.fgr[self.inst.ft].as_f64
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(unsafe { c_f64_sub(input_a, input_b) })?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },
@@ -511,17 +530,19 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32 * self.fgr[self.inst.ft].as_f32
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(unsafe { c_f32_mul(input_a, input_b) })?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64 * self.fgr[self.inst.ft].as_f64
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(unsafe { c_f64_mul(input_a, input_b) })?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },

@@ -10,6 +10,7 @@ int32_t c_fe_divbyzero  = FE_DIVBYZERO;
 int32_t c_fe_inexact    = FE_INEXACT;
 int32_t c_fe_invalid    = FE_INVALID;
 int32_t c_fe_overflow   = FE_OVERFLOW;
+int32_t c_fe_underflow  = FE_UNDERFLOW;
 int32_t c_fe_all_except = FE_ALL_EXCEPT;
 
 extern uint32_t c_fesetround(int32_t round) {
@@ -28,10 +29,11 @@ extern int32_t c_fetestexcept(int32_t excepts) {
     return fetestexcept(excepts);
 }
 
-extern float c_f32_add(float a, float b) {
-    return a + b;
-}
+extern float  c_f32_add(float a , float b)  { return a + b; }
+extern double c_f64_add(double a, double b) { return a + b; }
+extern float  c_f32_sub(float a , float b)  { return a - b; }
+extern double c_f64_sub(double a, double b) { return a - b; }
+extern float  c_f32_mul(float a , float b)  { return a * b; }
+extern double c_f64_mul(double a, double b) { return a * b; }
 
-extern double c_f64_add(double a, double b) {
-    return a + b;
-}
+
