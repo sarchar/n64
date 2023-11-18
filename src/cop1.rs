@@ -19,6 +19,7 @@ struct InstructionDecode {
     v: u32,
     special: u32,
     fmt: u8,
+    cond: u8,
 
     ft: usize,
     fs: usize,
@@ -49,6 +50,9 @@ pub struct Cop1 {
     // when true, indicates 32 floating point registers vs 16
     fr_bit: bool,
 
+    // Set to the result of compare instructions. COC in the datasheet.
+    condition_signal: bool,
+
     inst: InstructionDecode,
 }
 
@@ -60,9 +64,10 @@ impl Cop1 {
 
             fgr: [Fgr{ as_u64: 0 }; 32],
             fr_bit: false,
+            condition_signal: false,
 
             inst: InstructionDecode {
-                v: 0, special: 0, fmt: 0, ft: 0, fs: 0, fd: 0,
+                v: 0, special: 0, fmt: 0, cond: 0, ft: 0, fs: 0, fd: 0,
             },
         }
     }
@@ -72,28 +77,77 @@ impl Cop1 {
         self.fr_bit = fr;
     }
 
+    pub fn condition_signal(&self) -> bool {
+        self.condition_signal
+    }
+
     //pub fn fgr32(&mut self, r: usize) -> f32 {
     //    let shift = 32 - ((r & 0x01) << 5);
     //    f32::from_bits(self.fgr[r & !0x01].as_u64 >> shift)
     //}
 
+    // Update the cause bits in fcr_control_status and if the corresponding enable bit is set,
+    // raise an exception. The unimplemented instruction bit (E) always generates an exception
+    fn update_cause(&mut self, cause: u64) -> Result<(), InstructionFault> {
+        self.fcr_control_status = (self.fcr_control_status & !0x0003_F000) | (cause << 12);
+        let unimplemented_instruction = (cause & 0x20) != 0;
+        if unimplemented_instruction || ((cause & ((self.fcr_control_status >> 7) & 0x1F)) != 0) {
+            Err(InstructionFault::FloatingPointException)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn ldc(&mut self, ft: usize, value: u64) -> Result<(), InstructionFault> {
-        self.fgr[ft].as_f64 = f64::from_bits(value);
+        if !self.fr_bit {
+            // Place double word into ft and ft+1. The operation is undefined if bit 0 of ft is not 0
+            self.fgr[ft & !0x01].as_u64 = value;
+        } else { 
+            self.fgr[ft].as_u64 = value;
+        }
         Ok(())
     }
 
     pub fn lwc(&mut self, ft: usize, value: u32) -> Result<(), InstructionFault> {
-        // TODO the cast from f32 to f64 may not be correct (might need to stay as f32?)
-        self.fgr[ft].as_f32 = f32::from_bits(value);
+        if !self.fr_bit {
+            // Place value into either the low word or high word based on bit 0 of ft
+            let shift = (ft & 0x01) << 5; // 0 or 32
+            let old = unsafe { self.fgr[ft & !0x01].as_u64 };
+            self.fgr[ft & !0x01].as_u64 = (old & (0xFFFF_FFFF_0000_0000 >> shift)) | ((value as u64) << shift); 
+        } else { 
+            // The datasheet says that resulting value of the high order 32-bits of the register are undefined
+            // but the n64-systemtests program requires us to preserve the value
+            let old = unsafe { self.fgr[ft].as_u64 };
+            self.fgr[ft].as_u64 = (old & 0xFFFF_FFFF_0000_0000) | (value as u64);
+        }
         Ok(())
     }
 
     pub fn sdc(&mut self, ft: usize) -> Result<u64, InstructionFault> {
-        Ok(unsafe {self.fgr[ft].as_u64})
+        let result = if !self.fr_bit {
+            // Get double word from ft and ft+1. The operation is undefined if bit 0 of ft is not 0
+            unsafe { self.fgr[ft & !0x01].as_u64 }
+        } else { 
+            unsafe { self.fgr[ft].as_u64 }
+        };
+
+        Ok(result)
     }
 
     pub fn swc(&mut self, ft: usize) -> Result<u32, InstructionFault> {
-        Ok(unsafe {self.fgr[ft].as_u32})
+        let result = if !self.fr_bit {
+            // Get value from either the low word or high word based on bit 0 of ft
+            let shift = (ft & 0x01) << 5; // 0 or 32
+            let old = unsafe { self.fgr[ft & !0x01].as_u64 };
+            (old >> shift) & 0xFFFF_FFFF
+        } else { 
+            // The datasheet says that resulting value of the high order 32-bits of the register are undefined
+            // but the n64-systemtests program requires us to preserve the value
+            let old = unsafe { self.fgr[ft].as_u64 };
+            old & 0xFFFF_FFFF
+        };
+
+        Ok(result as u32)
     }
 
     // Move Control Word from Coprocessor
@@ -120,7 +174,12 @@ impl Cop1 {
             },
 
             31 => {
-                self.fcr_control_status = value & 0x0183_FFFF;
+                // Mask out zero bits
+                let value = value & 0x0183_FFFF;
+                // Remove the Cause bits from value
+                let cause = (value >> 12) & 0x3F;
+                self.fcr_control_status = value & !0x0003_F000;
+                self.update_cause(cause)?;
                 Ok(())
             },
 
@@ -181,6 +240,7 @@ impl Cop1 {
         self.inst.ft      = ((self.inst.v >> 16) & 0x1F) as usize;
         self.inst.fs      = ((self.inst.v >> 11) & 0x1F) as usize;
         self.inst.fd      = ((self.inst.v >>  6) & 0x1F) as usize;
+        self.inst.cond    = (self.inst.v & 0x0F) as u8;
 
         if !self.fr_bit {
             self.inst.fs &= !0x01;
@@ -190,18 +250,14 @@ impl Cop1 {
 
         match self.inst.special {
             // ADD
-            0b000_000 => {
-                debug!(target: "COP1", "add.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+            0b000_000 => { // ADD.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32 + self.fgr[self.inst.ft].as_f32
                         };
 
-                        //unsafe {
-                        //    info!(target: "COP1", "add result: fs=${:08X} ft=${:08X} result=${:16X}", self.fgr[self.inst.fs].as_f32.to_bits(), self.fgr[self.inst.ft].as_f32.to_bits(), result.to_bits() as u64);
-                        //}
-
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -215,14 +271,14 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_001 => {
-                debug!(target: "COP1", "sub.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+            0b000_001 => { // SUB.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32 - self.fgr[self.inst.ft].as_f32
                         };
 
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -236,14 +292,14 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_010 => {
-                debug!(target: "COP1", "mul.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+            0b000_010 => { // MUL.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32 * self.fgr[self.inst.ft].as_f32
                         };
 
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -257,14 +313,14 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_011 => {
-                debug!(target: "COP1", "div.{:X} f{}, f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs, self.inst.ft);
+            0b000_011 => { // DIV.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32 / self.fgr[self.inst.ft].as_f32
                         };
 
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -278,14 +334,14 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_100 => {
-                debug!(target: "COP1", "sqrt.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+            0b000_100 => { // SQRT.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32.sqrt()
                         };
 
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -299,14 +355,14 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_101 => {
-                debug!(target: "COP1", "abs.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+            0b000_101 => { // ABS.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
                             self.fgr[self.inst.fs].as_f32.abs()
                         };
 
+                        // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
@@ -320,8 +376,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_110 => {
-                debug!(target: "COP1", "mov.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+            0b000_110 => { // MOV.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         self.fgr[self.inst.fd].as_u64 = unsafe { self.fgr[self.inst.fs].as_u64 };
@@ -333,8 +388,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_111 => {
-                debug!(target: "COP1", "neg.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+            0b000_111 => { // NEG.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { -self.fgr[self.inst.fs].as_f32 };
@@ -348,8 +402,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_000 => {
-                debug!(target: "COP1", "round.l f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_000 => { // ROUND.L.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.round() };
@@ -363,8 +416,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_001 => {
-                debug!(target: "COP1", "trunc.l f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_001 => { // TRUNC.L.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -378,8 +430,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_010 => {
-                debug!(target: "COP1", "ceil.l f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_010 => { // CEIL.L.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.ceil() };
@@ -389,8 +440,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_011 => {
-                debug!(target: "COP1", "floor.l f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_011 => { // FLOOR.L.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.floor() };
@@ -400,8 +450,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_100 => {
-                debug!(target: "COP1", "round.w f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_100 => { // ROUND.W.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.round() as u32 };
@@ -415,8 +464,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_101 => {
-                debug!(target: "COP1", "trunc.w f{}, f{}", self.inst.fd, self.inst.fs);
+            0b001_101 => { // TRUNC.W.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -430,7 +478,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_110 => {
+            0b001_110 => { // CEIL.W.fmt
                 debug!(target: "COP1", "ceil.w f{}, f{}", self.inst.fd, self.inst.fs);
                 match self.inst.fmt {
                     Format_Single => { // .S
@@ -445,7 +493,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b001_111 => {
+            0b001_111 => { // FLOOR.W.fmt
                 debug!(target: "COP1", "floor.w f{}, f{}", self.inst.fd, self.inst.fs);
                 match self.inst.fmt {
                     Format_Single => { // .S
@@ -460,7 +508,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b100_000 => {
+            0b100_000 => { // CVT.S.fmt
                 debug!(target: "COP1", "cvt.s.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
                 match self.inst.fmt {
                     Format_Double => { // .D
@@ -479,8 +527,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b100_001 => {
-                debug!(target: "COP1", "cvt.d f{}, f{}", self.inst.fd, self.inst.fs);
+            0b100_001 => { // CVT.D.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 };
@@ -498,8 +545,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b100_100 => {
-                debug!(target: "COP1", "cvt.w.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+            0b100_100 => { // CVT.W.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -509,12 +555,21 @@ impl Cop1 {
                         let result = unsafe { self.fgr[self.inst.fs].as_f64 };
                         self.fgr[self.inst.fd].as_u64 = result as u64;
                     },
-                    _ => { },
+                    Format_Word => { // .W
+                        return Err(InstructionFault::FloatingPointException);
+                    },
+                    Format_Long => { // .L
+                        let result = unsafe { self.fgr[self.inst.fs].as_u64 as u32 };
+                        self.fgr[self.inst.fd].as_u64 = result as u64;
+                    },
+                    _ => { 
+                        error!(target: "CPU", "unhandled CVT.W format {:X}", self.inst.fmt);
+                        return Err(InstructionFault::Unimplemented);
+                    },
                 };
                 Ok(())
             },
-            0b100_101 => {
-                debug!(target: "COP1", "cvt.l f{}, f{}", self.inst.fd, self.inst.fs);
+            0b100_101 => { // CVT.L.fmt
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 };
@@ -524,42 +579,56 @@ impl Cop1 {
                         let result = unsafe { self.fgr[self.inst.fs].as_f64 };
                         self.fgr[self.inst.fd].as_u64 = result as u64;
                     },
-                    _ => { },
+                    Format_Word => { // .W
+                        let result = unsafe { self.fgr[self.inst.fs].as_u64 as u32 };
+                        self.fgr[self.inst.fd].as_u64 = result as u64;
+                    },
+                    Format_Long => { // .L
+                        return Err(InstructionFault::FloatingPointException);
+                    },
+                    _ => { 
+                        error!(target: "CPU", "unhandled CVT.L format {:X}", self.inst.fmt);
+                        return Err(InstructionFault::Unimplemented);
+                    },
                 };
                 Ok(())
             },
-            0b110_000 => {
-                debug!(target: "COP1", "c.f f{}, f{}", self.inst.fd, self.inst.fs);
+
+            // the FPU compare function is pretty neat, as it's always the same compare but the
+            // resulting condition flag depends on a mask in the instruction I wonder if there
+            // would be any noticeable improvement in speed if each compare was special cased,
+            // rather than the generic compare here... i.e., "C.F.S" should just set condition
+            // to False and not actually do any compares.
+            0b110_000..=0b111_111 => { // C.cond.fmt
+                let (lt, eq, unord) = match self.inst.fmt {
+                    Format_Single => { // .S
+                        let left  = unsafe { self.fgr[self.inst.fs].as_f32 };
+                        let right = unsafe { self.fgr[self.inst.ft].as_f32 };
+                        (left < right, left == right, false)
+                    },
+                    Format_Double => { // .D
+                        let left  = unsafe { self.fgr[self.inst.fs].as_f64 };
+                        let right = unsafe { self.fgr[self.inst.ft].as_f64 };
+                        (left < right, left == right, false)
+                    },
+                    _ => {
+                        return Err(InstructionFault::Unimplemented)
+                    },
+                };
+                let condition = (((self.inst.cond & 0x04) != 0) && lt)
+                              | (((self.inst.cond & 0x02) != 0) && eq)
+                              | (((self.inst.cond & 0x01) != 0) && unord);
+
+                // Set bit 23 in FCR[31] to the condition result
+                self.fcr_control_status = (self.fcr_control_status & !0x800000) | ((condition as u64) << 23);
+
+                // And quicker access
+                self.condition_signal = condition;
+
                 Ok(())
             },
-            0b110_001 => {
-                debug!(target: "COP1", "c.un f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_010 => {
-                debug!(target: "COP1", "c.eq f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_011 => {
-                debug!(target: "COP1", "c.ueq f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_100 => {
-                debug!(target: "COP1", "c.olt f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_101 => {
-                debug!(target: "COP1", "c.ult f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_110 => {
-                debug!(target: "COP1", "c.le f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
-            0b110_111 => {
-                debug!(target: "COP1", "c.ule f{}, f{}", self.inst.fd, self.inst.fs);
-                Ok(())
-            },
+
+            /*
             0b111_000 => {
                 debug!(target: "COP1", "c.sf f{}, f{}", self.inst.fd, self.inst.fs);
                 Ok(())
@@ -592,6 +661,7 @@ impl Cop1 {
                 debug!(target: "COP1", "c.ngt f{}, f{}", self.inst.fd, self.inst.fs);
                 Ok(())
             },
+            */
             _ => {
                 error!(target: "CPU", "COP1: unknown cp1 function: 0b{:02b}_{:03b}", self.inst.special >> 3, self.inst.special & 0x07);
                 Ok(())

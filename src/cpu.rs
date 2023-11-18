@@ -76,11 +76,13 @@ struct InstructionDecode {
 
 pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
-    pc: u32,
-    next_instruction: u32,    // emulates delay slot
-    next_instruction_pc: u32, // for printing correct delay slot addresses
-    is_delay_slot: bool,      // true if the currently executing instruction is in a delay slot
-    next_is_delay_slot: bool, // set to true on branching instructions
+    pc: u32,                     // lookahead PC
+    current_instruction_pc: u32, // actual PC of the currently executing instruction
+                                 // only valid inside step()
+    next_instruction: u32,       // emulates delay slot (prefetch, next instruction)
+    next_instruction_pc: u32,    // for printing correct delay slot addresses
+    is_delay_slot: bool,         // true if the currently executing instruction is in a delay slot
+    next_is_delay_slot: bool,    // set to true on branching instructions
 
     gpr: [u64; 32],
     lo: u64,
@@ -113,6 +115,7 @@ pub enum InstructionFault {
     Unimplemented,
     Break,
     CoprocessorUnusable,
+    FloatingPointException,
     ReadWrite(ReadWriteFault),
 }
 
@@ -131,6 +134,7 @@ impl Cpu {
 
             bus : bus,
             pc  : 0,
+            current_instruction_pc: 0,
             next_instruction: 0,
             next_instruction_pc: 0,
             is_delay_slot: false,
@@ -152,7 +156,7 @@ impl Cpu {
                 //  _000               _001              _010               _011                _100                _101                _110                _111
    /* 000_ */   Cpu::inst_special, Cpu::inst_regimm, Cpu::inst_j      , Cpu::inst_jal     , Cpu::inst_beq     , Cpu::inst_bne     , Cpu::inst_blez    , Cpu::inst_bgtz    ,
    /* 001_ */   Cpu::inst_addi   , Cpu::inst_addiu , Cpu::inst_slti   , Cpu::inst_sltiu   , Cpu::inst_andi    , Cpu::inst_ori     , Cpu::inst_xori    , Cpu::inst_lui     ,
-   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop   , Cpu::inst_cop2   , Cpu::inst_reserved, Cpu::inst_beql    , Cpu::inst_bnel    , Cpu::inst_blezl   , Cpu::inst_bgtzl   ,
+   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop   , Cpu::inst_cop    , Cpu::inst_reserved, Cpu::inst_beql    , Cpu::inst_bnel    , Cpu::inst_blezl   , Cpu::inst_bgtzl   ,
    /* 011_ */   Cpu::inst_daddi  , Cpu::inst_daddiu, Cpu::inst_ldl    , Cpu::inst_ldr     , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh    , Cpu::inst_lwl    , Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_lwr     , Cpu::inst_lwu     ,
    /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh    , Cpu::inst_swl    , Cpu::inst_sw      , Cpu::inst_sdl     , Cpu::inst_sdr     , Cpu::inst_swr     , Cpu::inst_cache   ,
@@ -328,17 +332,12 @@ impl Cpu {
         self.cp0gpr[Cop0_Status] |= 0x02;
 
         // set the Exception Program Counter to the currently executing instruction
-        // which is pc-8.  pc-8 will always be the currently executing instruction
-        // because 1) branch instructions do not cause exceptions, 2) jump instructions 
-        // only cause exceptions when the address is invalid (and therefore haven't 
-        // changed pc yet), and 3) no other instructions modify pc. Moreover, if we're
-        // in a delay slot, we need to subtract another 4
         self.cp0gpr[Cop0_EPC] = (if self.is_delay_slot {
             // also set the BD flag
             self.cp0gpr[Cop0_Cause] |= 0x8000_0000;
-            self.pc.wrapping_sub(12)
+            self.current_instruction_pc - 4
         } else {
-            self.pc.wrapping_sub(8)
+            self.current_instruction_pc
         } as i32) as u64;
 
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV
@@ -388,11 +387,13 @@ impl Cpu {
     }
 
     fn floating_point_exception(&mut self) -> Result<(), ReadWriteFault> {
+        // clear coprocessor number
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000;
         self.exception(ExceptionCode_FPE)
     }
 
     fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) -> Result<(), ReadWriteFault> {
-        //println!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
+        //info!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_CpU)
     }
@@ -439,11 +440,11 @@ impl Cpu {
     pub fn step(&mut self) -> Result<(), InstructionFault> {
         self.num_steps += 1;
 
-        if self.pc == 0xA4001420 {
-            //self.bus.print_debug_ipl2();
-        } else if self.pc == 0x8000_02B4 {
-            debug!(target: "CPU", "Starting cartridge ROM!");
-        }
+        //if self.pc == 0xA4001420 {
+        //    //self.bus.print_debug_ipl2();
+        //} else if self.pc == 0x8000_02B4 {
+        //    debug!(target: "CPU", "Starting cartridge ROM!");
+        //}
 
         // increment Cop0_Count at half PClock and trigger exception
         self.half_clock ^= 1;
@@ -463,7 +464,7 @@ impl Cpu {
             // to get the address exception correct when reading new instructions
             // Note, the address that caused the error and the EPC are different
             let bad_vaddr = self.pc; // for BadVAddr
-            self.pc += 8;            // for Cop0_EPC
+            self.current_instruction_pc = self.pc; // for Cop0_EPC
             self.address_exception((bad_vaddr as i32) as u64, false)?;
 
             return Ok(());
@@ -475,6 +476,11 @@ impl Cpu {
 
         // next instruction fetch
         self.next_instruction = self.read_u32(self.pc as usize)?;
+
+        // update and increment PC
+        self.current_instruction_pc = self.next_instruction_pc;
+        self.next_instruction_pc = self.pc;
+        self.pc += 4;
 
         // in delay slot flag
         self.is_delay_slot = self.next_is_delay_slot;
@@ -490,17 +496,26 @@ impl Cpu {
         self.inst.target     = inst & 0x3FFFFFF;
         self.inst.sa         = (inst >> 6) & 0x1F;
 
-        let saved_next_pc = self.next_instruction_pc;
-        self.next_instruction_pc = self.pc;
-        self.pc += 4;
-
         let result = self.instruction_table[self.inst.op as usize](self);
-        if let Err(_) = result {
-            // on error, restore the previous instruction since it didn't complete
-            self.pc -= 4;
-            self.next_instruction_pc = saved_next_pc;
-            self.next_instruction = inst;
-        }
+        let result = match result {
+            // Raise FPE on instruction failure
+            Err(InstructionFault::FloatingPointException) => { 
+                let _ = self.floating_point_exception();
+                Ok(())
+            },
+
+            // Other faults like Break, Unimplemented
+            Err(_) => {
+                // on error, restore the previous instruction since it didn't complete
+                self.pc -= 4;
+                self.next_instruction_pc = self.current_instruction_pc;
+                self.next_instruction = inst;
+                result
+            },
+
+            // Everything else
+            Ok(_) => { result },
+        };
 
         // r0 must always be zero
         self.gpr[0] = 0;
@@ -551,7 +566,7 @@ impl Cpu {
             0 => panic!("TODO"),
             1 => &mut self.cop1,
             _ => {
-                self.coprocessor_unusable_exception(3)?;
+                self.coprocessor_unusable_exception(copno)?;
                 return Ok(());
             },
         };
@@ -579,12 +594,12 @@ impl Cpu {
                     Ok(())
                 },
 
-                0b00_001 => {
+                0b00_001 => { // DMFC
                     self.gpr[self.inst.rt] = cop.dmfc(self.inst.rd)?;
                     Ok(())
                 },
 
-                0b00_010 => {
+                0b00_010 => { // CFC
                     self.gpr[self.inst.rt] = (cop.cfc(self.inst.rd)? as i32) as u64;
                     Ok(())
                 },
@@ -598,7 +613,7 @@ impl Cpu {
                     cop.mtc(self.gpr[self.inst.rt] as u32, self.inst.rd)
                 },
 
-                0b00_101 => {
+                0b00_101 => { // DMTC
                     cop.dmtc(self.gpr[self.inst.rt], self.inst.rd)
                 },
 
@@ -609,9 +624,33 @@ impl Cpu {
                 0b01_000 => {
                     let branch = (self.inst.v >> 16) & 0x1F;
                     match branch {
-                        _ => debug!(target: "COP1", "unhandled branch mode ${:05b}", branch),
-                    };
-                    Ok(())
+                        0b00_000 => { // BCzF
+                            let coc = cop.condition_signal();
+                            self.branch(!coc);
+                            Ok(())
+                        },
+
+                        0b00_001 => { // BCzT
+                            let coc = cop.condition_signal();
+                            self.branch(coc);
+                            Ok(())
+                        },
+
+                        0b00_010 => { // BCzFL 
+                            let coc = cop.condition_signal();
+                            self.branch_likely(!coc)
+                        },
+
+                        0b00_011 => { // BCzTL
+                            let coc = cop.condition_signal();
+                            self.branch_likely(coc)
+                        },
+
+                        _ => {
+                            warn!(target: "COP1", "unhandled branch mode ${:05b}", branch);
+                            Err(InstructionFault::Unimplemented)
+                        }
+                    }
                 },
 
                 _ => panic!("CPU: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
@@ -847,15 +886,6 @@ impl Cpu {
 
         Ok(())
     }
-
-    fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
-        let cop2_op = (self.inst.v >> 21) & 0x1F;
-        match cop2_op {
-            _ => error!(target: "CPU", "unknown cop2 op: 0b{:02b}_{:03b} (0b{:032b})", cop2_op >> 3, cop2_op & 0x07, self.inst.v),
-        };
-        Ok(())
-    }
-
 
     fn inst_beq(&mut self) -> Result<(), InstructionFault> {
         let condition = self.gpr[self.inst.rs] == self.gpr[self.inst.rt];
@@ -1983,12 +2013,40 @@ impl Cpu {
             0b010_000 | 0b010_001 | 0b010_010 => {
                 // RS field contains the instruction code
                 const COP_FN: [&str; 32] = [
-                    "mfc", "?", "?", "?", "mtc", "?", "?", "?",
+                    "mfc", "dmfc", "cfc", "?", "mtc", "dmtc", "ctc", "?",
                     "?", "?", "?", "?", "?", "?", "?", "?",
                     "?", "?", "?", "?", "?", "?", "?", "?",
                     "?", "?", "?", "?", "?", "?", "?", "?"
                 ];
-                r_type_rt_rd(format!("{}{}", COP_FN[rs as usize], op & 0x03))
+                let copno = op & 0x03;
+                if rs < 0b10_000 {
+                    if COP_FN[rs as usize].starts_with("?") {
+                        error!("unknown cop function rs=${:02b}_{:03b}", rs >> 3, rs & 0x07);
+                    }
+                    r_type_rt_rd(format!("{}{}", COP_FN[rs as usize], copno))
+                } else {
+                    match copno {
+                        1 => {
+                            const CP1_FN: [&str; 64] = [
+                                "add", "sub", "mul", "div", "sqrt", "abs", "mov", "neg",
+                                "round.l", "trunc.l", "ceil.l", "floor.l", "round.w", "trunc.w", "ceil.w", "floor.w",
+                                "?", "?", "?", "?", "?", "?", "?", "?",
+                                "?", "?", "?", "?", "?", "?", "?", "?",
+                                "cvt.s", "cvt.d", "?", "?", "cvt.w", "cvt.l", "?", "?",
+                                "?", "?", "?", "?", "?", "?", "?", "?",
+                                "c.f", "c.un", "c.eq", "c.ueq", "c.olt", "c.ult", "c.ole", "c.ule",
+                                "c.sf", "c.ngle", "c.seq", "c.ngl", "c.lt", "c.nge", "c.le", "c.ngt"
+                            ];
+                            if CP1_FN[func as usize].starts_with("?") {
+                                error!("unknown cp1 function func=${:03b}_{:03b}", rs >> 3, rs & 0x07);
+                            }
+                            r_type_rt_rd(format!("{}", CP1_FN[func as usize]))
+                        },
+                        _ => {
+                            panic!("invalid cop{}", copno);
+                        },
+                    }
+                }
             },
 
             0b010_100 => i_type_rs_rt("beql"),
