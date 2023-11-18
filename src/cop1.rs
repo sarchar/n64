@@ -588,17 +588,17 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32.sqrt()
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(input_a.sqrt())?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64.sqrt()
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(input_a.sqrt())?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },
@@ -610,17 +610,17 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32.abs()
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(input_a.abs())?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64.abs()
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(input_a.abs())?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },
@@ -628,7 +628,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_110 => { // MOV.fmt -- no call to begin_fpu_op
+            0b000_110 => { // MOV.fmt -- no call to begin_fpu_op and end_fpu_op
                 match self.inst.fmt {
                     Format_Single => { // .S
                         self.fgr[self.inst.fd].as_u64 = unsafe { self.fgr[self.inst.fs].as_u64 };
@@ -644,11 +644,17 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe { -self.fgr[self.inst.fs].as_f32 };
+                        //let result = unsafe { -self.fgr[self.inst.fs].as_f32 };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(-input_a)?;
+
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .S
-                        let result = unsafe { -self.fgr[self.inst.fs].as_f64 };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(-input_a)?;
                         self.fgr[self.inst.fd].as_f64 = result;
                     },
                     _ => { },
