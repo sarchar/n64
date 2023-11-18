@@ -15,6 +15,49 @@ const Format_Double: u8 = 0b10_001;
 const Format_Word  : u8 = 0b10_100;
 const Format_Long  : u8 = 0b10_101;
 
+const FpeCause_Inexact      : u64 = 0b000001;
+const FpeCause_Underflow    : u64 = 0b000010;
+const FpeCause_Overflow     : u64 = 0b000100;
+const FpeCause_DivByZero    : u64 = 0b001000;
+const FpeCause_Invalid      : u64 = 0b010000;
+const FpeCause_Unimplemented: u64 = 0b100000;
+
+#[allow(dead_code)]
+extern "C" {
+    pub static c_fe_upward: i32;
+    pub static c_fe_downward: i32;
+    pub static c_fe_tonearest: i32;
+    pub static c_fe_towardzero: i32;
+
+    pub static c_fe_divbyzero: i32;
+    pub static c_fe_inexact: i32;
+    pub static c_fe_invalid: i32;
+    pub static c_fe_overflow: i32;
+    pub static c_fe_all_except: i32;
+
+    fn c_fesetround(round: i32) -> i32;
+    fn c_fegetround() -> i32;
+    fn c_feclearexcept(excepts: i32) -> i32;
+    fn c_fetestexcept(excepts: i32) -> i32;
+
+    fn c_f32_add(a: f32, b: f32) -> f32;
+}
+
+static fe_upward: &i32 = unsafe { &c_fe_upward };
+static fe_downward: &i32 = unsafe { &c_fe_downward };
+static fe_tonearest: &i32 = unsafe { &c_fe_tonearest };
+static fe_towardzero: &i32 = unsafe { &c_fe_towardzero };
+static fe_divbyzero: &i32 = unsafe { &c_fe_divbyzero };
+static fe_inexact: &i32 = unsafe { &c_fe_inexact };
+static fe_invalid: &i32 = unsafe { &c_fe_invalid };
+static fe_overflow: &i32 = unsafe { &c_fe_overflow };
+static fe_all_except: &i32 = unsafe { &c_fe_all_except };
+
+fn fesetround(round: &i32) -> i32 { unsafe { c_fesetround(*round) } }
+fn fegetround() -> i32 { unsafe { c_fegetround() } }
+fn feclearexcept(excepts: &i32) -> i32 { unsafe { c_feclearexcept(*excepts) } }
+fn fetestexcept(excepts: &i32) -> i32 { unsafe { c_fetestexcept(*excepts) } }
+
 struct InstructionDecode {
     v: u32,
     special: u32,
@@ -54,6 +97,9 @@ pub struct Cop1 {
     condition_signal: bool,
 
     inst: InstructionDecode,
+
+    // system rounding mode
+    system_rounding_mode: i32,
 }
 
 impl Cop1 {
@@ -69,6 +115,8 @@ impl Cop1 {
             inst: InstructionDecode {
                 v: 0, special: 0, fmt: 0, cond: 0, ft: 0, fs: 0, fd: 0,
             },
+
+            system_rounding_mode: fegetround(),
         }
     }
 
@@ -88,12 +136,16 @@ impl Cop1 {
 
     // Update the cause bits in fcr_control_status and if the corresponding enable bit is set,
     // raise an exception. The unimplemented instruction bit (E) always generates an exception
-    fn update_cause(&mut self, cause: u64) -> Result<(), InstructionFault> {
-        self.fcr_control_status = (self.fcr_control_status & !0x0003_F000) | (cause << 12);
+    fn update_cause(&mut self, cause: u64, update_flag: bool) -> Result<(), InstructionFault> {
+        self.fcr_control_status |= cause << 12;
         let unimplemented_instruction = (cause & 0x20) != 0;
         if unimplemented_instruction || ((cause & ((self.fcr_control_status >> 7) & 0x1F)) != 0) {
             Err(InstructionFault::FloatingPointException)
         } else {
+            if update_flag {
+                // update flags when the exception is not generated
+                self.fcr_control_status |= (cause & 0x1F) << 2;
+            }
             Ok(())
         }
     }
@@ -179,7 +231,7 @@ impl Cop1 {
                 // Remove the Cause bits from value
                 let cause = (value >> 12) & 0x3F;
                 self.fcr_control_status = value & !0x0003_F000;
-                self.update_cause(cause)?;
+                self.update_cause(cause, false)?;
                 Ok(())
             },
 
@@ -233,6 +285,90 @@ impl Cop1 {
         Ok(())
     }
 
+    fn begin_fpu_op(&mut self) {
+        let round_mode = match self.fcr_control_status & 0x03 {
+            0b00 => fe_tonearest,
+            0b01 => fe_towardzero,
+            0b10 => fe_upward,
+            0b11 => fe_downward,
+            _ => panic!("not valid"),
+        };
+
+        fesetround(round_mode);
+        feclearexcept(fe_all_except);
+
+        self.fcr_control_status &= !0x0001F000;
+    }
+
+    fn check_input_f32(&mut self, value: f32) -> Result<f32, InstructionFault> {
+        if value.is_nan() {
+            let value = value.to_bits();
+            let signalling = (value & 0x0040_0000) == 0;
+            if signalling { // sNaN is not supported
+                self.update_cause(FpeCause_Unimplemented, true)?;
+            } else { // qNaNs cause invalid instruction
+                self.update_cause(FpeCause_Invalid, true)?;
+            }
+        } else if value.is_subnormal() {
+            self.update_cause(FpeCause_Unimplemented, true)?;
+        }
+
+        Ok(value)
+    }
+
+    fn end_fpu_op_f32(&mut self, result: f32) -> Result<f32, InstructionFault> {
+        let excepts = fetestexcept(fe_all_except);
+        //error!(target: "CPU", "got excepts={}", excepts);
+
+        let mut retval = Ok(result);
+        let mut cause = 0;
+
+        if (excepts & *fe_inexact) != 0 {
+            cause |= FpeCause_Inexact;
+        }
+
+        if (excepts & *fe_invalid) != 0 {
+            cause |= FpeCause_Invalid;
+            retval = Ok(f32::from_bits(0x7FBFFFFF));
+        }
+
+        if (excepts & *fe_overflow) != 0 {
+            cause |= FpeCause_Overflow;
+        }
+
+        if result.is_nan() {
+            retval = Ok(f32::from_bits(0x7FBFFFFF));
+        } else if result.is_subnormal() {
+            let flush_subnormals = ((self.fcr_control_status >> 24) & 0x01) != 0;
+            let underflow_enabled = (self.fcr_control_status & (0x02 << 7)) != 0;
+            let inexact_enabled = (self.fcr_control_status & (0x01 << 7)) != 0;
+            if !flush_subnormals || underflow_enabled || inexact_enabled {
+                cause |= FpeCause_Unimplemented;
+            } else {
+                cause |= FpeCause_Inexact | FpeCause_Underflow;
+            }
+
+            //a=-1.7549435e-38 b=-1.1754944e-38
+
+            // set result depending on rounding mode
+            retval = Ok(match self.fcr_control_status & 0x03 {
+                0b00 | 0b01 => { if result >= 0.0 { 0.0 } else { -0.0 } }, // tonearest, towardzero
+                // these two return the minimum positive normal number
+                0b10 => { if result >= 0.0 { f32::from_bits(0x00800000) } else { -0.0 } }, // upward
+                0b11 => { if result >= 0.0 { 0.0 } else { -f32::from_bits(0x00800000) } }, // downward
+                _ => panic!("not valid"),
+            });
+        }
+
+        if cause != 0 {
+            self.update_cause(cause, true)?;
+        }
+
+        fesetround(&self.system_rounding_mode);
+
+        retval
+    }
+
     pub fn special(&mut self, inst: u32) -> Result<(), InstructionFault> {
         self.inst.v       = inst;
         self.inst.special = self.inst.v & 0x3F;
@@ -251,11 +387,13 @@ impl Cop1 {
         match self.inst.special {
             // ADD
             0b000_000 => { // ADD.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32 + self.fgr[self.inst.ft].as_f32
-                        };
+                        let input_a = self.check_input_f32(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+                        let input_b = self.check_input_f32(unsafe { self.fgr[self.inst.ft].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(unsafe { c_f32_add(input_a, input_b) })?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
@@ -272,6 +410,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_001 => { // SUB.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
@@ -293,6 +432,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_010 => { // MUL.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
@@ -314,6 +454,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_011 => { // DIV.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
@@ -335,6 +476,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_100 => { // SQRT.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
@@ -356,6 +498,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_101 => { // ABS.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe {
@@ -376,7 +519,7 @@ impl Cop1 {
                 };
                 Ok(())
             },
-            0b000_110 => { // MOV.fmt
+            0b000_110 => { // MOV.fmt -- no call to begin_fpu_op
                 match self.inst.fmt {
                     Format_Single => { // .S
                         self.fgr[self.inst.fd].as_u64 = unsafe { self.fgr[self.inst.fs].as_u64 };
@@ -389,6 +532,7 @@ impl Cop1 {
                 Ok(())
             },
             0b000_111 => { // NEG.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { -self.fgr[self.inst.fs].as_f32 };
@@ -403,6 +547,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_000 => { // ROUND.L.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.round() };
@@ -417,6 +562,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_001 => { // TRUNC.L.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -431,6 +577,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_010 => { // CEIL.L.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.ceil() };
@@ -441,6 +588,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_011 => { // FLOOR.L.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.floor() };
@@ -451,6 +599,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_100 => { // ROUND.W.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.round() as u32 };
@@ -465,6 +614,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_101 => { // TRUNC.W.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -479,7 +629,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_110 => { // CEIL.W.fmt
-                debug!(target: "COP1", "ceil.w f{}, f{}", self.inst.fd, self.inst.fs);
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.ceil() as u32 };
@@ -494,7 +644,7 @@ impl Cop1 {
                 Ok(())
             },
             0b001_111 => { // FLOOR.W.fmt
-                debug!(target: "COP1", "floor.w f{}, f{}", self.inst.fd, self.inst.fs);
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32.floor() as u32 };
@@ -509,7 +659,7 @@ impl Cop1 {
                 Ok(())
             },
             0b100_000 => { // CVT.S.fmt
-                debug!(target: "COP1", "cvt.s.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                //debug!(target: "COP1", "cvt.s.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
                 match self.inst.fmt {
                     Format_Double => { // .D
                         let result = unsafe { self.fgr[self.inst.fs].as_f64 as f32 };

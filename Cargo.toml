@@ -35,3 +35,6 @@ optional = true
 [dependencies.pixels]
 version = "0.13"
 optional = true
+
+[build-dependencies.cc]
+version = "1.0"
