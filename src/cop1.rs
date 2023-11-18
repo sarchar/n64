@@ -5,6 +5,8 @@
 #[allow(unused_imports)]
 use tracing::{debug, error, info};
 
+use num_traits::{Float, Zero};
+
 use crate::cpu::InstructionFault;
 
 const _Cop1_Revision     : usize = 0;
@@ -41,22 +43,42 @@ extern "C" {
     fn c_fetestexcept(excepts: i32) -> i32;
 
     fn c_f32_add(a: f32, b: f32) -> f32;
+    fn c_f64_add(a: f64, b: f64) -> f64;
 }
 
-static fe_upward: &i32 = unsafe { &c_fe_upward };
-static fe_downward: &i32 = unsafe { &c_fe_downward };
-static fe_tonearest: &i32 = unsafe { &c_fe_tonearest };
+static fe_upward    : &i32 = unsafe { &c_fe_upward };
+static fe_downward  : &i32 = unsafe { &c_fe_downward };
+static fe_tonearest : &i32 = unsafe { &c_fe_tonearest };
 static fe_towardzero: &i32 = unsafe { &c_fe_towardzero };
-static fe_divbyzero: &i32 = unsafe { &c_fe_divbyzero };
-static fe_inexact: &i32 = unsafe { &c_fe_inexact };
-static fe_invalid: &i32 = unsafe { &c_fe_invalid };
-static fe_overflow: &i32 = unsafe { &c_fe_overflow };
+static fe_divbyzero : &i32 = unsafe { &c_fe_divbyzero };
+static fe_inexact   : &i32 = unsafe { &c_fe_inexact };
+static fe_invalid   : &i32 = unsafe { &c_fe_invalid };
+static fe_overflow  : &i32 = unsafe { &c_fe_overflow };
 static fe_all_except: &i32 = unsafe { &c_fe_all_except };
 
-fn fesetround(round: &i32) -> i32 { unsafe { c_fesetround(*round) } }
-fn fegetround() -> i32 { unsafe { c_fegetround() } }
+fn fesetround(round: &i32)      -> i32 { unsafe { c_fesetround(*round) } }
+fn fegetround()                 -> i32 { unsafe { c_fegetround() } }
 fn feclearexcept(excepts: &i32) -> i32 { unsafe { c_feclearexcept(*excepts) } }
-fn fetestexcept(excepts: &i32) -> i32 { unsafe { c_fetestexcept(*excepts) } }
+fn fetestexcept(excepts: &i32)  -> i32 { unsafe { c_fetestexcept(*excepts) } }
+
+// f32 and f64 need QUIET_NAN_BIT
+trait SignallingNan {
+    fn is_signalling_nan(&self) -> bool;
+}
+
+impl SignallingNan for f32 {
+    fn is_signalling_nan(&self) -> bool {
+        static QUIET_NAN_BIT: u32 = 0x0040_0000;
+        self.is_nan() && (self.to_bits() & QUIET_NAN_BIT) == 0
+    }
+}
+
+impl SignallingNan for f64 {
+    fn is_signalling_nan(&self) -> bool {
+        static QUIET_NAN_BIT: u64 = 0x0008_0000_0000_0000;
+        self.is_nan() && (self.to_bits() & QUIET_NAN_BIT) == 0
+    }
+}
 
 struct InstructionDecode {
     v: u32,
@@ -300,10 +322,9 @@ impl Cop1 {
         self.fcr_control_status &= !0x0001F000;
     }
 
-    fn check_input_f32(&mut self, value: f32) -> Result<f32, InstructionFault> {
+    fn check_input<T: Float + Zero + SignallingNan>(&mut self, value: T) -> Result<T, InstructionFault> {
         if value.is_nan() {
-            let value = value.to_bits();
-            let signalling = (value & 0x0040_0000) == 0;
+            let signalling = value.is_signalling_nan();
             if signalling { // sNaN is not supported
                 self.update_cause(FpeCause_Unimplemented, true)?;
             } else { // qNaNs cause invalid instruction
@@ -316,6 +337,7 @@ impl Cop1 {
         Ok(value)
     }
 
+    // don't like that this function is duplicated
     fn end_fpu_op_f32(&mut self, result: f32) -> Result<f32, InstructionFault> {
         let excepts = fetestexcept(fe_all_except);
         //error!(target: "CPU", "got excepts={}", excepts);
@@ -348,14 +370,67 @@ impl Cop1 {
                 cause |= FpeCause_Inexact | FpeCause_Underflow;
             }
 
-            //a=-1.7549435e-38 b=-1.1754944e-38
-
             // set result depending on rounding mode
             retval = Ok(match self.fcr_control_status & 0x03 {
                 0b00 | 0b01 => { if result >= 0.0 { 0.0 } else { -0.0 } }, // tonearest, towardzero
                 // these two return the minimum positive normal number
                 0b10 => { if result >= 0.0 { f32::from_bits(0x00800000) } else { -0.0 } }, // upward
                 0b11 => { if result >= 0.0 { 0.0 } else { -f32::from_bits(0x00800000) } }, // downward
+                _ => panic!("not valid"),
+            });
+        }
+
+        if cause != 0 {
+            self.update_cause(cause, true)?;
+        }
+
+        fesetround(&self.system_rounding_mode);
+
+        retval
+    }
+
+    // don't like that this function is duplicated
+    // DO NOT CHANGE THIS FUNCTION WITHOUT CHANGING THE ABOVE ONE AS WELL!!
+    // THEY SHOULD BE IDENTICAL EXCEPT FOR F32->F64 CHANGES
+    fn end_fpu_op_f64(&mut self, result: f64) -> Result<f64, InstructionFault> {
+        let excepts = fetestexcept(fe_all_except);
+        //error!(target: "CPU", "got excepts={}", excepts);
+
+        let mut retval = Ok(result);
+        let mut cause = 0;
+
+        if (excepts & *fe_inexact) != 0 {
+            cause |= FpeCause_Inexact;
+        }
+
+        if (excepts & *fe_invalid) != 0 {
+            cause |= FpeCause_Invalid;
+            retval = Ok(f64::from_bits(0x7FF7_FFFF_FFFF_FFFF));
+        }
+
+        if (excepts & *fe_overflow) != 0 {
+            cause |= FpeCause_Overflow;
+        }
+
+        if result.is_nan() {
+            retval = Ok(f64::from_bits(0x7FF7_FFFF_FFFF_FFFF));
+        } else if result.is_subnormal() {
+            let flush_subnormals = ((self.fcr_control_status >> 24) & 0x01) != 0;
+            let underflow_enabled = (self.fcr_control_status & (0x02 << 7)) != 0;
+            let inexact_enabled = (self.fcr_control_status & (0x01 << 7)) != 0;
+            if !flush_subnormals || underflow_enabled || inexact_enabled {
+                cause |= FpeCause_Unimplemented;
+            } else {
+                cause |= FpeCause_Inexact | FpeCause_Underflow;
+            }
+
+            // set result depending on rounding mode
+            retval = Ok(match self.fcr_control_status & 0x03 {
+                0b00 | 0b01 => { if result >= 0.0 { 0.0 } else { -0.0 } }, // tonearest, towardzero
+                // these two return the minimum positive normal number
+                // positive normal number is 1 in the exponent ant the fraction all zeroes
+                0b10 => { if result >= 0.0 { f64::from_bits(0x0010_0000_0000_0000) } else { -0.0 } }, // upward
+                0b11 => { if result >= 0.0 { 0.0 } else { -f64::from_bits(0x0010_0000_0000_0000) } }, // downward
                 _ => panic!("not valid"),
             });
         }
@@ -390,8 +465,8 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let input_a = self.check_input_f32(unsafe { self.fgr[self.inst.fs].as_f32 })?;
-                        let input_b = self.check_input_f32(unsafe { self.fgr[self.inst.ft].as_f32 })?;
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f32 })?;
 
                         let result = self.end_fpu_op_f32(unsafe { c_f32_add(input_a, input_b) })?;
 
@@ -399,9 +474,10 @@ impl Cop1 {
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64 + self.fgr[self.inst.ft].as_f64
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(unsafe { c_f64_add(input_a, input_b) })?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },

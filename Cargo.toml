@@ -36,5 +36,8 @@ optional = true
 version = "0.13"
 optional = true
 
+[dependencies.num-traits]
+version = "0.2"
+
 [build-dependencies.cc]
 version = "1.0"

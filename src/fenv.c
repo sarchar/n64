@@ -31,3 +31,7 @@ extern int32_t c_fetestexcept(int32_t excepts) {
 extern float c_f32_add(float a, float b) {
     return a + b;
 }
+
+extern double c_f64_add(double a, double b) {
+    return a + b;
+}
