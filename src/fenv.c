@@ -35,5 +35,7 @@ extern float  c_f32_sub(float a , float b)  { return a - b; }
 extern double c_f64_sub(double a, double b) { return a - b; }
 extern float  c_f32_mul(float a , float b)  { return a * b; }
 extern double c_f64_mul(double a, double b) { return a * b; }
+extern float  c_f32_div(float a , float b)  { return a / b; }
+extern double c_f64_div(double a, double b) { return a / b; }
 
 

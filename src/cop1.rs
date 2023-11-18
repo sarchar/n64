@@ -49,6 +49,8 @@ extern "C" {
     fn c_f64_sub(a: f64, b: f64) -> f64;
     fn c_f32_mul(a: f32, b: f32) -> f32;
     fn c_f64_mul(a: f64, b: f64) -> f64;
+    fn c_f32_div(a: f32, b: f32) -> f32;
+    fn c_f64_div(a: f64, b: f64) -> f64;
 }
 
 static fe_upward    : &i32 = unsafe { &c_fe_upward };
@@ -364,6 +366,10 @@ impl Cop1 {
             cause |= FpeCause_Overflow;
         }
 
+        if (excepts & *fe_divbyzero) != 0 {
+            cause |= FpeCause_DivByZero;
+        }
+
         let is_underflow = (excepts & *fe_underflow) != 0;
 
         if result.is_nan() {
@@ -419,6 +425,10 @@ impl Cop1 {
 
         if (excepts & *fe_overflow) != 0 {
             cause |= FpeCause_Overflow;
+        }
+
+        if (excepts & *fe_divbyzero) != 0 {
+            cause |= FpeCause_DivByZero;
         }
 
         let my_is_subnormal = |v: f64| -> bool {
@@ -554,17 +564,19 @@ impl Cop1 {
                 self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f32 / self.fgr[self.inst.ft].as_f32
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f32 })?;
+
+                        let result = self.end_fpu_op_f32(unsafe { c_f32_div(input_a, input_b) })?;
 
                         // need to clear the upper bits, so we don't use as_f32
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Double => { // .D
-                        let result = unsafe {
-                            self.fgr[self.inst.fs].as_f64 / self.fgr[self.inst.ft].as_f64
-                        };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+                        let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f64 })?;
+
+                        let result = self.end_fpu_op_f64(unsafe { c_f64_div(input_a, input_b) })?;
 
                         self.fgr[self.inst.fd].as_f64 = result;
                     },
