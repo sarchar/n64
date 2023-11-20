@@ -29,6 +29,11 @@ extern int32_t c_fetestexcept(int32_t excepts) {
     return fetestexcept(excepts);
 }
 
+// these floating point operations are in C so that fetestexcept produces
+// correct results it seems that sometimes the rust floating point ops set the
+// exception flags, but I think rusts optimizer produces code that doesn't
+// always set exception flags. better to be consistent here until I know how to
+// get floating point exceptions in Rust
 extern float  c_f32_add(float a , float b)  { return a + b; }
 extern double c_f64_add(double a, double b) { return a + b; }
 extern float  c_f32_sub(float a , float b)  { return a - b; }
@@ -37,5 +42,4 @@ extern float  c_f32_mul(float a , float b)  { return a * b; }
 extern double c_f64_mul(double a, double b) { return a * b; }
 extern float  c_f32_div(float a , float b)  { return a / b; }
 extern double c_f64_div(double a, double b) { return a / b; }
-
 

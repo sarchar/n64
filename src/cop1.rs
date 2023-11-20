@@ -386,11 +386,12 @@ impl Cop1 {
             }
 
             // set result depending on rounding mode
+            let is_neg = (result.to_bits() >> 31) != 0;
             retval = Ok(match self.fcr_control_status & 0x03 {
-                0b00 | 0b01 => { if result >= 0.0 { 0.0 } else { -0.0 } }, // tonearest, towardzero
+                0b00 | 0b01 => { if !is_neg { 0.0 } else { -0.0 } }, // tonearest, towardzero
                 // these two return the minimum positive normal number
-                0b10 => { if result >= 0.0 { f32::from_bits(0x00800000) } else { -0.0 } }, // upward
-                0b11 => { if result >= 0.0 { 0.0 } else { -f32::from_bits(0x00800000) } }, // downward
+                0b10 => { if !is_neg { f32::from_bits(0x00800000) } else { -0.0 } }, // upward
+                0b11 => { if !is_neg { 0.0 } else { -f32::from_bits(0x00800000) } }, // downward
                 _ => panic!("not valid"),
             });
         }
@@ -774,43 +775,80 @@ impl Cop1 {
                 Ok(())
             },
             0b100_000 => { // CVT.S.fmt
-                //debug!(target: "COP1", "cvt.s.{:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Double => { // .D
-                        let result = unsafe { self.fgr[self.inst.fs].as_f64 as f32 };
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 })?;
+
+                        let result = self.end_fpu_op_f32(input_a as f32)?;
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Word => { // .W
-                        let result = unsafe { self.fgr[self.inst.fs].as_u32 as f32 };
+                        let input_a = unsafe { self.fgr[self.inst.fs].as_u32 as i32 };
+
+                        let result = self.end_fpu_op_f32(input_a as f32)?;
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
                     Format_Long => { // .L
-                        let result = unsafe { self.fgr[self.inst.fs].as_u64 as f32 };
+                        let input_a = unsafe { self.fgr[self.inst.fs].as_u64 as i64 };
+
+                        // From the datasheet, CVT.S/D generate unimplemented operation exceptions
+                        // when converting from a 64-bit integer unless all the bits 63 through 55
+                        // of a 64-bit integer are 0 or 1
+                        let ubits = (input_a as u64) & 0xFF80_0000_0000_0000;
+                        if ubits != 0 && ubits != 0xFF80_0000_0000_0000 {
+                            let _ = self.update_cause(FpeCause_Unimplemented, true)?;
+                        }
+
+                        let result = self.end_fpu_op_f32(input_a as f32)?;
                         self.fgr[self.inst.fd].as_u64 = result.to_bits() as u64;
                     },
-                    _ => { },
+                    _ => { 
+                        fesetround(&self.system_rounding_mode); // restore rounding changed by begin_fpu_op
+                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
+                    },
                 };
                 Ok(())
             },
             0b100_001 => { // CVT.D.fmt
+                info!(target: "COP1", "cvt.d.${:X} f{}, f{}", self.inst.fmt, self.inst.fd, self.inst.fs);
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32 };
-                        self.fgr[self.inst.fd].as_f64 = result as f64;
+                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 })?;
+
+                        let result = self.end_fpu_op_f64(input_a as f64)?;
+                        self.fgr[self.inst.fd].as_f64 = result;
                     },
                     Format_Word => { // .W
-                        let result = unsafe { self.fgr[self.inst.fs].as_u32 };
+                        let input_a = unsafe { self.fgr[self.inst.fs].as_u32 as i32 };
+
+                        let result = self.end_fpu_op_f64(input_a as f64)?;
                         self.fgr[self.inst.fd].as_f64 = result as f64;
                     },
                     Format_Long => { // .L
-                        let result = unsafe { self.fgr[self.inst.fs].as_u64 };
-                        self.fgr[self.inst.fd].as_f64 = result as f64;
+                        let input_a = unsafe { self.fgr[self.inst.fs].as_u64 as i64 };
+
+                        // From the datasheet, CVT.S/D generate unimplemented operation exceptions
+                        // when converting from a 64-bit integer unless all the bits 63 through 55
+                        // of a 64-bit integer are 0 or 1
+                        let ubits = (input_a as u64) & 0xFF80_0000_0000_0000;
+                        if ubits != 0 && ubits != 0xFF80_0000_0000_0000 {
+                            let _ = self.update_cause(FpeCause_Unimplemented, true)?;
+                        }
+
+                        let result = self.end_fpu_op_f64(input_a as f64)?;
+                        self.fgr[self.inst.fd].as_f64 = result;
                     },
-                    _ => { },
+                    _ => { 
+                        fesetround(&self.system_rounding_mode); // restore rounding changed by begin_fpu_op
+                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
+                    },
                 };
                 Ok(())
             },
             0b100_100 => { // CVT.W.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
@@ -835,6 +873,7 @@ impl Cop1 {
                 Ok(())
             },
             0b100_101 => { // CVT.L.fmt
+                self.begin_fpu_op();
                 match self.inst.fmt {
                     Format_Single => { // .S
                         let result = unsafe { self.fgr[self.inst.fs].as_f32 };
