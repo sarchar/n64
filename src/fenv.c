@@ -1,5 +1,7 @@
 #include <fenv.h>
+#include <math.h>
 #include <stdint.h>
+#include <xmmintrin.h>
 
 int32_t c_fe_upward     = FE_UPWARD;
 int32_t c_fe_downward   = FE_DOWNWARD;
@@ -42,4 +44,22 @@ extern float  c_f32_mul(float a , float b)  { return a * b; }
 extern double c_f64_mul(double a, double b) { return a * b; }
 extern float  c_f32_div(float a , float b)  { return a / b; }
 extern double c_f64_div(double a, double b) { return a / b; }
+
+// these rint*() functions use the fpu rounding mode, which does not seem availble in rust
+
+// the compiler seems to incorrectly optimize the call to rint, making the rounding mode incorrect
+// this inline assembly seems to prevent that optimization
+extern double c_rint_f64(double a) { 
+#if defined(__GNUC__) || defined(__clang__)
+    asm __volatile__(
+            "movsd %1,%%xmm0\n\t"
+            "call rint\n\t"
+            "movsd %%xmm0,%0\n\t"
+            : "=m"(a) : "m"(a) : "xmm0", "memory");
+#else
+    // MSVC seems to work for now. Might need to fix in the future
+    a = rint(a);
+#endif
+    return a;
+}
 

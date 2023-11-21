@@ -1665,7 +1665,7 @@ impl Cpu {
 
     fn special_mult(&mut self) -> Result<(), InstructionFault> {
         // must be 32-bit sign extended values
-        let result = ((self.gpr[self.inst.rs] as i32) as u64) * ((self.gpr[self.inst.rt] as i32) as u64);
+        let result = ((self.gpr[self.inst.rs] as i32) as u64).wrapping_mul((self.gpr[self.inst.rt] as i32) as u64);
 
         // multu results are available in the next instruction since the multiply
         // was started earlier in the pipeline
@@ -1677,7 +1677,7 @@ impl Cpu {
 
     fn special_multu(&mut self) -> Result<(), InstructionFault> {
         // must be 32-bit unsigned numbers
-        let result = (self.gpr[self.inst.rs] & 0xFFFF_FFFF) * (self.gpr[self.inst.rt] & 0xFFFF_FFFF);
+        let result = (self.gpr[self.inst.rs] & 0xFFFF_FFFF).wrapping_mul(self.gpr[self.inst.rt] & 0xFFFF_FFFF);
 
         // multu results are available in the next instruction since the multiply
         // was started earlier in the pipeline
