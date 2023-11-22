@@ -72,8 +72,12 @@ fn feclearexcept(excepts: &i32) -> i32 { unsafe { c_feclearexcept(*excepts) } }
 fn fetestexcept(excepts: &i32)  -> i32 { unsafe { c_fetestexcept(*excepts) } }
 
 // f32 and f64 need QUIET_NAN_BIT
-trait SignallingNan {
+trait SignallingNan: Float {
     fn is_signalling_nan(&self) -> bool;
+
+    fn is_quiet_nan(&self) -> bool {
+        self.is_nan() && !self.is_signalling_nan()
+    }
 }
 
 impl SignallingNan for f32 {
@@ -929,7 +933,7 @@ impl Cop1 {
             },
 
             // the FPU compare function is pretty neat, as it's always the same compare but the
-            // resulting condition flag depends on a mask in the instruction I wonder if there
+            // resulting condition flag depends on a mask in the instruction. I wonder if there
             // would be any noticeable improvement in speed if each compare was special cased,
             // rather than the generic compare here... i.e., "C.F.S" should just set condition
             // to False and not actually do any compares.
@@ -938,17 +942,35 @@ impl Cop1 {
                     Format_Single => { // .S
                         let left  = unsafe { self.fgr[self.inst.fs].as_f32 };
                         let right = unsafe { self.fgr[self.inst.ft].as_f32 };
-                        (left < right, left == right, false)
+                        if left.is_nan() || right.is_nan() {
+                            // qNaNs always trigger the invalid operation
+                            if (self.inst.special & 0x08) != 0 || left.is_quiet_nan() || right.is_quiet_nan() {
+                                self.update_cause(FpeCause_Invalid, true)?;
+                            }
+                            (false, false, true)
+                        } else {
+                            (left < right, left == right, false)
+                        }
                     },
                     Format_Double => { // .D
                         let left  = unsafe { self.fgr[self.inst.fs].as_f64 };
                         let right = unsafe { self.fgr[self.inst.ft].as_f64 };
-                        (left < right, left == right, false)
+                        if left.is_nan() || right.is_nan() {
+                            // qNaNs always trigger the invalid operation
+                            if (self.inst.special & 0x08) != 0 || left.is_quiet_nan() || right.is_quiet_nan() {
+                                self.update_cause(FpeCause_Invalid, true)?;
+                            }
+                            (false, false, true)
+                        } else {
+                            (left < right, left == right, false)
+                        }
                     },
                     _ => {
-                        return Err(InstructionFault::Unimplemented)
+                        self.update_cause(FpeCause_Unimplemented, true)?;
+                        (false, false, true)
                     },
                 };
+
                 let condition = (((self.inst.cond & 0x04) != 0) && lt)
                               | (((self.inst.cond & 0x02) != 0) && eq)
                               | (((self.inst.cond & 0x01) != 0) && unord);
