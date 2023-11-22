@@ -431,17 +431,11 @@ impl Cop1 {
         // this conversion has to happen after check_fpu_exceptions
         let mut value = rounded_value as i64;
 
-        // if the rounded result is out of range an invalid exception occurs
+        // if the rounded result is out of range an unimplemented exception occurs
         if value < -(1 << 31) || value > ((1 << 31) - 1) {
             cause = FpeCause_Unimplemented; // overwrite other flags
             value = (2 << 31) - 1;
         }
-
-        // from the datasheet, if any bits 53 to 62 of the conversion from floating point to fixed
-        // point are 1, an unimplemented exception occurs
-        //if (value & 0x7FE0_0000_0000_0000) != 0 {
-        //    cause = FpeCause_Unimplemented;
-        //}
 
         if cause != 0 {
             self.update_cause(cause, true)?;
@@ -450,6 +444,35 @@ impl Cop1 {
         fesetround(&self.system_rounding_mode);
 
         Ok(value as u32)
+    }
+
+    fn end_fpu_op_convert_long(&mut self, rounded_value: f64) -> Result<u64, InstructionFault> {
+        let (mut cause, _) = Self::check_fpu_exceptions();
+
+        // this conversion has to happen after check_fpu_exceptions
+        let mut value = rounded_value as i64;
+
+        // datasheet says if any bits 53 to 62 of the result are set (and I presume larger than
+        // that too?) then an unimplemented exception occurs, so we
+        // can only round numbers that are between -2^53 and 2^53-1
+        // f64 exponent bias is 1023, and mantissa is 52 bits wide
+        // bit 63 for negative float
+        let min_value = f64::from_bits(((53 + 1023) << 52) | (1 << 63));
+        let max_value = f64::from_bits( (53 + 1023) << 52);
+
+        // if the rounded result is out of range an unimplemented exception occurs
+        if rounded_value >= max_value || rounded_value <= min_value {
+            cause = FpeCause_Unimplemented;
+            value = (2 << 63) - 1;
+        }
+
+        if cause != 0 {
+            self.update_cause(cause, true)?;
+        }
+
+        fesetround(&self.system_rounding_mode);
+
+        Ok(value as u64)
     }
 
 
@@ -712,150 +735,98 @@ impl Cop1 {
             },
             0b001_000 => { // ROUND.L.fmt
                 self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32.round() };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    Format_Double => { // .D
-                        let result = unsafe { self.fgr[self.inst.fs].as_f64.round() };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => { },
+                fesetround(fe_tonearest); // ROUND always rounds to nearest
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_long(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result;
                 Ok(())
             },
             0b001_001 => { // TRUNC.L.fmt
                 self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32 as u32 };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    Format_Double => { // .D
-                        let result = unsafe { self.fgr[self.inst.fs].as_f64 as u32 };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => { },
+                fesetround(fe_towardzero); // TRUNC always rounds to zero
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_long(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result;
                 Ok(())
             },
             0b001_010 => { // CEIL.L.fmt
                 self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32.ceil() };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => { },
+                fesetround(fe_upward); // CEIL rounds up
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_long(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result;
                 Ok(())
             },
             0b001_011 => { // FLOOR.L.fmt
                 self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32.floor() };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => { },
+                fesetround(fe_downward); // FLOOR rounds down
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_long(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result;
                 Ok(())
             },
             0b001_100 => { // ROUND.W.fmt
                 self.begin_fpu_op();
                 fesetround(fe_tonearest); // ROUND always rounds to nearest
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        // weird that this is the same code as CVT.W.S
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-
-                        self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
-                    },
-                    Format_Double => { // .D
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => {  // Not implemented for .W and .L
-                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
-                    },
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
                 Ok(())
             },
             0b001_101 => { // TRUNC.W.fmt
                 self.begin_fpu_op();
                 fesetround(fe_towardzero); // TRUNC always rounds to zero
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        // weird that this is the same code as CVT.W.S
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-
-                        self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
-                    },
-                    Format_Double => { // .D
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => {  // Not implemented for .W and .L
-                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
-                    },
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
                 Ok(())
             },
             0b001_110 => { // CEIL.W.fmt
                 self.begin_fpu_op();
                 fesetround(fe_upward); // CEIL rounds up
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        // weird that this is the same code as CVT.W.S
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-
-                        self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
-                    },
-                    Format_Double => { // .D
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => {  // Not implemented for .W and .L
-                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
-                    },
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
                 Ok(())
             },
             0b001_111 => { // FLOOR.W.fmt
                 self.begin_fpu_op();
                 fesetround(fe_downward); // FLOOR rounds down
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        // weird that this is the same code as CVT.W.S
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-
-                        self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
-                    },
-                    Format_Double => { // .D
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => {  // Not implemented for .W and .L
-                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
-                    },
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
+                let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
                 Ok(())
             },
             0b100_000 => { // CVT.S.fmt
@@ -929,56 +900,31 @@ impl Cop1 {
                 Ok(())
             },
             0b100_100 => { // CVT.W.fmt
+                self.begin_fpu_op();
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
+                };
+                let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result as u64; // clear upper bits to zero
+                Ok(())
+            },
+            0b100_101 => { // CVT.L.fmt
                 //self.begin_fpu_op();
                 //let fs = unsafe { self.fgr[self.inst.fs].as_f32 };
                 //let rounded_fs = unsafe { c_rint_f64(self.fgr[self.inst.fs].as_f32 as f64) as f32 };
                 //let out_of_range = (rounded_fs as i64) < -(1 << 31) || (rounded_fs as i64) > ((1 << 31) - 1);
-                //info!(target: "COP1", "cvt.w.${:X} f{}, f{}={:08X}, rm={}, c_rint_f64={:08X}, as_i64={:X}, out_of_range={}", self.inst.fmt, self.inst.fd, self.inst.fs, 
+                //info!(target: "COP1", "CVT.L.${:X} f{}, f{}={:08X}, rm={}, c_rint_f64={:08X}, as_i64={:X}, out_of_range={}", self.inst.fmt, self.inst.fd, self.inst.fs, 
                 //      fs.to_bits(), self.fcr_control_status & 0x03, rounded_fs.to_bits(), rounded_fs as i64, out_of_range);
                 self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-
-                        self.fgr[self.inst.fd].as_u64 = result as u64; //clear upper bits to zero
-                    },
-                    Format_Double => { // .D
-                        let input_a = self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)?;
-
-                        let result = self.end_fpu_op_convert_word(unsafe { c_rint_f64(input_a as f64) })?;
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    _ => {  // Not implemented for .W and .L
-                        let _ = self.update_cause(FpeCause_Unimplemented, true)?;
-                    },
+                let input_a = match self.inst.fmt {
+                    Format_Single => self.check_input(unsafe { self.fgr[self.inst.fs].as_f32 }, true)? as f64, // .S
+                    Format_Double => self.check_input(unsafe { self.fgr[self.inst.fs].as_f64 }, true)? as f64, // .D
+                    _ => { self.update_cause(FpeCause_Unimplemented, true)?; 0.0f64 },
                 };
-                Ok(())
-            },
-            0b100_101 => { // CVT.L.fmt
-                self.begin_fpu_op();
-                match self.inst.fmt {
-                    Format_Single => { // .S
-                        let result = unsafe { self.fgr[self.inst.fs].as_f32 };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    Format_Double => { // .D
-                        let result = unsafe { self.fgr[self.inst.fs].as_f64 };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    Format_Word => { // .W
-                        let result = unsafe { self.fgr[self.inst.fs].as_u64 as u32 };
-                        self.fgr[self.inst.fd].as_u64 = result as u64;
-                    },
-                    Format_Long => { // .L
-                        return Err(InstructionFault::FloatingPointException);
-                    },
-                    _ => { 
-                        error!(target: "CPU", "unhandled CVT.L format {:X}", self.inst.fmt);
-                        return Err(InstructionFault::Unimplemented);
-                    },
-                };
+                let result = self.end_fpu_op_convert_long(unsafe { c_rint_f64(input_a) })?;
+                self.fgr[self.inst.fd].as_u64 = result;
                 Ok(())
             },
 
