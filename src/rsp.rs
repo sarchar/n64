@@ -10,6 +10,8 @@ pub struct Rsp {
     pc: u32,
 
     si_status: u32,
+
+    semaphore: bool,
 }
 
 impl Rsp {
@@ -18,6 +20,7 @@ impl Rsp {
             mem: vec![0u32; 2*1024], // 8KiB
             pc: 0x0000_0000,
             si_status: 0b0000_0000_0000_0001, // bit 0 (HALTED) set
+            semaphore: false,
         }
     }
 
@@ -35,6 +38,16 @@ impl Rsp {
 
                 // mirror of DMA_BUSY in self.si_status
                 (self.si_status & 0x04) >> 2
+            },
+
+            // SP_SEMAPHORE
+            0x4_001C => {
+                if !self.semaphore {
+                    self.semaphore = true;
+                    0
+                } else {
+                    1
+                }
             },
 
             // SP_PC
@@ -59,6 +72,13 @@ impl Rsp {
             // SP_STATUS 
             0x4_0010 => {
                 debug!(target: "RSP", "write SP_STATUS");
+            },
+
+            // SP_SEMAPHORE
+            0x4_001C => {
+                if value == 0 {
+                    self.semaphore = false;
+                }
             },
 
             // SP_PC
