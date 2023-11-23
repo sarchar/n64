@@ -584,13 +584,6 @@ impl Cpu {
             match func {
                 0b00_000 => { // MFC - move control word from coprocessor
                     self.gpr[self.inst.rt] = (cop.mfc(self.inst.rd)? as i32) as u64;
-                    //// TODO see datasheet for MFCz but this seemds weird. We use dmfc (double from
-                    //// cop) and then select low or high word based on the register index
-                    //self.gpr[self.inst.rt] = (if (self.inst.rd & 0x01) == 0 {
-                    //    cop.dmfc(self.inst.rd & !0x01)? & 0xFFFF_FFFF
-                    //} else {
-                    //    (cop.dmfc(self.inst.rd & !0x01)? >> 32) & 0xFFFF_FFFF
-                    //} as i32) as u64;
                     Ok(())
                 },
 
@@ -605,7 +598,7 @@ impl Cpu {
                 },
 
                 0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
-                    self.floating_point_exception()?;
+                    cop.unimplemented_instruction()?;
                     Ok(())
                 },
 
@@ -1140,6 +1133,12 @@ impl Cpu {
     }
 
     fn inst_ldc1(&mut self) -> Result<(), InstructionFault> {
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & 0x2000_0000) == 0 {
+            self.coprocessor_unusable_exception(1)?;
+            return Ok(());
+        }
+
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         
         if (address & 0x07) != 0 {
@@ -1151,6 +1150,12 @@ impl Cpu {
     }
 
     fn inst_lwc1(&mut self) -> Result<(), InstructionFault> {
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & 0x2000_0000) == 0 {
+            self.coprocessor_unusable_exception(1)?;
+            return Ok(());
+        }
+
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         
         if (address & 0x03) != 0 {
@@ -1209,6 +1214,12 @@ impl Cpu {
     }
 
     fn inst_sdc1(&mut self) -> Result<(), InstructionFault> {
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & 0x2000_0000) == 0 {
+            self.coprocessor_unusable_exception(1)?;
+            return Ok(());
+        }
+
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x07) != 0 {
             self.address_exception(address, true)?;
@@ -1222,6 +1233,12 @@ impl Cpu {
     }
 
     fn inst_swc1(&mut self) -> Result<(), InstructionFault> {
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & 0x2000_0000) == 0 {
+            self.coprocessor_unusable_exception(1)?;
+            return Ok(());
+        }
+
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (address & 0x03) != 0 {
             self.address_exception(address, true)?;

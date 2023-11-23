@@ -201,6 +201,12 @@ impl Cop1 {
         }
     }
 
+    pub fn unimplemented_instruction(&mut self) -> Result<(), InstructionFault> {
+        self.fcr_control_status &= !0x0001F000; // clear all other cause bits
+        self.update_cause(FpeCause_Unimplemented, true)?;
+        Ok(())
+    }
+
     fn force_flags(&mut self, cause: u64) {
         self.fcr_control_status |= (cause & 0x1F) << 2;
     }
