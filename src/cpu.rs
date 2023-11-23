@@ -90,6 +90,7 @@ pub struct Cpu {
 
     cp0gpr: [u64; 32],
     cp0gpr_latch: u64,
+    cp2gpr_latch: u64,
 
     half_clock: u32,
     llbit: bool,
@@ -146,6 +147,7 @@ impl Cpu {
 
             cp0gpr: [0u64; 32],
             cp0gpr_latch: 0,
+            cp2gpr_latch: 0,
             half_clock: 0,
             llbit: false,
 
@@ -156,7 +158,7 @@ impl Cpu {
                 //  _000               _001              _010               _011                _100                _101                _110                _111
    /* 000_ */   Cpu::inst_special, Cpu::inst_regimm, Cpu::inst_j      , Cpu::inst_jal     , Cpu::inst_beq     , Cpu::inst_bne     , Cpu::inst_blez    , Cpu::inst_bgtz    ,
    /* 001_ */   Cpu::inst_addi   , Cpu::inst_addiu , Cpu::inst_slti   , Cpu::inst_sltiu   , Cpu::inst_andi    , Cpu::inst_ori     , Cpu::inst_xori    , Cpu::inst_lui     ,
-   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop   , Cpu::inst_cop    , Cpu::inst_reserved, Cpu::inst_beql    , Cpu::inst_bnel    , Cpu::inst_blezl   , Cpu::inst_bgtzl   ,
+   /* 010_ */   Cpu::inst_cop0   , Cpu::inst_cop   , Cpu::inst_cop2   , Cpu::inst_reserved, Cpu::inst_beql    , Cpu::inst_bnel    , Cpu::inst_blezl   , Cpu::inst_bgtzl   ,
    /* 011_ */   Cpu::inst_daddi  , Cpu::inst_daddiu, Cpu::inst_ldl    , Cpu::inst_ldr     , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh    , Cpu::inst_lwl    , Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_lwr     , Cpu::inst_lwu     ,
    /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh    , Cpu::inst_swl    , Cpu::inst_sw      , Cpu::inst_sdl     , Cpu::inst_sdr     , Cpu::inst_swr     , Cpu::inst_cache   ,
@@ -367,28 +369,32 @@ impl Cpu {
     }
 
     fn breakpoint_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Bp)
     }
 
     fn overflow_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Ov)
     }
 
     fn reserved_instruction_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_RI)
     }
 
     fn syscall_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Sys)
     }
 
     fn trap_exception(&mut self) -> Result<(), ReadWriteFault> {
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Tr)
     }
 
     fn floating_point_exception(&mut self) -> Result<(), ReadWriteFault> {
-        // clear coprocessor number
-        self.cp0gpr[Cop0_Cause] &= !0x3000_0000;
+        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_FPE)
     }
 
@@ -598,8 +604,7 @@ impl Cpu {
                 },
 
                 0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
-                    cop.unimplemented_instruction()?;
-                    Ok(())
+                    cop.unimplemented_instruction()
                 },
 
                 0b00_100 => { // MTC
@@ -878,6 +883,67 @@ impl Cpu {
         }
 
         Ok(())
+    }
+
+    fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
+        // if the co-processor isn't enabled, generate an exception
+        if (self.cp0gpr[Cop0_Status] & 0x4000_0000) == 0 {
+            self.coprocessor_unusable_exception(2)?;
+            return Ok(());
+        }
+
+        if (self.inst.v & (1 << 25)) != 0 {
+            // no special functions on COP2
+            self.coprocessor_unusable_exception(2)?;
+            Ok(())
+        } else {
+            let func = (self.inst.v >> 21) & 0x0F;
+            match func {
+                0b00_000 => { // MFC - move control word from coprocessor
+                    self.gpr[self.inst.rt] = (self.cp2gpr_latch as i32) as u64;
+                    Ok(())
+                },
+
+                0b00_001 => { // DMFC
+                    self.gpr[self.inst.rt] = self.cp2gpr_latch;
+                    Ok(())
+                },
+
+                0b00_010 => { // CFC
+                    self.gpr[self.inst.rt] = (self.cp2gpr_latch as i32) as u64;
+                    Ok(())
+                },
+
+                0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
+                    self.reserved_instruction_exception()?;
+                    // set the cop in the Cause register
+                    self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | 0x2000_0000;
+                    Ok(())
+                },
+
+                0b00_100 => { // MTC
+                    self.cp2gpr_latch = self.gpr[self.inst.rt];
+                    Ok(())
+                },
+
+                0b00_101 => { // DMTC
+                    self.cp2gpr_latch = self.gpr[self.inst.rt];
+                    Ok(())
+                },
+
+                0b00_110 => { // CTC - move control word to coprocessor
+                    self.cp2gpr_latch = self.gpr[self.inst.rt];
+                    Ok(())
+                },
+
+                0b01_000 => { // No branches on COP2
+                    warn!(target: "COP2", "no branches on COP2");
+                    Err(InstructionFault::Unimplemented)
+                },
+
+                _ => panic!("CPU: unknown cop2 function 0b{:02b}_{:03b}", func >> 3, func & 7),
+            }
+        }
     }
 
     fn inst_beq(&mut self) -> Result<(), InstructionFault> {
@@ -1381,10 +1447,12 @@ impl Cpu {
     }
 
     fn regimm_bgezal(&mut self) -> Result<(), InstructionFault> {
+        // compute condition before changing gpr31 rs can be 31...
+        let condition = (self.gpr[self.inst.rs] as i64) >= 0;
+
         // addresses are sign extended
         self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
 
-        let condition = (self.gpr[self.inst.rs] as i64) >= 0;
         self.branch(condition);
 
         Ok(())
@@ -1638,9 +1706,8 @@ impl Cpu {
     }
 
     fn special_jalr(&mut self) -> Result<(), InstructionFault> {
+        let dest = self.gpr[self.inst.rs] as u32; // get dest before changing RD, as RS could be == RD
         self.gpr[self.inst.rd] = (self.pc as i32) as u64; // pc pointing to after the delay slot already
-        let dest = self.gpr[self.inst.rs] as u32;
-
         self.pc = dest;
 
         // note that the next instruction to execute is a delay slot instruction
@@ -2109,3 +2176,4 @@ impl Cpu {
         }
     }
 }
+
