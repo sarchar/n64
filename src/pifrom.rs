@@ -1,5 +1,7 @@
 use std::fs;
-use tracing::{debug, error};
+
+#[allow(unused_imports)]
+use tracing::{debug, error, info};
 
 use crate::*;
 
@@ -75,6 +77,7 @@ impl Addressable for PifRom {
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
+                //info!(target: "PIF-RAM", "write value=${:08X} offset=${:08X}", value, offset);
                 self.ram[ram_offset as usize] = value;
             } else {
                 panic!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
@@ -82,6 +85,19 @@ impl Addressable for PifRom {
         }
 
         Ok(WriteReturnSignal::None)
+    }
+
+    fn write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        // SH incorrectly overwrites lower bytes with zeroes
+        let offset = offset & !0x01;
+        let shift = 16 - ((offset & 0x02) << 3);
+        self.write_u32(value << shift, offset & !0x02)
+    }
+
+    fn write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        // SB incorrectly overwrites lower bytes with zeroes
+        let shift = 24 - ((offset & 0x03) << 3);
+        self.write_u32(value << shift, offset & !0x03)
     }
 }
 
