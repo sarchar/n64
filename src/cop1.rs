@@ -461,6 +461,7 @@ impl Cop1 {
         if result.is_nan() {
             retval = Ok(f64::from_bits(0x7FF7_FFFF_FFFF_FFFF));
         } else if result.is_subnormal() || is_underflow {
+            //println!("got underflow, sign={}, rm={}, result>=0.0={}", (result.to_bits() >> 63), self.fcr_control_status & 0x03, result >= 0.0);
             let flush_subnormals = ((self.fcr_control_status >> 24) & 0x01) != 0;
             let underflow_enabled = (self.fcr_control_status & (0x02 << 7)) != 0;
             let inexact_enabled = (self.fcr_control_status & (0x01 << 7)) != 0;
@@ -474,15 +475,18 @@ impl Cop1 {
                 self.force_flags(cause);
 
                 // flush subnormal numbers to value depending on rounding mode
+                let sign = (result.to_bits() >> 63) != 0;
                 retval = Ok(match self.fcr_control_status & 0x03 {
-                    0b00 | 0b01 => { if result >= 0.0 { 0.0 } else { -0.0 } }, // tonearest, towardzero
+                    0b00 | 0b01 => { if !sign { 0.0 } else { -0.0 } }, // tonearest, towardzero
                     // these two return the minimum positive normal number
                     // positive normal number is 1 in the exponent ant the fraction all zeroes
-                    0b10 => { if result >= 0.0 { f64::from_bits(0x0010_0000_0000_0000) } else { -0.0 } }, // upward
-                    0b11 => { if result >= 0.0 { 0.0 } else { f64::from_bits(0x8010_0000_0000_0000) } }, // downward
+                    0b10 => { if !sign { f64::from_bits(0x0010_0000_0000_0000) } else { -0.0 } }, // upward
+                    0b11 => { if !sign { 0.0 } else { f64::from_bits(0x8010_0000_0000_0000) } }, // downward
                     _ => panic!("not valid"),
                 });
             }
+        } else {
+            //println!("NOT underflow");
         }
 
         if cause != 0 {
@@ -619,8 +623,8 @@ impl Cop1 {
                 let input_b = self.check_input(unsafe { self.fgr[self.inst.ft].as_f64 }, false)?;
 
                 //if input_a.is_infinite() || input_b.is_infinite() { info!(target:"CPU", "an input is infinite without an exception"); }
-                let result = self.end_fpu_op_f64(unsafe { c_f64_mul(input_a, input_b) })?;
-                //let result = self.end_fpu_op_f64(input_a * input_b)?;
+                //let result = self.end_fpu_op_f64(unsafe { c_f64_mul(input_a, input_b) })?;
+                let result = self.end_fpu_op_f64(input_a * input_b)?;
                 self.fgr[self.inst.fd].as_f64 = result;
             },
 

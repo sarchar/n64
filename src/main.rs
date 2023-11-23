@@ -181,12 +181,12 @@ fn run_gui(system: System) {
                             let offs = (y * 640) + x;
                             let word = rdram[framebuffer_base+(offs as usize)];
                             let r = word >> 24;
-                            let g = (word >> 16) & 0x1F;
-                            let b = (word >> 8) & 0x1F;
+                            let g = (word >> 16) & 0xFF;
+                            let b = (word >> 8) & 0xFF;
                             let offs = offs * 4;
-                            frame[offs + 0] = (r << 3) as u8;
-                            frame[offs + 1] = (g << 3) as u8;
-                            frame[offs + 2] = (b << 3) as u8;
+                            frame[offs + 0] = r as u8;
+                            frame[offs + 1] = g as u8;
+                            frame[offs + 2] = b as u8;
                             frame[offs + 3] = 0xff;
                         }
                     }

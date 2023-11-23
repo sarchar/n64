@@ -234,7 +234,8 @@ impl Addressable for PeripheralInterface {
             }
             Ok(WriteReturnSignal::None)
         } else {
-            panic!("PI: unhandled write32 value=${:08X} offset=${:08X}", value, offset);
+            error!(target: "PI", "unhandled write32 value=${:08X} offset=${:08X}", value, offset);
+            Ok(WriteReturnSignal::None)
         }
     }
 
