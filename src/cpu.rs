@@ -498,13 +498,13 @@ impl Cpu {
 
         let result = self.instruction_table[self.inst.op as usize](self);
         let result = match result {
-            // Raise FPE on instruction failure
+            // Raise FPE on InstructionFault::FloatingPointException
             Err(InstructionFault::FloatingPointException) => { 
                 let _ = self.floating_point_exception();
                 Ok(())
             },
 
-            // Other faults like Break, Unimplemented
+            // Other faults like Break, Unimplemented actually stop processing
             Err(_) => {
                 // on error, restore the previous instruction since it didn't complete
                 self.pc -= 4;

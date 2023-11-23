@@ -18,9 +18,12 @@ cfg_if! {
 
         use tracing::error;
 
-        const WINDOW_WIDTH: u32 = 320;
-        const WINDOW_HEIGHT: u32 = 240;
-        const SCALE: f64 = 2.0;
+        //const WINDOW_WIDTH: u32 = 320;
+        //const WINDOW_HEIGHT: u32 = 240;
+        //const SCALE: f64 = 2.0;
+        const WINDOW_WIDTH: u32 = 640;
+        const WINDOW_HEIGHT: u32 = 480;
+        const SCALE: f64 = 1.0;
     }
 }
 
@@ -173,22 +176,36 @@ fn run_gui(system: System) {
                     let rdram = rcp.ri.rdram();
                     let frame = pixels.frame_mut();
 
-                    for y in 0..240 {
-                        for x in 0..320 {
-                            let offs = (y * 320) + x; // want this half word from rdram
-                            let word = rdram[framebuffer_base+((offs >> 1) as usize)];
-                            let shift = 16 - ((offs & 1) << 4);
-                            let color = ((word >> shift) & 0xffff) as u16;
-                            let r = color >> 11;
-                            let g = (color >> 6) & 0x1F;
-                            let b = (color >> 1) & 0x1F;
-                            let offs = (4 * ((y * WINDOW_WIDTH) + x)) as usize;
+                    for y in 0..480 {
+                        for x in 0..640 {
+                            let offs = (y * 640) + x;
+                            let word = rdram[framebuffer_base+(offs as usize)];
+                            let r = word >> 24;
+                            let g = (word >> 16) & 0x1F;
+                            let b = (word >> 8) & 0x1F;
+                            let offs = offs * 4;
                             frame[offs + 0] = (r << 3) as u8;
                             frame[offs + 1] = (g << 3) as u8;
                             frame[offs + 2] = (b << 3) as u8;
                             frame[offs + 3] = 0xff;
                         }
                     }
+                    //for y in 0..240 {
+                    //    for x in 0..320 {
+                    //        let offs = (y * 320) + x; // want this half word from rdram
+                    //        let word = rdram[framebuffer_base+((offs >> 1) as usize)];
+                    //        let shift = 16 - ((offs & 1) << 4);
+                    //        let color = ((word >> shift) & 0xffff) as u16;
+                    //        let r = color >> 11;
+                    //        let g = (color >> 6) & 0x1F;
+                    //        let b = (color >> 1) & 0x1F;
+                    //        let offs = (4 * ((y * WINDOW_WIDTH) + x)) as usize;
+                    //        frame[offs + 0] = (r << 3) as u8;
+                    //        frame[offs + 1] = (g << 3) as u8;
+                    //        frame[offs + 2] = (b << 3) as u8;
+                    //        frame[offs + 3] = 0xff;
+                    //    }
+                    //}
                 }
 
                 if let Err(err) = pixels.render() {
