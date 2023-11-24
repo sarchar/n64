@@ -10,10 +10,15 @@ use crate::*;
 
 // Exception handling registers
 const Cop0_Index   : usize = 0;
+const Cop0_Random  : usize = 1;
+const Cop0_EntryLo0: usize = 2;
+const Cop0_EntryLo1: usize = 3;
 const Cop0_Context : usize = 4;
+const Cop0_PageMask: usize = 5;
 const Cop0_Wired   : usize = 6;
 const Cop0_BadVAddr: usize = 8; // Bad Virtual Address
 const Cop0_Count   : usize = 9;
+const Cop0_EntryHi : usize = 10;
 const Cop0_Compare : usize = 11;
 const Cop0_Status  : usize = 12;
 const Cop0_Cause   : usize = 13;
@@ -74,6 +79,23 @@ struct InstructionDecode {
     target: u32,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct Address {
+    virtual_address: u64,
+    physical_address: u64,
+    cached: bool,
+    mapped: bool,
+    space: u8, // 0 (user), 1 (supervisor), 3 (kernel)
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct TlbEntry {
+    page_mask: u64,
+    entry_hi: u64,
+    entry_lo1: u64,
+    entry_lo0: u64
+}
+
 pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u32,                     // lookahead PC
@@ -90,6 +112,7 @@ pub struct Cpu {
 
     cp0gpr: [u64; 32],
     cp0gpr_latch: u64,
+    tlb: [TlbEntry; 32],
     cp2gpr_latch: u64,
 
     half_clock: u32,
@@ -101,16 +124,15 @@ pub struct Cpu {
     special_table: [CpuInstruction; 64],
     regimm_table: [CpuInstruction; 32],
 
-    // TODO - decide if one table can be used for both co-processors or not
-    //cop0_table: [CpuInstruction<T>; 32],
-    //cop1_table: [CpuInstruction<T>; 32],
-
     // instruction decode values
     inst: InstructionDecode,
 
     num_steps: u64,
 }
 
+// It may be worth mentioning that cpu exceptions are not InstructionFaults 
+// InstructionFault is used for passing messages or interrupting cpu execution 
+// within the emulator
 pub enum InstructionFault {
     Invalid,
     Unimplemented,
@@ -147,6 +169,7 @@ impl Cpu {
 
             cp0gpr: [0u64; 32],
             cp0gpr_latch: 0,
+            tlb: [TlbEntry::default(); 32],
             cp2gpr_latch: 0,
             half_clock: 0,
             llbit: false,
@@ -443,13 +466,116 @@ impl Cpu {
         Ok(())
     }
 
+    #[inline(always)]
+    fn set_tlb_entry(&mut self, index: u64) {
+        let g = (self.cp0gpr[Cop0_EntryLo0] & self.cp0gpr[Cop0_EntryLo1]) & 0x1; // Global flag
+        self.tlb[(index & 0x1F) as usize] = TlbEntry {
+            page_mask: self.cp0gpr[Cop0_PageMask],
+            entry_hi : self.cp0gpr[Cop0_EntryHi] | (g << 12),
+            entry_lo1: self.cp0gpr[Cop0_EntryLo1] & !0x01, // mask out G flag
+            entry_lo0: self.cp0gpr[Cop0_EntryLo0] & !0x01, // mask out G flag
+        };
+    }
+
+    fn classify_address(&self, virtual_address: u64) -> Address {
+        let space = virtual_address >> 62;
+        let mut address = Address {
+            virtual_address: virtual_address,
+            physical_address: 0,
+            cached: true,
+            mapped: false,
+            space: space as u8,
+        };
+
+        if space == 0 {
+            if virtual_address < 0x0000_0100_0000_0000 { // kuseg, user segment, TLB mapped, cached
+                address.mapped = true;
+            } else {
+                panic!("TODO: invalid user segment address (address exception)");
+            }
+        } else if space == 1 {
+            if virtual_address < 0x4000_0100_0000_0000 { // ksseg, supervisor segment, TLB mapped, cached
+                address.mapped = true;
+            } else {
+                panic!("TODO: invalid supervisor segment address (address exception)");
+            }
+        } else if space == 2 {
+            panic!("TODO: xkphys segment");
+        } else if space == 3 { // kernel space
+            if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached?
+                address.mapped = true;
+            } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
+                panic!("TODO: invalid compatibility segment address");
+            // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
+            } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
+                address.physical_address = virtual_address & 0x1FFF_FFFF;
+            } else if virtual_address < 0xFFFF_FFFF_C000_0000 { // ckseg1, segment 0, directly mapped, uncached
+                address.cached = false;
+                address.physical_address = virtual_address & 0x1FFF_FFFF;
+            } else if virtual_address < 0xFFFF_FFFF_E000_0000 { // cksseg, supervisor segment (unused), TLB mapped
+                address.mapped = true;
+            } else { // ckseg3, kernel segment 3, TLB mapped, cached
+                address.mapped = true;
+            }
+        }
+
+        return address;
+    }
+
+    fn translate_address(&self, virtual_address: u64) -> Address {
+        let mut address = self.classify_address(virtual_address);
+
+        // if no further address translation is needed, return the Address
+        if !address.mapped {
+            return address;
+        }
+
+        info!(target: "CPU", "looking up address ${:016X}!", virtual_address);
+
+        let va_r = virtual_address & 0xC000_0000_0000_0000;
+        let virtual_address = virtual_address & 0xFF_FFFF_FFFF;
+
+        for tlb_index in 0..31 {
+            let tlb = &self.tlb[tlb_index];
+
+            // check if G bit is set
+            if (tlb.entry_hi & 0x1000) == 0 { continue; }
+
+            info!(target: "CPU", "checking TLB entry {}", tlb_index);
+
+            let offset_mask = (tlb.page_mask >> 1) | 0xFFF; // page mask is a set of 1s at bit 13
+                                                            // and if it isn't, it's undefined
+                                                            // behavior
+            info!(target: "CPU", "offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
+
+            let vpn2 = tlb.entry_hi & 0xFFFFFFE000;
+            let va_vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
+            info!(target: "CPU", "EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
+
+            info!(target: "CPU", "virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
+            if (virtual_address & va_vpn_mask) != vpn2 { continue; }
+            info!(target: "CPU", "address matches!");
+
+            // the odd bit is the 1 bit above the offset bits
+            let odd = (virtual_address & (offset_mask + 1)) != 0;
+
+            // get the page frame number of the corresponding EntryLo field
+            let pfn = (if odd { tlb.entry_lo1 } else { tlb.entry_lo0 }) & 0x03FF_FFC0;
+            address.physical_address = (pfn << 6) | (virtual_address & (tlb.page_mask | 0x1FFF));
+
+            info!(target: "CPU", "physical_address = ${:016X}", address.physical_address);
+            return address;
+        }
+
+        panic!("no TLB hit found for a mapped address!");
+        return address;
+    }
+
     pub fn step(&mut self) -> Result<(), InstructionFault> {
         self.num_steps += 1;
 
-        //if self.pc == 0xA4001420 {
-        //    //self.bus.print_debug_ipl2();
-        //} else if self.pc == 0x8000_02B4 {
-        //    debug!(target: "CPU", "Starting cartridge ROM!");
+        //if self.pc == 0x8000_02B4 {
+        //    trace!(target: "CPU", "Starting cartridge ROM!");
         //}
 
         // increment Cop0_Count at half PClock and trigger exception
@@ -481,6 +607,7 @@ impl Cpu {
         self.inst.v = inst;
 
         // next instruction fetch
+        if self.pc < 0x8000_0000 { let _ = self.translate_address(self.pc as u64); }
         self.next_instruction = self.read_u32(self.pc as usize)?;
 
         // update and increment PC
@@ -656,6 +783,109 @@ impl Cpu {
         }
     }
 
+    // given a register number and value (to be written to that register), return a value that 
+    // that masks out the proper bits or prevents writing, etc
+    fn mask_cp0_register(&mut self, register_number: usize, value: u64) -> u64 {
+        match register_number {
+            Cop0_Index => {
+                value & 0x0000_0000_8000_003F // 32-bit register
+            },
+
+            Cop0_Context => {
+                value & 0xFFFF_FFFF_FF80_0000 // 64-bit register
+            },
+
+            Cop0_Wired => {
+                value & 0x3F
+            },
+
+            Cop0_Config => {
+                let read_only_mask = 0xF0FF7FF0u64;
+                ((value & 0xFFFF_FFFF) & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
+            },
+
+            Cop0_XContext => {
+                value & 0xFFFF_FFFE_0000_0000
+            },
+
+            Cop0_Compare => {
+                // TODO clear timer interrupt see 6.3.4
+                // truncate to 32-bits
+                value & 0x0000_0000_FFFF_FFFF
+            },
+
+            Cop0_Cause => {
+                // handle software interrupts 
+                if (value & 0x300) != 0 {
+                    panic!("CPU: cop0 software interrupt");
+                }
+
+                // Only bits IP1 and IP0 are writable
+                (self.cp0gpr[Cop0_Cause] & !0x300) | (value & 0x300)
+            },
+
+            Cop0_LLAddr => {
+                value & 0x0000_0000_FFFF_FFFF // 32-bit register
+            },
+
+            Cop0_Status => {
+                // TODO testing if user mode or 32-bit mode is ever used
+                if (value & 0x0200_00E0) != 0 {
+                    panic!("CPU: unsupported 64-bit mode or little endian mode");
+                }
+
+                if (value & 0x18) != 0 {
+                    panic!("CPU: unsupported user or supervisor mode");
+                }
+
+                if (value & 0x800000) != 0 {
+                    panic!("CPU: unsupported instruction trace mode");
+                }
+
+                if (value & 0x200000) != 0 {
+                    panic!("CPU: exception vector change");
+                }
+                ///////////////////////////////////////////////////////////
+
+                self.cop1.set_fr(((value >> 26) & 0x01) != 0); // notify COP1 on the FR bit change
+                value & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
+            },
+
+            Cop0_PErr => {
+                value & 0xFF
+            },
+
+            // read-only registers
+            Cop0_BadVAddr | Cop0_PRId  => {
+                self.cp0gpr[register_number]
+            },
+
+            // TLB registers
+            Cop0_EntryLo0 | Cop0_EntryLo1 => {
+                value & 0x0000_0000_03FF_FFFF // TODO conflicting sources of information say PFN
+                                              // is 24 bits, vs the datasheet (20 bits).
+                                              // I'm using the datasheet for now but this
+                                              // mask may need to change to 3FFF_FFFF in the
+                                              // future
+            },
+
+            Cop0_EntryHi => {
+                value & 0xC000_00FF_FFFF_E0FF
+            },
+
+            Cop0_PageMask => {
+                value & 0x0000_0000_01FF_E000
+            },
+
+            // unused registers
+            7 | 21 | 22 | 23 | 24 | 25 | 31 | Cop0_CacheErr => {
+                0
+            },
+
+            _ => { value },
+        }
+    }
+
     // convert into inst_cop at some point
     // all the cop should implement a common cop trait (mfc/mtc/ctc/etc)
     fn inst_cop0(&mut self) -> Result<(), InstructionFault> {
@@ -688,92 +918,7 @@ impl Cpu {
                 self.cp0gpr_latch = val;
 
                 // fix bits of the various registers
-                self.cp0gpr[self.inst.rd] = match self.inst.rd {
-                    Cop0_Index => {
-                        val & 0x0000_0000_8000_003F // 32-bit register
-                    },
-
-                    Cop0_Context => {
-                        val & 0xFFFF_FFFF_FF80_0000 // 64-bit register
-                    },
-
-                    Cop0_Wired => {
-                        val & 0x3F
-                    },
-
-                    Cop0_Config => {
-                        let read_only_mask = 0xF0FF7FF0u64;
-                        ((val & 0xFFFF_FFFF) & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
-                    },
-
-                    Cop0_Compare => {
-                        // TODO clear timer interrupt see 6.3.4
-                        // truncate to 32-bits
-                        val & 0x0000_0000_FFFF_FFFF
-                    },
-
-                    Cop0_Cause => {
-                        // handle software interrupts 
-                        if (val & 0x300) != 0 {
-                            panic!("CPU: cop0 software interrupt");
-                        }
-
-                        // Only bits IP1 and IP0 are writable
-                        (self.cp0gpr[Cop0_Cause] & !0x300) | (val & 0x300)
-                    },
-
-                    Cop0_XContext => {
-                        val & 0xFFFF_FFFE_0000_0000
-                    },
-
-                    Cop0_LLAddr => {
-                        val & 0x0000_0000_FFFF_FFFF // 32-bit register
-                    },
-
-                    Cop0_Status => {
-                        self.cop1.set_fr(((val >> 26) & 0x01) != 0); // notify COP1 on the FR bit change
-                        val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
-                    },
-
-                    Cop0_PErr => {
-                        val & 0xFF
-                    },
-
-                    // read-only registers
-                    Cop0_BadVAddr | Cop0_PRId  => {
-                        self.cp0gpr[self.inst.rd]
-                    },
-
-                    // unused registers
-                    7 | 21 | 22 | 23 | 24 | 25 | 31 | Cop0_CacheErr => {
-                        0
-                    },
-
-                    _ => { val },
-                };
-
-                // TODO testing
-                match self.inst.rd {
-                    Cop0_Status => {
-                        if (self.cp0gpr[Cop0_Status] & 0x0200_00E0) != 0 {
-                            panic!("CPU: unsupported 64-bit mode or little endian mode");
-                        }
-
-                        if (self.cp0gpr[Cop0_Status] & 0x18) != 0 {
-                            panic!("CPU: unsupported user or supervisor mode");
-                        }
-
-                        if (self.cp0gpr[Cop0_Status] & 0x800000) != 0 {
-                            panic!("CPU: unsupported instruction trace mode");
-                        }
-
-                        if (self.cp0gpr[Cop0_Status] & 0x200000) != 0 {
-                            panic!("CPU: exception vector change");
-                        }
-                    },
-
-                    _ => {},
-                };
+                self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
             },
 
             0b00_101 => { // DMTC
@@ -782,59 +927,7 @@ impl Cpu {
                 // save write value for unused register reads
                 self.cp0gpr_latch = val;
 
-                self.cp0gpr[self.inst.rd] = match self.inst.rd {
-                    Cop0_Index => {
-                        val & 0x0000_0000_8000_003F // 32-bit register
-                    },
-
-                    Cop0_Context => {
-                        val & 0xFFFF_FFFF_FF80_0000
-                    }
-
-                    Cop0_Wired => {
-                        val & 0x3F
-                    },
-
-                    Cop0_Config => {
-                        let read_only_mask = 0xF0FF7FF0u64;
-                        (val & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
-                    },
-
-                    Cop0_XContext => {
-                        val & 0xFFFF_FFFE_0000_0000
-                    },
-
-                    Cop0_LLAddr => {
-                        val & 0x0000_0000_FFFF_FFFF // 32-bit register
-                    },
-
-                    Cop0_Status => {
-                        self.cop1.set_fr(((val >> 26) & 0x01) != 0); // notify COP1 on the FR bit change
-                        val & 0x0000_0000_FFF7_FFFF // 32-bit register, bit 19 always 0
-                    },
-
-                    Cop0_PErr => {
-                        val & 0xFF
-                    },
-
-                    // read-only registers
-                    Cop0_BadVAddr | Cop0_PRId => {
-                        self.cp0gpr[self.inst.rd]
-                    },
-
-                    // unused registers
-                    7 | 21 | 22 | 23 | 24 | 25 | 31 | Cop0_CacheErr => {
-                        0
-                    },
-
-                    _ => { val },
-                };
-
-                if self.inst.rd == Cop0_Status {
-                    if (self.cp0gpr[self.inst.rd] & 0x0200_00E0) != 0 {
-                        panic!("CPU: unsupported 64-bit mode or little endian mode");
-                    }
-                }
+                self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
             },
 
 
@@ -846,11 +939,15 @@ impl Cpu {
                     },
 
                     0b000_010 => { // tlbwi
-                        debug!(target: "CPU", "COP0: tlbwi");
+                        info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                    self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        self.set_tlb_entry(self.cp0gpr[Cop0_Index]);
                     },
 
                     0b000_110 => { // tlbwr
-                        debug!(target: "CPU", "COP0: tlbwr");
+                        info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                    self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        self.set_tlb_entry(self.cp0gpr[Cop0_Random]);
                     },
 
                     0b001_000 => { // tlbwi
