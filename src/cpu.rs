@@ -98,11 +98,11 @@ struct TlbEntry {
 
 pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
-    pc: u32,                     // lookahead PC
-    current_instruction_pc: u32, // actual PC of the currently executing instruction
+    pc: u64,                     // lookahead PC
+    current_instruction_pc: u64, // actual PC of the currently executing instruction
                                  // only valid inside step()
     next_instruction: u32,       // emulates delay slot (prefetch, next instruction)
-    next_instruction_pc: u32,    // for printing correct delay slot addresses
+    next_instruction_pc: u64,    // for printing correct delay slot addresses
     is_delay_slot: bool,         // true if the currently executing instruction is in a delay slot
     next_is_delay_slot: bool,    // set to true on branching instructions
 
@@ -220,7 +220,7 @@ impl Cpu {
     }
 
     pub fn reset(&mut self) -> Result<(), ReadWriteFault> {
-        self.pc = 0xBFC0_0000;
+        self.pc = 0xFFFF_FFFF_BFC0_0000;
 
         // COP0
         // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
@@ -244,7 +244,7 @@ impl Cpu {
         &self.next_instruction
     }
 
-    pub fn next_instruction_pc(&self) -> &u32 {
+    pub fn next_instruction_pc(&self) -> &u64 {
         &self.next_instruction_pc
     }
 
@@ -369,7 +369,7 @@ impl Cpu {
         // bit in Cop0_Status.
         // TODO TLB miss needs to branch to base plus offset 0x000
         // TODO XTLB miss needs to branch to base plus offset 0x080
-        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 { 0x8000_0000 } else { 0xBFC0_0200 } + 0x180;
+        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 { 0xFFFF_FFFF_8000_0000 } else { 0xFFFF_FFFF_BFC0_0200 } + 0x180;
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.prefetch()
@@ -444,7 +444,7 @@ impl Cpu {
         if condition {
             // target is the sum of the address of the delay slot instruction
             // plus the sign extended and left-shifted immediate offset
-            self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u32) << 2);
+            self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u64) << 2);
         }
 
         // note that the next instruction to execute is a delay slot instruction
@@ -455,7 +455,7 @@ impl Cpu {
     #[inline(always)]
     fn branch_likely(&mut self, condition: bool) -> Result<(), InstructionFault> {
         if condition {
-            self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u32) << 2);
+            self.pc = (self.pc - 4).wrapping_add((self.inst.signed_imm as u64) << 2);
 
             // note that the next instruction to execute is a delay slot instruction
             self.next_is_delay_slot = true;
@@ -962,7 +962,7 @@ impl Cpu {
                         if (self.cp0gpr[Cop0_Status] & 0x04) != 0 {
                             panic!("COP0: error bit set"); // TODO
                         } else {
-                            self.pc = self.cp0gpr[Cop0_EPC] as u32;
+                            self.pc = self.cp0gpr[Cop0_EPC];
                             self.cp0gpr[Cop0_Status] &= !0x02;
                         }
 
@@ -1113,7 +1113,7 @@ impl Cpu {
     }
 
     fn inst_j(&mut self) -> Result<(), InstructionFault> {
-        let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
+        let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
         self.pc = dest;
 
         // note that the next instruction to execute is a delay slot instruction
@@ -1122,9 +1122,9 @@ impl Cpu {
     }
 
     fn inst_jal(&mut self) -> Result<(), InstructionFault> {
-        let dest = ((self.pc - 4) & 0xF000_0000) | (self.inst.target << 2);
+        let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
 
-        self.gpr[31] = (self.pc as i32) as u64;
+        self.gpr[31] = self.pc;
         self.pc = dest;
 
         // note that the next instruction to execute is a delay slot instruction
@@ -1548,7 +1548,7 @@ impl Cpu {
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
 
         // addresses are sign extended
-        self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
+        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
 
         self.branch(condition);
 
@@ -1557,7 +1557,7 @@ impl Cpu {
 
     fn regimm_bgezall(&mut self) -> Result<(), InstructionFault> {
         // addresses are sign extended
-        self.gpr[31] = (self.pc as i32) as u64; // unconditionally, the address after the delay slot is stored in the link register
+        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
 
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
         self.branch_likely(condition)?;
@@ -1803,8 +1803,8 @@ impl Cpu {
     }
 
     fn special_jalr(&mut self) -> Result<(), InstructionFault> {
-        let dest = self.gpr[self.inst.rs] as u32; // get dest before changing RD, as RS could be == RD
-        self.gpr[self.inst.rd] = (self.pc as i32) as u64; // pc pointing to after the delay slot already
+        let dest = self.gpr[self.inst.rs]; // get dest before changing RD, as RS could be == RD
+        self.gpr[self.inst.rd] = self.pc; // pc pointing to after the delay slot already
         self.pc = dest;
 
         // note that the next instruction to execute is a delay slot instruction
@@ -1814,9 +1814,7 @@ impl Cpu {
     }
 
     fn special_jr(&mut self) -> Result<(), InstructionFault> {
-        let dest = self.gpr[self.inst.rs];
-
-        self.pc = dest as u32;
+        self.pc = self.gpr[self.inst.rs];
 
         // note that the next instruction to execute is a delay slot instruction
         self.next_is_delay_slot = true;
@@ -2009,7 +2007,7 @@ impl Cpu {
         Ok(())
     }
 
-    pub fn disassemble(address: u32, inst: u32, use_abi_names: bool) -> String {
+    pub fn disassemble(address: u64, inst: u32, use_abi_names: bool) -> String {
         let op = inst >> 26;
         let rs = (inst >> 21) & 0x1F;
         let rt = (inst >> 16) & 0x1F;
@@ -2032,7 +2030,7 @@ impl Cpu {
         };
 
         let j_type = |mn| {
-            format!("{} ${:08X}", mn, ((address + 4) & 0xF000_0000) | (target << 2))
+            format!("{} ${:08X}", mn, (((address as u32) + 4) & 0xF000_0000) | (target << 2))
         };
 
         let i_type_rt = |mn| {

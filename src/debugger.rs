@@ -37,7 +37,7 @@ pub struct Debugger {
     alive: bool,
     ctrlc_count: u32,
 
-    cpu_run_til: Option<u32>,
+    cpu_run_til: Option<u64>,
 
     // Ctrl-C help
     cpu_running: Arc<AtomicBool>,
@@ -242,7 +242,7 @@ impl Debugger {
 
         if parts.len() > 1 {
             self.cpu_run_til = match parse_int(&parts[1]) {
-                Ok(v) => Some(v as u32),
+                Ok(v) => Some(v as u64),
                 Err(err) => {
                     return Err(err);
                 }
@@ -452,7 +452,7 @@ impl Debugger {
         }
 
         for i in 0..count {
-            let addr = start_pc + i * 4;
+            let addr = start_pc + (i as u64) * 4;
             print!("${:08X}: ", addr);
 
             if let Ok(op) = self.system.cpu.bus.borrow_mut().read_u32(addr as usize) {
