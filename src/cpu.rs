@@ -451,7 +451,7 @@ impl Cpu {
     }
 
     fn tlb_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
-        //info!(target: "CPU", "TLB miss exception!");
+        //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={}!", virtual_address, is_write);
 
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
         let bad_vpn2 = virtual_address >> 13;
@@ -740,7 +740,7 @@ impl Cpu {
 
         // decrement Random every cycle
         // when Wired bit 5 is set, Random runs 0..63 with no wired limit
-        let next_index = if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 || ((self.cp0gpr[Cop0_Random] ^ self.cp0gpr[Cop0_Wired]) & 0x1F) != 0 {
+        self.cp0gpr[Cop0_Random] = if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 || ((self.cp0gpr[Cop0_Random] ^ self.cp0gpr[Cop0_Wired]) & 0x1F) != 0 {
             (self.cp0gpr[Cop0_Random] & 0x3F).wrapping_sub(1) & 0x3F
         } else {
             if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 {
@@ -749,7 +749,6 @@ impl Cpu {
                 0x1F
             }
         };
-        self.cp0gpr[Cop0_Random] = next_index;
 
         // check for invalid PC addresses
         if (self.pc & 0x03) != 0 {
@@ -765,6 +764,8 @@ impl Cpu {
         self.inst.v = inst;
 
         // next instruction fetch
+        self.current_instruction_pc = self.pc; // For Cop0_EPC in case of a TLB miss in a delay
+                                               // slot after a jump to an invalid TLB page
         self.next_instruction = self.read_u32(self.pc as usize)?;
 
         // update and increment PC
