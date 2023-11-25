@@ -38,8 +38,8 @@ const STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
 const ExceptionCode_Int  : u64 = 0;  // interrupt
 const _ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
-const _ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
-const _ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
+const ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
+const ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
 const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruction fetch)
 const ExceptionCode_AdES : u64 = 5;  // Address Error exception (store)
 const _ExceptionCode_IBE  : u64 = 6;  // Bus Error exception (instruction fetch)
@@ -114,6 +114,8 @@ pub struct Cpu {
     is_delay_slot: bool,         // true if the currently executing instruction is in a delay slot
     next_is_delay_slot: bool,    // set to true on branching instructions
 
+    load_store_exception: bool,  // when true, flip the load and store exceptions
+
     gpr: [u64; 32],
     lo: u64,
     hi: u64,
@@ -145,6 +147,7 @@ pub enum InstructionFault {
     Invalid,
     Unimplemented,
     Break,
+    OtherException,
     CoprocessorUnusable,
     FloatingPointException,
     ReadWrite(ReadWriteFault),
@@ -170,6 +173,7 @@ impl Cpu {
             next_instruction_pc: 0,
             is_delay_slot: false,
             next_is_delay_slot: false,
+            load_store_exception: false,
 
             gpr : [0u64; 32],
             lo  : 0,
@@ -212,7 +216,7 @@ impl Cpu {
             regimm_table: [
                     //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
    /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::regimm_bgezl  , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
-   /* 01_ */    Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::regimm_unknown, Cpu::inst_reserved , Cpu::regimm_unknown, Cpu::inst_reserved ,
+   /* 01_ */    Cpu::regimm_tgei   , Cpu::regimm_tgeiu  , Cpu::regimm_tlti   , Cpu::regimm_tltiu  , Cpu::regimm_teqi   , Cpu::inst_reserved , Cpu::regimm_tnei   , Cpu::inst_reserved ,
    /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::regimm_bgezall, Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
    /* 11_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
             ],
@@ -227,7 +231,7 @@ impl Cpu {
         cpu
     }
 
-    pub fn reset(&mut self) -> Result<(), ReadWriteFault> {
+    pub fn reset(&mut self) -> Result<(), InstructionFault> {
         self.pc = 0xFFFF_FFFF_BFC0_0000;
 
         // COP0
@@ -291,32 +295,48 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn read_u8(&mut self, address: usize) -> Result<u8, ReadWriteFault> {
-        self.bus.borrow_mut().read_u8(address)
+    fn read_u8(&mut self, address: usize) -> Result<u8, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u8(address)?)
     }
 
     #[inline(always)]
-    fn read_u16(&mut self, address: usize) -> Result<u16, ReadWriteFault> {
-        self.bus.borrow_mut().read_u16(address)
+    fn read_u16(&mut self, address: usize) -> Result<u16, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u16(address)?)
     }
 
     #[inline(always)]
-    fn read_u32(&mut self, virtual_address: usize) -> Result<u32, ReadWriteFault> {
+    fn read_u32(&mut self, virtual_address: usize) -> Result<u32, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
-            self.bus.borrow_mut().read_u32(address.physical_address as usize)
+            self.read_u32_phys(address)
         } else {
             // invalid TLB translation, no physical address present to read
+            // and no exception
             Ok(0)
         }
     }
 
+    #[inline(always)]
+    fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u32(address.physical_address as usize)?)
+    }
+
     // The VR4300 has to do two reads to get a doubleword
     #[inline(always)]
-    fn read_u64(&mut self, address: usize) -> Result<u64, ReadWriteFault> {
-        match self.read_u32(address) {
+    fn read_u64(&mut self, virtual_address: usize) -> Result<u64, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            self.read_u64_phys(address)
+        } else {
+            Ok(0)
+        }
+    }
+
+    #[inline(always)]
+    fn read_u64_phys(&mut self, mut address: Address) -> Result<u64, InstructionFault> {
+        match self.read_u32_phys(address) {
             Err(err) => Err(err),
             Ok(v) => {
-                match self.read_u32(address + 4) {
+                address.physical_address += 4; // Hmm, might this cause problems on virtual page boundaries?
+                match self.read_u32_phys(address) {
                     Err(err) => Err(err),
                     Ok(v2) => {
                         Ok(((v as u64) << 32) | (v2 as u64))
@@ -327,19 +347,19 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        self.bus.borrow_mut().write_u8(value, address)
+    fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u8(value, address)?)
     }
 
     #[inline(always)]
-    fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        self.bus.borrow_mut().write_u16(value, address)
+    fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u16(value, address)?)
     }
 
     #[inline(always)]
-    fn write_u32(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_u32(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
-            self.bus.borrow_mut().write_u32(value, address.physical_address as usize)
+            self.write_u32_phys(value, address)
         } else {
             // invalid TLB translation, no physical address present to read
             Ok(WriteReturnSignal::None)
@@ -347,17 +367,28 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u64(&mut self, value: u64, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        match self.write_u32((value >> 32) as u32, address) {
-            Err(err) => { return Err(err); },
-            _ => {},
-        }
+    fn write_u32_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u32(value, address.physical_address as usize)?)
+    }
 
-        self.write_u32(value as u32, address + 4)
+    #[inline(always)]
+    fn write_u64(&mut self, value: u64, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            self.write_u64_phys(value, address)
+        } else {
+            Ok(WriteReturnSignal::None)
+        }
+    }
+
+    #[inline(always)]
+    fn write_u64_phys(&mut self, value: u64, mut address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        self.write_u32_phys((value >> 32) as u32, address)?;
+        address.physical_address += 4;
+        Ok(self.write_u32_phys(value as u32, address)?)
     }
 
     // prefetch the next instruction
-    fn prefetch(&mut self) -> Result<(), ReadWriteFault> {
+    fn prefetch(&mut self) -> Result<(), InstructionFault> {
         self.next_instruction = self.read_u32(self.pc as usize)?; 
         self.next_instruction_pc = self.pc;
         self.pc += 4;
@@ -365,7 +396,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn exception(&mut self, exception_code: u64) -> Result<(), ReadWriteFault> {
+    fn exception(&mut self, exception_code: u64) -> Result<(), InstructionFault> {
         // clear BD, exception code and bits that should be 0
         self.cp0gpr[Cop0_Cause] &= !0xC0FF_00FF;
 
@@ -391,62 +422,92 @@ impl Cpu {
         self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 { 0xFFFF_FFFF_8000_0000 } else { 0xFFFF_FFFF_BFC0_0200 } + 0x180;
 
         // we need to throw away next_instruction, so prefetch the new instruction now
-        self.prefetch()
+        self.prefetch()?;
+
+        // break out of all processing
+        Err(InstructionFault::OtherException)
     }
 
-    fn address_exception(&mut self, address: u64, is_write: bool) -> Result<(), ReadWriteFault> {
+    fn address_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
         //println!("CPU: address exception!");
 
-        self.cp0gpr[Cop0_BadVAddr] = address;
-        let bad_vpn2 = address >> 13;
+        self.cp0gpr[Cop0_BadVAddr] = virtual_address;
+        let bad_vpn2 = virtual_address >> 13;
         self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
 
         // TODO the XContext needs the page table
         self.cp0gpr[Cop0_XContext] = ((self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) << 10) 
-                                     | ((address >> 31) & 0x1_8000_0000) 
+                                     | ((virtual_address >> 31) & 0x1_8000_0000) 
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
+
+        // bit of a hack to handle the way I do read/write opcodes
+        if self.load_store_exception {
+            is_write = !is_write;
+            self.load_store_exception = false;
+        }
 
         let exception_code = if is_write { ExceptionCode_AdES } else { ExceptionCode_AdEL };
         self.exception(exception_code)
     }
 
-    fn breakpoint_exception(&mut self) -> Result<(), ReadWriteFault> {
+    fn tlb_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
+        //info!(target: "CPU", "TLB miss exception!");
+
+        self.cp0gpr[Cop0_BadVAddr] = virtual_address;
+        let bad_vpn2 = virtual_address >> 13;
+        self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
+
+        // TODO the XContext needs the page table
+        self.cp0gpr[Cop0_XContext] = ((self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) << 10) 
+                                     | ((virtual_address >> 31) & 0x1_8000_0000) 
+                                     | ((bad_vpn2 & 0x7FF_FFFF) << 4);
+
+        if self.load_store_exception {
+            is_write = !is_write;
+            self.load_store_exception = false;
+        }
+
+        let exception_code = if is_write { ExceptionCode_TLBS } else { ExceptionCode_TLBL };
+        self.exception(exception_code)
+    }
+
+    fn breakpoint_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Bp)
     }
 
-    fn overflow_exception(&mut self) -> Result<(), ReadWriteFault> {
+    fn overflow_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Ov)
     }
 
-    fn reserved_instruction_exception(&mut self) -> Result<(), ReadWriteFault> {
-        self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
+    fn reserved_instruction_exception(&mut self, coprocessor_number: u64) -> Result<(), InstructionFault> {
+        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_RI)
     }
 
-    fn syscall_exception(&mut self) -> Result<(), ReadWriteFault> {
+    fn syscall_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Sys)
     }
 
-    fn trap_exception(&mut self) -> Result<(), ReadWriteFault> {
+    fn trap_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Tr)
     }
 
-    fn floating_point_exception(&mut self) -> Result<(), ReadWriteFault> {
+    fn floating_point_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_FPE)
     }
 
-    fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) -> Result<(), ReadWriteFault> {
+    fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) -> Result<(), InstructionFault> {
         //info!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_CpU)
     }
 
-    fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), ReadWriteFault> {
+    fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
         //println!("CPU: interrupt!");
@@ -454,7 +515,7 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn timer_interrupt(&mut self) -> Result<(), ReadWriteFault> {
+    fn timer_interrupt(&mut self) -> Result<(), InstructionFault> {
         self.interrupt(InterruptCode_Timer)
     }
 
@@ -503,7 +564,7 @@ impl Cpu {
         };
     }
 
-    fn classify_address(&self, virtual_address: u64, _generate_exceptions: bool, _is_write: bool) -> Result<Option<Address>, ReadWriteFault> {
+    fn classify_address(&self, virtual_address: u64, _generate_exceptions: bool, _is_write: bool) -> Result<Option<Address>, InstructionFault> {
         let space = virtual_address >> 62;
         let mut address = Address {
             virtual_address: virtual_address,
@@ -562,7 +623,7 @@ impl Cpu {
         return Ok(Some(address));
     }
 
-    fn translate_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, ReadWriteFault> {
+    fn translate_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, InstructionFault> {
         // create the Address struct by first classifying the virtual address
         let mut address = match self.classify_address(virtual_address, generate_exceptions, is_write)? {
             Some(v) => v,
@@ -582,16 +643,21 @@ impl Cpu {
 
         // since the address is mapped there must be a TLB entry for it to be a valid
         // virtual_address, otherwise TLB exceptions occur
-        info!(target: "CPU", "TLB: translating virtual address ${:016X}!", virtual_address);
+
+        //info!(target: "CPU", "TLB: translating virtual address ${:016X}!", virtual_address);
 
         // virtual addresses are 40 bits wide
         let virtual_address = virtual_address & 0xFF_FFFF_FFFF;
 
+        // get the current ASID from EntryHi
+        let asid = self.cp0gpr[Cop0_EntryHi] & 0xFF;
+
         for tlb_index in 0..32 {
             let tlb = &self.tlb[tlb_index];
 
+            // the TLB entry is valid if either the ASID matches or the G flag is set
             // check if G bit is set, and skip the entry if not
-            if (tlb.entry_hi & 0x1000) == 0 { continue; }
+            if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
 
             //info!(target: "CPU", "checking TLB entry {}", tlb_index);
 
@@ -601,7 +667,7 @@ impl Cpu {
             let offset_mask = (tlb.page_mask >> 1) | 0xFFF; // page mask is a set of 1s at bit 13
                                                             // and if it isn't, it's undefined
                                                             // behavior
-            info!(target: "CPU", "TLB: offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
+            //info!(target: "CPU", "TLB: offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
 
             // VPN2 is the virtual page number (divided by 2) this TLB entry covers
             let vpn2 = tlb.entry_hi & 0xFFFFFFE000;
@@ -609,24 +675,29 @@ impl Cpu {
             // If the virtual address is referencing one of the two pages, it's a hit
             // notice that we keep PageMask in bit 13 rather shift it down
             let va_vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
-            info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
+            //info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
 
-            info!(target: "CPU", "TLB: virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
+            //info!(target: "CPU", "TLB: virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
             if (virtual_address & va_vpn_mask) != vpn2 { continue; }
 
-            info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
+            //info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
 
             // the odd bit is the 1 bit above the offset bits
-            let odd = (virtual_address & (offset_mask + 1)) != 0;
+            let odd_bit = virtual_address & (offset_mask + 1);
+            //info!(target: "CPU", "TLB: matched {} page", if odd_bit != 0 { "odd" } else { "even" });
 
+            // get the correct EntryLo field based on the odd page bit
+            let entry_lo = if odd_bit != 0 { tlb.entry_lo1 } else { tlb.entry_lo0 };
+            if (entry_lo & 0x02) == 0 { break; } // if V (valid) bit is not set, a TLB miss occurs
+    
             // get the page frame number of the corresponding EntryLo field
-            let pfn = (if odd { tlb.entry_lo1 } else { tlb.entry_lo0 }) & 0x03FF_FFC0;
+            let pfn = entry_lo & 0x03FF_FFC0;
 
             // the physical address is the pfn plus the offset (and the odd page bit)
             // pfn is at bit 6 in EntryLo, and needs to be at position 12 for the physical address
-            address.physical_address = (pfn << 6) | (virtual_address & (tlb.page_mask | 0x1FFF));
+            address.physical_address = (pfn << 6) | ((virtual_address & !odd_bit) & (tlb.page_mask | 0x1FFF));
 
-            info!(target: "CPU", "TLB: translated address = ${:016X}", address.physical_address);
+            //info!(target: "CPU", "TLB: translated address = ${:016X}", address.physical_address);
 
             // done
             return Ok(Some(address));
@@ -640,9 +711,10 @@ impl Cpu {
             // an address exception
             if (address.space == MemorySpace::User) && ((virtual_address & 0x8000_0000) != 0) {
                 self.address_exception(address.virtual_address, is_write)?;
+            } else {
+                //panic!("no TLB hit found for a mapped address!");
+                self.tlb_exception(address.virtual_address, is_write)?;
             }
-
-            //panic!("no TLB hit found for a mapped address!");
         }
 
         Ok(None)
@@ -722,6 +794,15 @@ impl Cpu {
                 Ok(())
             },
 
+            // Other exceptions continue execution
+            Err(InstructionFault::OtherException) => {
+                Ok(())
+            }
+
+            Err(InstructionFault::CoprocessorUnusable) => {
+                panic!("Am I using this?");
+            }
+
             // Other faults like Break, Unimplemented actually stop processing
             Err(_) => {
                 // on error, restore the previous instruction since it didn't complete
@@ -742,8 +823,8 @@ impl Cpu {
     }
 
     fn inst_reserved(&mut self) -> Result<(), InstructionFault> {
-        warn!(target: "CPU", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
-        self.reserved_instruction_exception()?;
+        //warn!(target: "CPU", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        self.reserved_instruction_exception(0)?;
         Ok(())
     }
 
@@ -921,9 +1002,9 @@ impl Cpu {
             },
 
             Cop0_Status => {
-                // TODO testing if user mode or 32-bit mode is ever used
-                if (value & 0x0200_00E0) != 0 {
-                    panic!("CPU: unsupported 64-bit mode or little endian mode");
+                // TODO testing if little endian mode or 32-bit mode is ever used
+                if (value & 0x0200_0080) != 0x00 {
+                    warn!("CPU: unsupported 64-bit kernel addressing or little endian mode ${value:08X}");
                 }
 
                 if (value & 0x18) != 0 {
@@ -1031,24 +1112,46 @@ impl Cpu {
                         self.cp0gpr[Cop0_EntryHi]  = tlb.entry_hi & !(0x1000 | tlb.page_mask);
                         self.cp0gpr[Cop0_EntryLo1] = tlb.entry_lo1 | g;
                         self.cp0gpr[Cop0_EntryLo0] = tlb.entry_lo0 | g;
-                        info!(target: "CPU", "COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                                    self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        //info!(target: "CPU", "COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        //            self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                     },
 
                     0b000_010 => { // tlbwi
-                        info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                                    self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        //info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        //            self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                         self.set_tlb_entry(self.cp0gpr[Cop0_Index] & 0x1F);
                     },
 
                     0b000_110 => { // tlbwr
-                        info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                                    self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        //info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        //            self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                         self.set_tlb_entry(self.cp0gpr[Cop0_Random] & 0x1F);
                     },
 
-                    0b001_000 => { // tlbwi
-                        debug!(target: "CPU", "COP0: tlbp");
+                    0b001_000 => { // tlbp
+                        //info!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}",
+                        //            self.cp0gpr[Cop0_EntryHi]);
+                        self.cp0gpr[Cop0_Index] = 0x8000_0000;
+                        let entry_hi = self.cp0gpr[Cop0_EntryHi];
+                        let asid = entry_hi & 0xFF;
+                        for i in 0..32 {
+                            let tlb = &self.tlb[i];
+
+                            // if ASID matches or G is set, check this TLB entry
+                            if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
+
+                            // region must match
+                            if ((tlb.entry_hi ^ entry_hi) & 0xC000_0000_0000_0000) != 0 { continue; }
+
+                            // compare only VPN2 with the inverse of page mask
+                            let tlb_vpn = (tlb.entry_hi & 0xFF_FFFF_E000) & !tlb.page_mask;
+                            let ehi_vpn = (entry_hi & 0xFF_FFFF_E000) & !tlb.page_mask;
+
+                            if tlb_vpn == ehi_vpn {
+                                self.cp0gpr[Cop0_Index] = i as u64;
+                                break;
+                            }
+                        }
                     },
 
                     0b011_000 => { // eret
@@ -1108,8 +1211,8 @@ impl Cpu {
                     Ok(())
                 },
 
-                0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
-                    self.reserved_instruction_exception()?;
+                0b00_011 | 0b00_111 => { // dcfc2, dctc2 are unimplemented
+                    self.reserved_instruction_exception(2)?;
                     // set the cop in the Cause register
                     self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | 0x2000_0000;
                     Ok(())
@@ -1514,16 +1617,30 @@ impl Cpu {
 
 
     fn inst_sdl(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // translate the address with the offset so that TLB errors produce the correct BadVAddr
+        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen, but if it does we act like a NOP
+                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
+                return Ok(());
+            }
+        };
+
+        // extract the dword offset
+        let offset = address.physical_address & 0x07;
+        address.physical_address &= !0x07;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u64(address & !0x07)?  // this read "simulates" the cache miss and fetch and 
-                                             // doesn't happen for uncached addresses
+        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
+            self.read_u64_phys(address)?  // this read "simulates" the cache miss and fetch and 
+                                          // doesn't happen for uncached addresses
         } else { panic!("test"); /*0*/ };
 
         // combine register and mem
-        let shift = (address & 0x07) << 3;
+        let shift = offset << 3;
         let new = if shift == 0 {
             self.gpr[self.inst.rt]
         } else {
@@ -1531,21 +1648,35 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64(new, address & !0x07)?;
+        self.write_u64_phys(new, address)?;
         Ok(())
     }
 
     fn inst_sdr(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // translate the address with the offset so that TLB errors produce the correct BadVAddr
+        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen, but if it does we act like a NOP
+                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
+                return Ok(());
+            }
+        };
+
+        // extract the word offset
+        let offset = address.physical_address & 0x07;
+        address.physical_address &= !0x07;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u64(address & !0x07)?  // this read "simulates" the cache miss and fetch and 
-                                             // doesn't happen for uncached addresses
+        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
+            self.read_u64_phys(address)? // this read "simulates" the cache miss and fetch and 
+                                         // doesn't happen for uncached addresses
         } else { panic!("test"); /*0*/ };
 
         // combine register and mem
-        let shift = 56 - ((address & 0x07) << 3);
+        let shift = 56 - (offset << 3);
         let new = if shift == 0 {
             self.gpr[self.inst.rt]
         } else {
@@ -1553,7 +1684,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64(new, address & !0x07)?;
+        self.write_u64_phys(new, address)?;
         Ok(())
     }
 
@@ -1589,16 +1720,30 @@ impl Cpu {
     }
 
     fn inst_swl(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // translate the address with the offset so that TLB errors produce the correct BadVAddr
+        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen, but if it does we act like a NOP
+                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
+                return Ok(());
+            }
+        };
+
+        // extract the word offset
+        let offset = address.physical_address & 0x03;
+        address.physical_address &= !0x03;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u32(address & !0x03)?  // this read "simulates" the cache miss and fetch and 
-                                             // doesn't happen for uncached addresses
+        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
+            self.read_u32_phys(address)? // this read "simulates" the cache miss and fetch and 
+                                         // doesn't happen for uncached addresses
         } else { panic!("test"); /*0*/ };
 
         // combine register and mem
-        let shift = (address & 0x03) << 3;
+        let shift = offset << 3;
         let new = if shift == 0 {
             self.gpr[self.inst.rt] as u32
         } else {
@@ -1606,21 +1751,35 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u32(new, address & !0x03)?;
+        self.write_u32_phys(new, address)?;
         Ok(())
     }
 
     fn inst_swr(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+
+        // translate the address with the offset so that TLB errors produce the correct BadVAddr
+        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen, but if it does we act like a NOP
+                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
+                return Ok(());
+            }
+        };
+
+        // extract the word offset
+        let offset = address.physical_address & 0x03;
+        address.physical_address &= !0x03;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u32(address & !0x03)?  // this read "simulates" the cache miss and fetch and 
-                                                   // doesn't happen for uncached addresses
+        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
+            self.read_u32_phys(address)? // this read "simulates" the cache miss and fetch and 
+                                         // doesn't happen for uncached addresses
         } else { panic!("test"); /*0*/ };
 
         // combine register and mem
-        let shift = 24 - ((address & 0x03) << 3);
+        let shift = 24 - (offset << 3);
         let new = if shift == 0 {
             self.gpr[self.inst.rt] as u32
         } else {
@@ -1628,7 +1787,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u32(new, address & !0x03)?;
+        self.write_u32_phys(new, address)?;
         Ok(())
     }
 
@@ -1981,8 +2140,22 @@ impl Cpu {
         Ok(())
     }
 
+    fn regimm_teqi(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] == (self.inst.signed_imm as u64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
     fn special_tge(&mut self) -> Result<(), InstructionFault> {
         if (self.gpr[self.inst.rs] as i64) >= (self.gpr[self.inst.rt] as i64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn regimm_tgei(&mut self) -> Result<(), InstructionFault> {
+        if (self.gpr[self.inst.rs] as i64) >= (self.inst.signed_imm as i64) {
             self.trap_exception()?;
         }
         Ok(())
@@ -1995,8 +2168,22 @@ impl Cpu {
         Ok(())
     }
 
+    fn regimm_tgeiu(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] >= (self.inst.signed_imm as u64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
     fn special_tlt(&mut self) -> Result<(), InstructionFault> {
         if (self.gpr[self.inst.rs] as i64) < (self.gpr[self.inst.rt] as i64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn regimm_tlti(&mut self) -> Result<(), InstructionFault> {
+        if (self.gpr[self.inst.rs] as i64) < (self.inst.signed_imm as i64) {
             self.trap_exception()?;
         }
         Ok(())
@@ -2009,8 +2196,22 @@ impl Cpu {
         Ok(())
     }
 
+    fn regimm_tltiu(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] < (self.inst.signed_imm as u64) {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
     fn special_tne(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] != self.gpr[self.inst.rt] {
+            self.trap_exception()?;
+        }
+        Ok(())
+    }
+
+    fn regimm_tnei(&mut self) -> Result<(), InstructionFault> {
+        if self.gpr[self.inst.rs] != (self.inst.signed_imm as u64) {
             self.trap_exception()?;
         }
         Ok(())
