@@ -488,11 +488,18 @@ impl Cpu {
     #[inline(always)]
     fn set_tlb_entry(&mut self, index: u64) {
         let g = (self.cp0gpr[Cop0_EntryLo0] & self.cp0gpr[Cop0_EntryLo1]) & 0x1; // Global flag
+
+        // the page mask needs to have the bits changed. the datasheet says they're undefined
+        // when not certain values, but to mimic the N64 there is certain expected behavior.
+        // 1. if the upper bit of the pair is not set then the lower bit of the pair is cleared
+        let mut page_mask = (self.cp0gpr[Cop0_PageMask] >> 13) & 0xAAA;
+        page_mask |= page_mask >> 1;
+
         self.tlb[(index & 0x1F) as usize] = TlbEntry {
-            page_mask: self.cp0gpr[Cop0_PageMask],
+            page_mask: page_mask << 13,
             entry_hi : self.cp0gpr[Cop0_EntryHi] | (g << 12),
-            entry_lo1: self.cp0gpr[Cop0_EntryLo1] & !0x01, // mask out G flag
-            entry_lo0: self.cp0gpr[Cop0_EntryLo0] & !0x01, // mask out G flag
+            entry_lo1: self.cp0gpr[Cop0_EntryLo1] & 0x03FF_FFFE, // mask out G flag
+            entry_lo0: self.cp0gpr[Cop0_EntryLo0] & 0x03FF_FFFE, // mask out G flag
         };
     }
 
@@ -1018,7 +1025,14 @@ impl Cpu {
                 let special = self.inst.v & 0x3F;
                 match special {
                     0b000_001 => { // tlbr
-                        debug!(target: "CPU", "COP0: tlbr");
+                        let tlb = &self.tlb[(self.cp0gpr[Cop0_Index] & 0x1F) as usize];
+                        let g = (tlb.entry_hi >> 12) & 0x01;
+                        self.cp0gpr[Cop0_PageMask] = tlb.page_mask;
+                        self.cp0gpr[Cop0_EntryHi]  = tlb.entry_hi & !(0x1000 | tlb.page_mask);
+                        self.cp0gpr[Cop0_EntryLo1] = tlb.entry_lo1 | g;
+                        self.cp0gpr[Cop0_EntryLo0] = tlb.entry_lo0 | g;
+                        info!(target: "CPU", "COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                    self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                     },
 
                     0b000_010 => { // tlbwi
