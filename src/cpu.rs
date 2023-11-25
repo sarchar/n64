@@ -860,7 +860,7 @@ impl Cpu {
             },
 
             Cop0_Context => {
-                value & 0xFFFF_FFFF_FF80_0000 // 64-bit register
+                (self.cp0gpr[Cop0_Context] & 0x7F_FFFF) | (value & 0xFFFF_FFFF_FF80_0000) // 64-bit register
             },
 
             Cop0_Wired => {
@@ -872,8 +872,8 @@ impl Cpu {
                 ((value & 0xFFFF_FFFF) & !read_only_mask) | (self.cp0gpr[Cop0_Config] & read_only_mask)
             },
 
-            Cop0_XContext => {
-                value & 0xFFFF_FFFE_0000_0000
+            Cop0_XContext => { // read-only register
+                (self.cp0gpr[Cop0_XContext] & 0x1_FFFF_FFFF) | (value & 0xFFFF_FFFE_0000_0000)
             },
 
             Cop0_Compare => {
