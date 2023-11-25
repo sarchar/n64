@@ -147,7 +147,7 @@ pub enum InstructionFault {
     Invalid,
     Unimplemented,
     Break,
-    OtherException,
+    OtherException(u64),
     CoprocessorUnusable,
     FloatingPointException,
     ReadWrite(ReadWriteFault),
@@ -425,7 +425,7 @@ impl Cpu {
         self.prefetch()?;
 
         // break out of all processing
-        Err(InstructionFault::OtherException)
+        Err(InstructionFault::OtherException(exception_code))
     }
 
     fn address_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
@@ -450,8 +450,11 @@ impl Cpu {
         self.exception(exception_code)
     }
 
-    fn tlb_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
-        //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={}!", virtual_address, is_write);
+    fn tlb_miss(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
+        info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={}!", virtual_address, is_write);
+
+        // set EntryHi to the page that caused the fault
+        self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
 
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
         let bad_vpn2 = virtual_address >> 13;
@@ -713,7 +716,7 @@ impl Cpu {
                 self.address_exception(address.virtual_address, is_write)?;
             } else {
                 //panic!("no TLB hit found for a mapped address!");
-                self.tlb_exception(address.virtual_address, is_write)?;
+                self.tlb_miss(address.virtual_address, is_write)?;
             }
         }
 
@@ -750,32 +753,18 @@ impl Cpu {
             }
         };
 
+        // For address and TLB exceptions, the current_instruction_pc needs to point to
+        // the address being fetched. This lets Cop0_EPC be set to the correct PC
+        self.current_instruction_pc = self.pc; // For Cop0_EPC in case of a TLB miss in a delay
+                                               // slot after a jump to an invalid TLB page
         // check for invalid PC addresses
         if (self.pc & 0x03) != 0 {
-            //println!("CPU: unaligned PC read at PC=${:08X}", self.pc);
-            self.current_instruction_pc = self.pc; // for Cop0_EPC
-            self.address_exception(self.pc, false)?;
-
-            return Ok(());
+            return self.address_exception(self.pc, false);
         }
 
         // current instruction
         let inst = self.next_instruction;
         self.inst.v = inst;
-
-        // next instruction fetch
-        self.current_instruction_pc = self.pc; // For Cop0_EPC in case of a TLB miss in a delay
-                                               // slot after a jump to an invalid TLB page
-        self.next_instruction = self.read_u32(self.pc as usize)?;
-
-        // update and increment PC
-        self.current_instruction_pc = self.next_instruction_pc;
-        self.next_instruction_pc = self.pc;
-        self.pc += 4;
-
-        // in delay slot flag
-        self.is_delay_slot = self.next_is_delay_slot;
-        self.next_is_delay_slot = false;
 
         // instruction decode
         self.inst.op         = inst >> 26;
@@ -787,6 +776,44 @@ impl Cpu {
         self.inst.target     = inst & 0x3FFFFFF;
         self.inst.sa         = (inst >> 6) & 0x1F;
 
+        // next instruction fetch. we need to catch TLB misses
+        self.next_instruction = match self.read_u32(self.pc as usize) {
+            Err(InstructionFault::OtherException(ExceptionCode_TLBL)) => {
+                // its possible for a TLB miss to occur while prefetching a delay slot instruction
+                // BEFORE the jump and link instruction is executed. However the link register
+                // still needs to be set correctly. So here, we check if the next-to-execute
+                // instruction is a jump and link and set RA. Quite a hack, but works when we're
+                // not cycle-accurate
+                match self.inst.v & 0xFC00_003F {
+                    0x0000_0009 => { // JALR
+                        // the TLB miss of the delay slot is in BadVAddr, so set RA to the instruction after it
+                        self.gpr[self.inst.rd] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                    },
+                    // There's no test in n64-systemtests for this but it should be the same
+                    // situation as JALR
+                    0x0C00_0000..=0x0C00_003F => { // JL
+                        warn!(target: "CPU", "let me know when this happens");
+                        self.gpr[self.inst.rd] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                    },
+                    _ => { },
+                };
+
+                return Err(InstructionFault::OtherException(ExceptionCode_TLBL));
+            }
+
+            Err(x) => { return Err(x); },
+            Ok(x) => x,
+        };
+
+        // update and increment PC
+        self.current_instruction_pc = self.next_instruction_pc;
+        self.next_instruction_pc = self.pc;
+        self.pc += 4;
+
+        // in delay slot flag
+        self.is_delay_slot = self.next_is_delay_slot;
+        self.next_is_delay_slot = false;
+
         let result = self.instruction_table[self.inst.op as usize](self);
         let result = match result {
             // Raise FPE on InstructionFault::FloatingPointException
@@ -796,7 +823,7 @@ impl Cpu {
             },
 
             // Other exceptions continue execution
-            Err(InstructionFault::OtherException) => {
+            Err(InstructionFault::OtherException(_)) => {
                 Ok(())
             }
 
