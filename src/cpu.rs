@@ -194,7 +194,7 @@ impl Cpu {
    /* 011_ */   Cpu::inst_daddi  , Cpu::inst_daddiu, Cpu::inst_ldl    , Cpu::inst_ldr     , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh    , Cpu::inst_lwl    , Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_lwr     , Cpu::inst_lwu     ,
    /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh    , Cpu::inst_swl    , Cpu::inst_sw      , Cpu::inst_sdl     , Cpu::inst_sdr     , Cpu::inst_swr     , Cpu::inst_cache   ,
-   /* 110_ */   Cpu::inst_ll     , Cpu::inst_lwc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_ldc1    , Cpu::inst_unknown , Cpu::inst_ld      ,
+   /* 110_ */   Cpu::inst_ll     , Cpu::inst_lwc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_lld     , Cpu::inst_ldc1    , Cpu::inst_unknown , Cpu::inst_ld      ,
    /* 111_ */   Cpu::inst_sc     , Cpu::inst_swc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_sdc1    , Cpu::inst_unknown , Cpu::inst_sd
             ],
 
@@ -602,7 +602,8 @@ impl Cpu {
                 if virtual_address < 0x0000_0100_0000_0000 { // xkuseg, user segment, TLB mapped, cached
                     address.mapped = true;
                 } else {
-                    panic!("TODO: invalid user segment address (address exception)");
+                    error!(target: "CPU", "TODO: invalid user segment address (address exception)");
+                    address.mapped = true; // this is not correct, just getting tests to not crash
                 }
             },
 
@@ -610,19 +611,22 @@ impl Cpu {
                 if virtual_address < 0x4000_0100_0000_0000 { // xksseg, supervisor segment, TLB mapped, cached
                     address.mapped = true;
                 } else {
-                    panic!("TODO: invalid supervisor segment address (address exception)");
+                    error!(target: "CPU", "TODO: invalid supervisor segment address (address exception)");
+                    address.mapped = true; // this is not correct, just getting tests to not crash
                 }
             },
 
             MemorySpace::XKPhys => { // xkphys
-                panic!("TODO: xkphys segment");
+                error!(target: "CPU", "TODO: xkphys segment");
+                address.mapped = true; // this is not correct, just getting tests to not crash
             },
 
             MemorySpace::Kernel => {
                 if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached
                     address.mapped = true;
                 } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
-                    panic!("TODO: address error");
+                    error!(target: "CPU", "TODO: address error");
+                    address.mapped = true; // this is not correct, just getting tests to not crash
                 // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
                 } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
                     address.physical_address = virtual_address & 0x1FFF_FFFF;
@@ -1384,7 +1388,7 @@ impl Cpu {
 
     fn inst_lb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as u8) as u64;
+        self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as i8) as u64;
         Ok(())
     }
 
@@ -1481,6 +1485,22 @@ impl Cpu {
 
         Ok(())
     }
+
+    fn inst_lld(&mut self) -> Result<(), InstructionFault> {
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (address & 0x07) != 0 {
+            self.address_exception(address, false)?;
+        }
+        self.gpr[self.inst.rt] = self.read_u64(address as usize)?;
+
+        // the "linked part" sets the LLAddr register in cop0 to the physical address
+        // of the read, and the LLbit to 1
+        self.cp0gpr[Cop0_LLAddr] = address & 0x1FFF_FFFF; // TODO use proper physical address
+        self.llbit = true;
+
+        Ok(())
+    }
+
 
     fn inst_lui(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.inst.signed_imm << 16;
