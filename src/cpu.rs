@@ -79,13 +79,21 @@ struct InstructionDecode {
     target: u32,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum MemorySpace {
+    User,
+    Supervisor,
+    XKPhys, // TODO
+    Kernel
+}
+
+#[derive(Copy, Clone, Debug)]
 struct Address {
     virtual_address: u64,
     physical_address: u64,
     cached: bool,
     mapped: bool,
-    space: u8, // 0 (user), 1 (supervisor), 3 (kernel)
+    space: MemorySpace,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -292,8 +300,13 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn read_u32(&mut self, address: usize) -> Result<u32, ReadWriteFault> {
-        self.bus.borrow_mut().read_u32(address)
+    fn read_u32(&mut self, virtual_address: usize) -> Result<u32, ReadWriteFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            self.bus.borrow_mut().read_u32(address.physical_address as usize)
+        } else {
+            // invalid TLB translation, no physical address present to read
+            Ok(0)
+        }
     }
 
     // The VR4300 has to do two reads to get a doubleword
@@ -323,8 +336,13 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u32(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        self.bus.borrow_mut().write_u32(value, address)
+    fn write_u32(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            self.bus.borrow_mut().write_u32(value, address.physical_address as usize)
+        } else {
+            // invalid TLB translation, no physical address present to read
+            Ok(WriteReturnSignal::None)
+        }
     }
 
     #[inline(always)]
@@ -477,98 +495,149 @@ impl Cpu {
         };
     }
 
-    fn classify_address(&self, virtual_address: u64) -> Address {
+    fn classify_address(&self, virtual_address: u64, _generate_exceptions: bool, _is_write: bool) -> Result<Option<Address>, ReadWriteFault> {
         let space = virtual_address >> 62;
         let mut address = Address {
             virtual_address: virtual_address,
             physical_address: 0,
             cached: true,
             mapped: false,
-            space: space as u8,
+            space: match space {
+                0b00 => MemorySpace::User,
+                0b01 => MemorySpace::Supervisor,
+                0b10 => MemorySpace::XKPhys,
+                0b11 => MemorySpace::Kernel,
+                _ => panic!("not possible"),
+            },
         };
 
-        if space == 0 {
-            if virtual_address < 0x0000_0100_0000_0000 { // kuseg, user segment, TLB mapped, cached
-                address.mapped = true;
-            } else {
-                panic!("TODO: invalid user segment address (address exception)");
-            }
-        } else if space == 1 {
-            if virtual_address < 0x4000_0100_0000_0000 { // ksseg, supervisor segment, TLB mapped, cached
-                address.mapped = true;
-            } else {
-                panic!("TODO: invalid supervisor segment address (address exception)");
-            }
-        } else if space == 2 {
-            panic!("TODO: xkphys segment");
-        } else if space == 3 { // kernel space
-            if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached?
-                address.mapped = true;
-            } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
-                panic!("TODO: invalid compatibility segment address");
-            // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
-            } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
-                address.physical_address = virtual_address & 0x1FFF_FFFF;
-            } else if virtual_address < 0xFFFF_FFFF_C000_0000 { // ckseg1, segment 0, directly mapped, uncached
-                address.cached = false;
-                address.physical_address = virtual_address & 0x1FFF_FFFF;
-            } else if virtual_address < 0xFFFF_FFFF_E000_0000 { // cksseg, supervisor segment (unused), TLB mapped
-                address.mapped = true;
-            } else { // ckseg3, kernel segment 3, TLB mapped, cached
-                address.mapped = true;
+        match address.space {
+            MemorySpace::User => {
+                if virtual_address < 0x0000_0100_0000_0000 { // xkuseg, user segment, TLB mapped, cached
+                    address.mapped = true;
+                } else {
+                    panic!("TODO: invalid user segment address (address exception)");
+                }
+            },
+
+            MemorySpace::Supervisor => {
+                if virtual_address < 0x4000_0100_0000_0000 { // xksseg, supervisor segment, TLB mapped, cached
+                    address.mapped = true;
+                } else {
+                    panic!("TODO: invalid supervisor segment address (address exception)");
+                }
+            },
+
+            MemorySpace::XKPhys => { // xkphys
+                panic!("TODO: xkphys segment");
+            },
+
+            MemorySpace::Kernel => {
+                if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached
+                    address.mapped = true;
+                } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
+                    panic!("TODO: address error");
+                // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
+                } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
+                    address.physical_address = virtual_address & 0x1FFF_FFFF;
+                } else if virtual_address < 0xFFFF_FFFF_C000_0000 { // ckseg1, segment 0, directly mapped, uncached
+                    address.cached = false;
+                    address.physical_address = virtual_address & 0x1FFF_FFFF;
+                } else if virtual_address < 0xFFFF_FFFF_E000_0000 { // cksseg, supervisor segment (unused), TLB mapped
+                    address.mapped = true;
+                } else { // ckseg3, kernel segment 3, TLB mapped, cached
+                    address.mapped = true;
+                }
             }
         }
 
-        return address;
+        return Ok(Some(address));
     }
 
-    fn translate_address(&self, virtual_address: u64) -> Address {
-        let mut address = self.classify_address(virtual_address);
+    fn translate_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, ReadWriteFault> {
+        // create the Address struct by first classifying the virtual address
+        let mut address = match self.classify_address(virtual_address, generate_exceptions, is_write)? {
+            Some(v) => v,
+            None => {
+                return Ok(None);
+            }
+        };
+
+        // TODO check address.space and make sure current execution mode allows access to that space
+        // i.e., if we're running in supervisor mode and try to access kernel address, we need to
+        // generate an address_exception(). But as far as I can tell games are always running in
+        // kernel mode.  We may need to support it in the future to support demos or other demo
+        // programs, for example.
 
         // if no further address translation is needed, return the Address
-        if !address.mapped {
-            return address;
-        }
+        if !address.mapped { return Ok(Some(address)); }
 
-        info!(target: "CPU", "looking up address ${:016X}!", virtual_address);
+        // since the address is mapped there must be a TLB entry for it to be a valid
+        // virtual_address, otherwise TLB exceptions occur
+        info!(target: "CPU", "TLB: translating virtual address ${:016X}!", virtual_address);
 
-        let va_r = virtual_address & 0xC000_0000_0000_0000;
+        // virtual addresses are 40 bits wide
         let virtual_address = virtual_address & 0xFF_FFFF_FFFF;
 
-        for tlb_index in 0..31 {
+        for tlb_index in 0..32 {
             let tlb = &self.tlb[tlb_index];
 
-            // check if G bit is set
+            // check if G bit is set, and skip the entry if not
             if (tlb.entry_hi & 0x1000) == 0 { continue; }
 
-            info!(target: "CPU", "checking TLB entry {}", tlb_index);
+            //info!(target: "CPU", "checking TLB entry {}", tlb_index);
 
+            // PageMask is (either 0, 3, 5, 7, F, 3F) at bit position 13
+            // So offset_mask will be a mask that can mask out the offset into the page from
+            // the virtual address
             let offset_mask = (tlb.page_mask >> 1) | 0xFFF; // page mask is a set of 1s at bit 13
                                                             // and if it isn't, it's undefined
                                                             // behavior
-            info!(target: "CPU", "offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
+            info!(target: "CPU", "TLB: offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
 
+            // VPN2 is the virtual page number (divided by 2) this TLB entry covers
             let vpn2 = tlb.entry_hi & 0xFFFFFFE000;
-            let va_vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
-            info!(target: "CPU", "EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
 
-            info!(target: "CPU", "virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
+            // If the virtual address is referencing one of the two pages, it's a hit
+            // notice that we keep PageMask in bit 13 rather shift it down
+            let va_vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
+            info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
+
+            info!(target: "CPU", "TLB: virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
             if (virtual_address & va_vpn_mask) != vpn2 { continue; }
-            info!(target: "CPU", "address matches!");
+
+            info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
 
             // the odd bit is the 1 bit above the offset bits
             let odd = (virtual_address & (offset_mask + 1)) != 0;
 
             // get the page frame number of the corresponding EntryLo field
             let pfn = (if odd { tlb.entry_lo1 } else { tlb.entry_lo0 }) & 0x03FF_FFC0;
+
+            // the physical address is the pfn plus the offset (and the odd page bit)
+            // pfn is at bit 6 in EntryLo, and needs to be at position 12 for the physical address
             address.physical_address = (pfn << 6) | (virtual_address & (tlb.page_mask | 0x1FFF));
 
-            info!(target: "CPU", "physical_address = ${:016X}", address.physical_address);
-            return address;
+            info!(target: "CPU", "TLB: translated address = ${:016X}", address.physical_address);
+
+            // done
+            return Ok(Some(address));
         }
 
-        panic!("no TLB hit found for a mapped address!");
-        return address;
+        if generate_exceptions {
+            // If the high bit of the address is set and the upper bits of the address
+            // are in user space (i.e., zero), then we have an address exception error instead
+            // TODO I wish I understood more why this is the case. It seems to me like
+            // 0x0000_0000_8xxx_xxxx is a valid user-space address and should generate a TLB miss, not
+            // an address exception
+            if (address.space == MemorySpace::User) && ((virtual_address & 0x8000_0000) != 0) {
+                self.address_exception(address.virtual_address, is_write)?;
+            }
+
+            //panic!("no TLB hit found for a mapped address!");
+        }
+
+        Ok(None)
     }
 
     pub fn step(&mut self) -> Result<(), InstructionFault> {
@@ -597,7 +666,7 @@ impl Cpu {
             // Note, the address that caused the error and the EPC are different
             let bad_vaddr = self.pc; // for BadVAddr
             self.current_instruction_pc = self.pc; // for Cop0_EPC
-            self.address_exception((bad_vaddr as i32) as u64, false)?;
+            self.address_exception(bad_vaddr, false)?;
 
             return Ok(());
         }
@@ -607,7 +676,6 @@ impl Cpu {
         self.inst.v = inst;
 
         // next instruction fetch
-        if self.pc < 0x8000_0000 { let _ = self.translate_address(self.pc as u64); }
         self.next_instruction = self.read_u32(self.pc as usize)?;
 
         // update and increment PC
@@ -1114,6 +1182,7 @@ impl Cpu {
 
     fn inst_j(&mut self) -> Result<(), InstructionFault> {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
+
         self.pc = dest;
 
         // note that the next instruction to execute is a delay slot instruction
@@ -2222,7 +2291,7 @@ impl Cpu {
                             r_type_rt_rd(format!("{}", CP1_FN[func as usize]))
                         },
                         _ => {
-                            panic!("invalid cop{}", copno);
+                            format!("unhandled cop{} instruction ${:X}", copno, func)
                         },
                     }
                 }
