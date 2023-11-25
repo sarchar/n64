@@ -37,7 +37,7 @@ const Cop0_LLAddr: usize = 17;
 const STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
 const ExceptionCode_Int  : u64 = 0;  // interrupt
-const _ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
+const ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
 const ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
 const ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
 const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruction fetch)
@@ -114,8 +114,6 @@ pub struct Cpu {
     is_delay_slot: bool,         // true if the currently executing instruction is in a delay slot
     next_is_delay_slot: bool,    // set to true on branching instructions
 
-    load_store_exception: bool,  // when true, flip the load and store exceptions
-
     gpr: [u64; 32],
     lo: u64,
     hi: u64,
@@ -173,7 +171,6 @@ impl Cpu {
             next_instruction_pc: 0,
             is_delay_slot: false,
             next_is_delay_slot: false,
-            load_store_exception: false,
 
             gpr : [0u64; 32],
             lo  : 0,
@@ -404,6 +401,7 @@ impl Cpu {
         self.cp0gpr[Cop0_Cause] |= exception_code << 2;
 
         // set the EXL bit to prevent another exception
+        let previous_exl = self.cp0gpr[Cop0_Status] & 0x02;
         self.cp0gpr[Cop0_Status] |= 0x02;
 
         // set the Exception Program Counter to the currently executing instruction
@@ -415,11 +413,19 @@ impl Cpu {
             self.current_instruction_pc
         } as i32) as u64;
 
-        // set PC and discard the delay slot. PC is set to the vector base determined by the BEV
-        // bit in Cop0_Status.
-        // TODO TLB miss needs to branch to base plus offset 0x000
+        // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
         // TODO XTLB miss needs to branch to base plus offset 0x080
-        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 { 0xFFFF_FFFF_8000_0000 } else { 0xFFFF_FFFF_BFC0_0200 } + 0x180;
+        let is_tlb = (exception_code == ExceptionCode_TLBL) || (exception_code == ExceptionCode_TLBS);
+        self.pc = (if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 {  // check BEV==0
+            0xFFFF_FFFF_8000_0000
+        } else { 
+            0xFFFF_FFFF_BFC0_0200
+        }) /*+ (if previous_exl == 0 && is_tlb { // check EXL==0 and tlb miss
+            0x000
+        } else {
+            0x180
+        });*/
+        + 0x180;
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.prefetch()?;
@@ -428,7 +434,7 @@ impl Cpu {
         Err(InstructionFault::OtherException(exception_code))
     }
 
-    fn address_exception(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
+    fn address_exception(&mut self, virtual_address: u64, is_write: bool) -> Result<(), InstructionFault> {
         //println!("CPU: address exception!");
 
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
@@ -440,20 +446,14 @@ impl Cpu {
                                      | ((virtual_address >> 31) & 0x1_8000_0000) 
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
 
-        // bit of a hack to handle the way I do read/write opcodes
-        if self.load_store_exception {
-            is_write = !is_write;
-            self.load_store_exception = false;
-        }
-
         let exception_code = if is_write { ExceptionCode_AdES } else { ExceptionCode_AdEL };
         self.exception(exception_code)
     }
 
-    fn tlb_miss(&mut self, virtual_address: u64, mut is_write: bool) -> Result<(), InstructionFault> {
-        info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={}!", virtual_address, is_write);
+    fn tlb_miss(&mut self, virtual_address: u64, is_write: bool) -> Result<(), InstructionFault> {
+        info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits=${:X}!", virtual_address, is_write, self.cp0gpr[Cop0_Config] & 0xE0);
 
-        // set EntryHi to the page that caused the fault
+        // set EntryHi to the page that caused the fault, preserving ASID
         self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
 
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
@@ -465,14 +465,28 @@ impl Cpu {
                                      | ((virtual_address >> 31) & 0x1_8000_0000) 
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
 
-        if self.load_store_exception {
-            is_write = !is_write;
-            self.load_store_exception = false;
-        }
-
         let exception_code = if is_write { ExceptionCode_TLBS } else { ExceptionCode_TLBL };
         self.exception(exception_code)
     }
+
+    fn tlb_mod(&mut self, virtual_address: u64) -> Result<(), InstructionFault> {
+        info!(target: "CPU", "TLB mod exception virtual_address=${:016X}", virtual_address);
+
+        // set EntryHi to the page that caused the fault, preserving ASID
+        self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
+
+        self.cp0gpr[Cop0_BadVAddr] = virtual_address;
+        let bad_vpn2 = virtual_address >> 13;
+        self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
+
+        // TODO the XContext needs the page table
+        self.cp0gpr[Cop0_XContext] = ((self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) << 10) 
+                                     | ((virtual_address >> 31) & 0x1_8000_0000) 
+                                     | ((bad_vpn2 & 0x7FF_FFFF) << 4);
+
+        self.exception(ExceptionCode_Mod)
+    }
+
 
     fn breakpoint_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
@@ -691,8 +705,16 @@ impl Cpu {
 
             // get the correct EntryLo field based on the odd page bit
             let entry_lo = if odd_bit != 0 { tlb.entry_lo1 } else { tlb.entry_lo0 };
-            if (entry_lo & 0x02) == 0 { break; } // if V (valid) bit is not set, a TLB miss occurs
-    
+
+            // if V (valid) bit is not set, a TLB miss occurs
+            if (entry_lo & 0x02) == 0 { break; }
+
+            // if D (dirty) is not set and this is a write, a Mod exception occurs
+            if generate_exceptions && (entry_lo & 0x04) == 0 && is_write {
+                self.tlb_mod(virtual_address)?;
+                return Ok(None);
+            }
+
             // get the page frame number of the corresponding EntryLo field
             let pfn = entry_lo & 0x03FF_FFC0;
 
@@ -715,7 +737,6 @@ impl Cpu {
             if (address.space == MemorySpace::User) && ((virtual_address & 0x8000_0000) != 0) {
                 self.address_exception(address.virtual_address, is_write)?;
             } else {
-                //panic!("no TLB hit found for a mapped address!");
                 self.tlb_miss(address.virtual_address, is_write)?;
             }
         }
