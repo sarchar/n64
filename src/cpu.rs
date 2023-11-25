@@ -233,6 +233,7 @@ impl Cpu {
         // COP0
         // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
         self.cp0gpr[Cop0_Wired] = 0;
+        self.cp0gpr[Cop0_Random] = 0x1F; // set to the upper bound (31) on reset
         self.cp0gpr[Cop0_PRId] = 0x0B22;
         self.cp0gpr[Cop0_Config] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
         self.cp0gpr[Cop0_Status] = 0x200004; // BEV=1, ERL=1, SR=0 (SR will need to be 1 on soft reset), IE=0
@@ -658,15 +659,24 @@ impl Cpu {
             }
         }
 
+        // decrement Random every cycle
+        // when Wired bit 5 is set, Random runs 0..63 with no wired limit
+        let next_index = if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 || ((self.cp0gpr[Cop0_Random] ^ self.cp0gpr[Cop0_Wired]) & 0x1F) != 0 {
+            (self.cp0gpr[Cop0_Random] & 0x3F).wrapping_sub(1) & 0x3F
+        } else {
+            if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 {
+                0x3F
+            } else {
+                0x1F
+            }
+        };
+        self.cp0gpr[Cop0_Random] = next_index;
+
+        // check for invalid PC addresses
         if (self.pc & 0x03) != 0 {
             //println!("CPU: unaligned PC read at PC=${:08X}", self.pc);
-
-            // I don't fully understand the pipeline, so this is a bit of a hack
-            // to get the address exception correct when reading new instructions
-            // Note, the address that caused the error and the EPC are different
-            let bad_vaddr = self.pc; // for BadVAddr
             self.current_instruction_pc = self.pc; // for Cop0_EPC
-            self.address_exception(bad_vaddr, false)?;
+            self.address_exception(self.pc, false)?;
 
             return Ok(());
         }
@@ -864,7 +874,14 @@ impl Cpu {
             },
 
             Cop0_Wired => {
+                // Cop0_Random is set to the upper bound when Cop0_Wired is written
+                self.cp0gpr[Cop0_Random] = 0x1F | (value & 0x20);
                 value & 0x3F
+            },
+
+            Cop0_Random => {
+                // only bit 5 is writeable
+                (self.cp0gpr[Cop0_Random] & 0x1F) | (value & 0x20)
             },
 
             Cop0_Config => {
@@ -930,11 +947,9 @@ impl Cpu {
 
             // TLB registers
             Cop0_EntryLo0 | Cop0_EntryLo1 => {
-                value & 0x0000_0000_03FF_FFFF // TODO conflicting sources of information say PFN
-                                              // is 24 bits, vs the datasheet (20 bits).
-                                              // I'm using the datasheet for now but this
-                                              // mask may need to change to 3FFF_FFFF in the
-                                              // future
+                // The datasheet says PFN is 20 bits wide but it seems like everywhere else,
+                // including n64-systemtest, is saying it's 24 bits, so it's 24 bits.
+                value & 0x0000_0000_3FFF_FFFF
             },
 
             Cop0_EntryHi => {
@@ -1009,13 +1024,13 @@ impl Cpu {
                     0b000_010 => { // tlbwi
                         info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                     self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
-                        self.set_tlb_entry(self.cp0gpr[Cop0_Index]);
+                        self.set_tlb_entry(self.cp0gpr[Cop0_Index] & 0x1F);
                     },
 
                     0b000_110 => { // tlbwr
                         info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                     self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
-                        self.set_tlb_entry(self.cp0gpr[Cop0_Random]);
+                        self.set_tlb_entry(self.cp0gpr[Cop0_Random] & 0x1F);
                     },
 
                     0b001_000 => { // tlbwi
