@@ -175,10 +175,9 @@ impl Addressable for PeripheralInterface {
                 }
             }
         } else {
-            // Right now, GoldenEye crashes reading $70000510 because virtual memory isn't
-            // implemented
-            warn!(target: "PI", "invalid read at ${:08X}", offset);
-            Err(ReadWriteFault::Invalid)
+            warn!(target: "PI", "open bus read at ${:08X}", offset);
+            // lower 16 bits repeated in both halves of the word
+            Ok((((offset & 0xFFFF) << 16) | (offset & 0xFFFF)) as u32)
         }
     }
 

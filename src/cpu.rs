@@ -495,10 +495,10 @@ impl Cpu {
     }
 
     fn tlb_miss(&mut self, address: Address, is_write: bool) -> Result<(), InstructionFault> {
-        //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", virtual_address, is_write, !self.kernel_64bit_addressing);
+        //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", address.virtual_address, is_write, !self.kernel_64bit_addressing);
 
         // set EntryHi to the page that caused the fault, preserving ASID
-        self.cp0gpr[Cop0_EntryHi] = (address.virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
+        self.cp0gpr[Cop0_EntryHi] = (address.virtual_address & 0xFFFF_FFFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
 
         self.cp0gpr[Cop0_BadVAddr] = address.virtual_address;
         let bad_vpn2 = address.virtual_address >> 13;
@@ -655,8 +655,8 @@ impl Cpu {
                     if virtual_address < 0x0000_0100_0000_0000 { // xkuseg, user segment, TLB mapped, cached
                         address.mapped = true;
                     } else {
-                        error!(target: "CPU", "TODO: invalid user segment address (address exception)");
-                        address.mapped = true; // this is not correct, just getting tests to not crash
+                        self.address_exception(virtual_address, is_write)?;
+                        return Ok(None);
                     }
                 },
 
@@ -665,15 +665,26 @@ impl Cpu {
                     if virtual_address < 0x4000_0100_0000_0000 { // xksseg, supervisor segment, TLB mapped, cached
                         address.mapped = true;
                     } else {
-                        error!(target: "CPU", "TODO: invalid supervisor segment address (address exception)");
-                        address.mapped = true; // this is not correct, just getting tests to not crash
+                        self.address_exception(virtual_address, is_write)?;
+                        return Ok(None);
                     }
                 },
 
                 0b10 => { // xkphys
                     address.space = MemorySpace::XKPhys;
-                    error!(target: "CPU", "TODO: xkphys segment");
-                    address.mapped = true; // this is not correct, just getting tests to not crash
+                    // addresses with bits 53:32 including 1 cause an address error
+                    if ((virtual_address >> 32) & 0x3FFFFF) != 0 {
+                        self.address_exception(virtual_address, is_write)?;
+                        return Ok(None);
+                    } else {
+                        // all addresses are unmapped in this segment
+                        // the physical_address is the lower 32 bits of the virtual_address
+                        address.physical_address = virtual_address & 0xFFFF_FFFF;
+
+                        // bits 61:59 indicate the use of cache. interestingly enough, only one
+                        // region is uncached (0x9000_0000_0000_0000-0x9000_0000_FFFF_FFFF)
+                        address.cached = ((virtual_address >> 59) & 0x07) != 2;
+                    }
                 },
 
                 0b11 => { // kernel
@@ -681,8 +692,8 @@ impl Cpu {
                     if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached
                         address.mapped = true;
                     } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
-                        error!(target: "CPU", "TODO: address error");
-                        address.mapped = true; // this is not correct, just getting tests to not crash
+                        self.address_exception(virtual_address, is_write)?;
+                        return Ok(None);
                     // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
                     } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
                         address.physical_address = virtual_address & 0x1FFF_FFFF;
@@ -701,6 +712,7 @@ impl Cpu {
         } else {
             if (virtual_address & 0x8000_0000) != 0 && ((virtual_address >> 32) as i32) != -1 && generate_exceptions {
                 self.address_exception(virtual_address, is_write)?;
+                return Ok(None);
             }
 
             let word_address = virtual_address as u32;
@@ -772,16 +784,16 @@ impl Cpu {
                                                             // behavior
             //info!(target: "CPU", "TLB: offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
 
-            // VPN2 is the virtual page number (divided by 2) this TLB entry covers
-            let vpn2 = tlb.entry_hi & 0xFFFFFFE000;
-
             // If the virtual address is referencing one of the two pages, it's a hit
             // notice that we keep PageMask in bit 13 rather shift it down
-            let va_vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
-            //info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, va_vpn_mask = ${:016X}", vpn2, va_vpn_mask);
+            let vpn_mask = !(tlb.page_mask | 0x1FFF) & 0xFF_FFFF_FFFF;
 
-            //info!(target: "CPU", "TLB: virtual_address & va_vpn_mask = ${:016X}", virtual_address & va_vpn_mask);
-            if (virtual_address & va_vpn_mask) != vpn2 { continue; }
+            // VPN2 is the virtual page number (divided by 2) this TLB entry covers
+            let vpn2 = tlb.entry_hi & vpn_mask;
+            //info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, vpn_mask = ${:016X}", vpn2, vpn_mask);
+
+            //info!(target: "CPU", "TLB: virtual_address & vpn_mask = ${:016X}", virtual_address & vpn_mask);
+            if (virtual_address & vpn_mask) != vpn2 { continue; }
 
             //info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
             address.tlb_index = Some(tlb_index);
@@ -1554,30 +1566,52 @@ impl Cpu {
     }
 
     fn inst_ll(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        if (address & 0x03) != 0 {
-            self.address_exception(address, false)?;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (virtual_address & 0x03) != 0 {
+            self.address_exception(virtual_address, false)?;
         }
-        self.gpr[self.inst.rt] = (self.read_u32(address as usize)? as i32) as u64;
+
+        // translate the address here
+        let address = match self.translate_address(virtual_address, true, false)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen
+                return self.address_exception(virtual_address, false);
+            }
+        };
+
+        self.gpr[self.inst.rt] = (self.read_u32_phys(address)? as i32) as u64;
 
         // the "linked part" sets the LLAddr register in cop0 to the physical address
         // of the read, and the LLbit to 1
-        self.cp0gpr[Cop0_LLAddr] = address & 0x1FFF_FFFF; // TODO use proper physical address
+        // the LLAddr register only stores bits 31:4 of the address at bit 0 of the register
+        self.cp0gpr[Cop0_LLAddr] = address.physical_address >> 4;
         self.llbit = true;
 
         Ok(())
     }
 
     fn inst_lld(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        if (address & 0x07) != 0 {
-            self.address_exception(address, false)?;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (virtual_address & 0x07) != 0 {
+            self.address_exception(virtual_address, false)?;
         }
-        self.gpr[self.inst.rt] = self.read_u64(address as usize)?;
+
+        // translate the address here
+        let address = match self.translate_address(virtual_address, true, false)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen
+                return self.address_exception(virtual_address, false);
+            }
+        };
+
+        self.gpr[self.inst.rt] = self.read_u64_phys(address)?;
 
         // the "linked part" sets the LLAddr register in cop0 to the physical address
         // of the read, and the LLbit to 1
-        self.cp0gpr[Cop0_LLAddr] = address & 0x1FFF_FFFF; // TODO use proper physical address
+        // the LLAddr register only stores bits 31:4 of the address at bit 0 of the register
+        self.cp0gpr[Cop0_LLAddr] = address.physical_address >> 4;
         self.llbit = true;
 
         Ok(())
@@ -1704,13 +1738,22 @@ impl Cpu {
     }
 
     fn inst_sc(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
-        if (address & 0x03) != 0 {
-            self.address_exception(address, true)?;
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (virtual_address & 0x03) != 0 {
+            self.address_exception(virtual_address, true)?;
         }
 
-        if self.llbit && ((address & 0x1FFF_FFFF) == self.cp0gpr[Cop0_LLAddr]) {
-            self.write_u32(self.gpr[self.inst.rt] as u32, address as usize)?;
+        // translate the address here
+        let address = match self.translate_address(virtual_address, true, false)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen
+                return self.address_exception(virtual_address, false);
+            }
+        };
+
+        if self.llbit && ((address.physical_address >> 4) == self.cp0gpr[Cop0_LLAddr]) {
+            self.write_u32_phys(self.gpr[self.inst.rt] as u32, address)?;
             self.gpr[self.inst.rt] = 1;
         } else {
             self.gpr[self.inst.rt] = 0;
