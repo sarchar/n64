@@ -94,6 +94,8 @@ struct Address {
     cached: bool,
     mapped: bool,
     space: MemorySpace,
+    tlb_index: Option<usize>, // tlb_index will be Some() when the virtual_address hits an EntryHi
+                              // in a mapped address
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -122,6 +124,9 @@ pub struct Cpu {
     cp0gpr_latch: u64,
     tlb: [TlbEntry; 32],
     cp2gpr_latch: u64,
+
+    // 32/64-bit addressing modes, set by Cop0_Status bits
+    kernel_64bit_addressing: bool,
 
     half_clock: u32,
     llbit: bool,
@@ -180,6 +185,7 @@ impl Cpu {
             cp0gpr_latch: 0,
             tlb: [TlbEntry::default(); 32],
             cp2gpr_latch: 0,
+            kernel_64bit_addressing: false,
             half_clock: 0,
             llbit: false,
 
@@ -292,13 +298,23 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn read_u8(&mut self, address: usize) -> Result<u8, InstructionFault> {
-        Ok(self.bus.borrow_mut().read_u8(address)?)
+    fn read_u8(&mut self, virtual_address: usize) -> Result<u8, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            self.read_u8_phys(address)
+        } else {
+            // invalid TLB translation, no physical address present to read and no exception
+            Ok(0)
+        }
     }
 
     #[inline(always)]
-    fn read_u16(&mut self, address: usize) -> Result<u16, InstructionFault> {
-        Ok(self.bus.borrow_mut().read_u16(address)?)
+    fn read_u16(&mut self, virtual_address: usize) -> Result<u16, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            self.read_u16_phys(address)
+        } else {
+            // invalid TLB translation, no physical address present to read and no exception
+            Ok(0)
+        }
     }
 
     #[inline(always)]
@@ -306,15 +322,9 @@ impl Cpu {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
             self.read_u32_phys(address)
         } else {
-            // invalid TLB translation, no physical address present to read
-            // and no exception
+            // invalid TLB translation, no physical address present to read and no exception
             Ok(0)
         }
-    }
-
-    #[inline(always)]
-    fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
-        Ok(self.bus.borrow_mut().read_u32(address.physical_address as usize)?)
     }
 
     // The VR4300 has to do two reads to get a doubleword
@@ -325,6 +335,21 @@ impl Cpu {
         } else {
             Ok(0)
         }
+    }
+
+    #[inline(always)]
+    fn read_u8_phys(&mut self, address: Address) -> Result<u8, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u8(address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn read_u16_phys(&mut self, address: Address) -> Result<u16, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u16(address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u32(address.physical_address as usize)?)
     }
 
     #[inline(always)]
@@ -344,13 +369,23 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, InstructionFault> {
-        Ok(self.bus.borrow_mut().write_u8(value, address)?)
+    fn write_u8(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            self.write_u8_phys(value, address)
+        } else {
+            // invalid TLB translation, no physical address present to read
+            Ok(WriteReturnSignal::None)
+        }
     }
 
     #[inline(always)]
-    fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, InstructionFault> {
-        Ok(self.bus.borrow_mut().write_u16(value, address)?)
+    fn write_u16(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            self.write_u16_phys(value, address)
+        } else {
+            // invalid TLB translation, no physical address present to read
+            Ok(WriteReturnSignal::None)
+        }
     }
 
     #[inline(always)]
@@ -364,17 +399,27 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u32_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
-        Ok(self.bus.borrow_mut().write_u32(value, address.physical_address as usize)?)
-    }
-
-    #[inline(always)]
     fn write_u64(&mut self, value: u64, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
             self.write_u64_phys(value, address)
         } else {
             Ok(WriteReturnSignal::None)
         }
+    }
+
+    #[inline(always)]
+    fn write_u8_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u8(value, address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn write_u16_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u16(value, address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn write_u32_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u32(value, address.physical_address as usize)?)
     }
 
     #[inline(always)]
@@ -393,7 +438,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn exception(&mut self, exception_code: u64) -> Result<(), InstructionFault> {
+    fn exception(&mut self, exception_code: u64, use_special: bool) -> Result<(), InstructionFault> {
         // clear BD, exception code and bits that should be 0
         self.cp0gpr[Cop0_Cause] &= !0xC0FF_00FF;
 
@@ -414,18 +459,17 @@ impl Cpu {
         } as i32) as u64;
 
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
-        // TODO XTLB miss needs to branch to base plus offset 0x080
-        let is_tlb = (exception_code == ExceptionCode_TLBL) || (exception_code == ExceptionCode_TLBS);
+        // TLB and XTLB miss are vectored to offsets 0 and 0x80, respectively
+        // all others go to offset 0x180
         self.pc = (if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 {  // check BEV==0
             0xFFFF_FFFF_8000_0000
         } else { 
             0xFFFF_FFFF_BFC0_0200
-        }) /*+ (if previous_exl == 0 && is_tlb { // check EXL==0 and tlb miss
-            0x000
+        }) + (if use_special && previous_exl == 0 { // check EXL==0 and tlb miss
+            if self.kernel_64bit_addressing { 0x080 } else { 0x000 }
         } else {
             0x180
-        });*/
-        + 0x180;
+        });
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.prefetch()?;
@@ -447,30 +491,34 @@ impl Cpu {
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
 
         let exception_code = if is_write { ExceptionCode_AdES } else { ExceptionCode_AdEL };
-        self.exception(exception_code)
+        self.exception(exception_code, false)
     }
 
-    fn tlb_miss(&mut self, virtual_address: u64, is_write: bool) -> Result<(), InstructionFault> {
-        info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits=${:X}!", virtual_address, is_write, self.cp0gpr[Cop0_Config] & 0xE0);
+    fn tlb_miss(&mut self, address: Address, is_write: bool) -> Result<(), InstructionFault> {
+        //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", virtual_address, is_write, !self.kernel_64bit_addressing);
 
         // set EntryHi to the page that caused the fault, preserving ASID
-        self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
+        self.cp0gpr[Cop0_EntryHi] = (address.virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
 
-        self.cp0gpr[Cop0_BadVAddr] = virtual_address;
-        let bad_vpn2 = virtual_address >> 13;
+        self.cp0gpr[Cop0_BadVAddr] = address.virtual_address;
+        let bad_vpn2 = address.virtual_address >> 13;
         self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
 
         // TODO the XContext needs the page table
         self.cp0gpr[Cop0_XContext] = ((self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) << 10) 
-                                     | ((virtual_address >> 31) & 0x1_8000_0000) 
+                                     | ((address.virtual_address >> 31) & 0x1_8000_0000) 
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
 
+        // TLB miss that doesn't hit an EntryHi gets vectored to a different exception handler
+        // than a TLB miss that hits an EntryHi but has an invalid entry
+        let use_special = if let Some(_) = address.tlb_index { false } else { true };
+
         let exception_code = if is_write { ExceptionCode_TLBS } else { ExceptionCode_TLBL };
-        self.exception(exception_code)
+        self.exception(exception_code, use_special)
     }
 
     fn tlb_mod(&mut self, virtual_address: u64) -> Result<(), InstructionFault> {
-        info!(target: "CPU", "TLB mod exception virtual_address=${:016X}", virtual_address);
+        //info!(target: "CPU", "TLB mod exception virtual_address=${:016X}", virtual_address);
 
         // set EntryHi to the page that caused the fault, preserving ASID
         self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
@@ -484,51 +532,51 @@ impl Cpu {
                                      | ((virtual_address >> 31) & 0x1_8000_0000) 
                                      | ((bad_vpn2 & 0x7FF_FFFF) << 4);
 
-        self.exception(ExceptionCode_Mod)
+        self.exception(ExceptionCode_Mod, false)
     }
 
 
     fn breakpoint_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
-        self.exception(ExceptionCode_Bp)
+        self.exception(ExceptionCode_Bp, false)
     }
 
     fn overflow_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
-        self.exception(ExceptionCode_Ov)
+        self.exception(ExceptionCode_Ov, false)
     }
 
     fn reserved_instruction_exception(&mut self, coprocessor_number: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
-        self.exception(ExceptionCode_RI)
+        self.exception(ExceptionCode_RI, false)
     }
 
     fn syscall_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
-        self.exception(ExceptionCode_Sys)
+        self.exception(ExceptionCode_Sys, false)
     }
 
     fn trap_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
-        self.exception(ExceptionCode_Tr)
+        self.exception(ExceptionCode_Tr, false)
     }
 
     fn floating_point_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
-        self.exception(ExceptionCode_FPE)
+        self.exception(ExceptionCode_FPE, false)
     }
 
     fn coprocessor_unusable_exception(&mut self, coprocessor_number: u64) -> Result<(), InstructionFault> {
         //info!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
-        self.exception(ExceptionCode_CpU)
+        self.exception(ExceptionCode_CpU, false)
     }
 
     fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
         //println!("CPU: interrupt!");
-        self.exception(ExceptionCode_Int)
+        self.exception(ExceptionCode_Int, false)
     }
 
     #[inline(always)]
@@ -581,63 +629,97 @@ impl Cpu {
         };
     }
 
-    fn classify_address(&self, virtual_address: u64, _generate_exceptions: bool, _is_write: bool) -> Result<Option<Address>, InstructionFault> {
-        let space = virtual_address >> 62;
+    fn classify_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, InstructionFault> {
         let mut address = Address {
             virtual_address: virtual_address,
             physical_address: 0,
             cached: true,
             mapped: false,
-            space: match space {
+            space: MemorySpace::User,
+            tlb_index: None,
+        };
+
+        if self.kernel_64bit_addressing {
+            let space_bits = virtual_address >> 62;
+            address.space = match space_bits {
                 0b00 => MemorySpace::User,
                 0b01 => MemorySpace::Supervisor,
                 0b10 => MemorySpace::XKPhys,
                 0b11 => MemorySpace::Kernel,
                 _ => panic!("not possible"),
-            },
-        };
+            };
 
-        match address.space {
-            MemorySpace::User => {
-                if virtual_address < 0x0000_0100_0000_0000 { // xkuseg, user segment, TLB mapped, cached
-                    address.mapped = true;
-                } else {
-                    error!(target: "CPU", "TODO: invalid user segment address (address exception)");
+            match space_bits {
+                0b00 => { // user
+                    address.space = MemorySpace::User;
+                    if virtual_address < 0x0000_0100_0000_0000 { // xkuseg, user segment, TLB mapped, cached
+                        address.mapped = true;
+                    } else {
+                        error!(target: "CPU", "TODO: invalid user segment address (address exception)");
+                        address.mapped = true; // this is not correct, just getting tests to not crash
+                    }
+                },
+
+                0b01 => { // supervisor
+                    address.space = MemorySpace::Supervisor;
+                    if virtual_address < 0x4000_0100_0000_0000 { // xksseg, supervisor segment, TLB mapped, cached
+                        address.mapped = true;
+                    } else {
+                        error!(target: "CPU", "TODO: invalid supervisor segment address (address exception)");
+                        address.mapped = true; // this is not correct, just getting tests to not crash
+                    }
+                },
+
+                0b10 => { // xkphys
+                    address.space = MemorySpace::XKPhys;
+                    error!(target: "CPU", "TODO: xkphys segment");
                     address.mapped = true; // this is not correct, just getting tests to not crash
-                }
-            },
+                },
 
-            MemorySpace::Supervisor => {
-                if virtual_address < 0x4000_0100_0000_0000 { // xksseg, supervisor segment, TLB mapped, cached
-                    address.mapped = true;
-                } else {
-                    error!(target: "CPU", "TODO: invalid supervisor segment address (address exception)");
-                    address.mapped = true; // this is not correct, just getting tests to not crash
-                }
-            },
+                0b11 => { // kernel
+                    address.space = MemorySpace::Kernel;
+                    if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached
+                        address.mapped = true;
+                    } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
+                        error!(target: "CPU", "TODO: address error");
+                        address.mapped = true; // this is not correct, just getting tests to not crash
+                    // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
+                    } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
+                        address.physical_address = virtual_address & 0x1FFF_FFFF;
+                    } else if virtual_address < 0xFFFF_FFFF_C000_0000 { // ckseg1, segment 0, directly mapped, uncached
+                        address.cached = false;
+                        address.physical_address = virtual_address & 0x1FFF_FFFF;
+                    } else if virtual_address < 0xFFFF_FFFF_E000_0000 { // cksseg, supervisor segment (unused), TLB mapped
+                        address.mapped = true;
+                    } else { // ckseg3, kernel segment 3, TLB mapped, cached
+                        address.mapped = true;
+                    }
+                },
 
-            MemorySpace::XKPhys => { // xkphys
-                error!(target: "CPU", "TODO: xkphys segment");
-                address.mapped = true; // this is not correct, just getting tests to not crash
-            },
+                _ => panic!("Not possible"),
+            };
+        } else {
+            if (virtual_address & 0x8000_0000) != 0 && ((virtual_address >> 32) as i32) != -1 && generate_exceptions {
+                self.address_exception(virtual_address, is_write)?;
+            }
 
-            MemorySpace::Kernel => {
-                if virtual_address < 0xC000_00FF_8000_0000 { // xkseg, TLB mapped, cached
-                    address.mapped = true;
-                } else if virtual_address < 0xFFFF_FFFF_8000_0000 { // invalid
-                    error!(target: "CPU", "TODO: address error");
-                    address.mapped = true; // this is not correct, just getting tests to not crash
-                // the address range from FFFF_FFFF_8000_0000-FFFF_FFFF_FFFF_FFFF is the 32-bit compatibility range
-                } else if virtual_address < 0xFFFF_FFFF_A000_0000 { // ckseg0, segment 0, directly mapped, cached
-                    address.physical_address = virtual_address & 0x1FFF_FFFF;
-                } else if virtual_address < 0xFFFF_FFFF_C000_0000 { // ckseg1, segment 0, directly mapped, uncached
-                    address.cached = false;
-                    address.physical_address = virtual_address & 0x1FFF_FFFF;
-                } else if virtual_address < 0xFFFF_FFFF_E000_0000 { // cksseg, supervisor segment (unused), TLB mapped
-                    address.mapped = true;
-                } else { // ckseg3, kernel segment 3, TLB mapped, cached
-                    address.mapped = true;
-                }
+            let word_address = virtual_address as u32;
+            if word_address < 0x8000_0000 { // kuseg, TLB mapped, cached
+                address.space = MemorySpace::User;
+                address.mapped = true; 
+            } else if word_address < 0xA000_0000 { // kseg0, unmapped, cached
+                address.space = MemorySpace::Kernel;
+                address.physical_address = virtual_address & 0x1FFF_FFFF;
+            } else if word_address < 0xC000_0000 { // kseg1, unmapped, uncached
+                address.space = MemorySpace::Kernel;
+                address.cached = false;
+                address.physical_address = virtual_address & 0x1FFF_FFFF;
+            } else if word_address < 0xE000_0000 { // ksseg, mapped, cached
+                address.space = MemorySpace::Supervisor;
+                address.mapped = true;
+            } else { // kseg3, mapped, cached
+                address.space = MemorySpace::Kernel;
+                address.mapped = true;
             }
         }
 
@@ -657,7 +739,7 @@ impl Cpu {
         // i.e., if we're running in supervisor mode and try to access kernel address, we need to
         // generate an address_exception(). But as far as I can tell games are always running in
         // kernel mode.  We may need to support it in the future to support demos or other demo
-        // programs, for example.
+        // programs, though.
 
         // if no further address translation is needed, return the Address
         if !address.mapped { return Ok(Some(address)); }
@@ -702,6 +784,7 @@ impl Cpu {
             if (virtual_address & va_vpn_mask) != vpn2 { continue; }
 
             //info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
+            address.tlb_index = Some(tlb_index);
 
             // the odd bit is the 1 bit above the offset bits
             let odd_bit = virtual_address & (offset_mask + 1);
@@ -733,16 +816,7 @@ impl Cpu {
         }
 
         if generate_exceptions {
-            // If the high bit of the address is set and the upper bits of the address
-            // are in user space (i.e., zero), then we have an address exception error instead
-            // TODO I wish I understood more why this is the case. It seems to me like
-            // 0x0000_0000_8xxx_xxxx is a valid user-space address and should generate a TLB miss, not
-            // an address exception
-            if (address.space == MemorySpace::User) && ((virtual_address & 0x8000_0000) != 0) {
-                self.address_exception(address.virtual_address, is_write)?;
-            } else {
-                self.tlb_miss(address.virtual_address, is_write)?;
-            }
+            self.tlb_miss(address, is_write)?;
         }
 
         Ok(None)
@@ -1056,8 +1130,16 @@ impl Cpu {
 
             Cop0_Status => {
                 // TODO testing if little endian mode or 32-bit mode is ever used
-                if (value & 0x0200_0080) != 0x00 {
-                    warn!("CPU: unsupported 64-bit kernel addressing or little endian mode ${value:08X}");
+                if (value & 0x0200_0000) != 0 {
+                    panic!("CPU: unsupported little endian mode ${value:08X}");
+                }
+
+                if (value & 0x0000_0080) != 0x00 {
+                    self.kernel_64bit_addressing = true;
+                    //warn!(target: "CPU", "64-bit kernel addressing enabled ${value:08X}");
+                } else {
+                    self.kernel_64bit_addressing = false;
+                    //debug!(target: "CPU", "32-bit kernel addressing enabled ${value:08X}");
                 }
 
                 if (value & 0x18) != 0 {
