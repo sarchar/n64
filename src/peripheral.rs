@@ -2,7 +2,8 @@ use std::cmp;
 use std::fs;
 use std::str;
 
-use tracing::{debug,info,warn,error};
+#[allow(unused_imports)]
+use tracing::{trace,debug,info,warn,error};
 
 use crate::*;
 
@@ -148,7 +149,7 @@ impl PeripheralInterface {
 
 impl Addressable for PeripheralInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        debug!(target: "PI", "read32 offset=${:08X}", offset);
+        trace!(target: "PI", "read32 offset=${:08X}", offset);
 
         if offset < 0x0500_0000 {
             self.read_register(offset)
@@ -175,7 +176,7 @@ impl Addressable for PeripheralInterface {
                 }
             }
         } else {
-            warn!(target: "PI", "open bus read at ${:08X}", offset);
+            debug!(target: "PI", "open bus read at ${:08X}", offset);
             // lower 16 bits repeated in both halves of the word
             Ok((((offset & 0xFFFF) << 16) | (offset & 0xFFFF)) as u32)
         }

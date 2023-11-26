@@ -481,6 +481,11 @@ impl Cpu {
     fn address_exception(&mut self, virtual_address: u64, is_write: bool) -> Result<(), InstructionFault> {
         //println!("CPU: address exception!");
 
+        // set EntryHi to the vpn that caused the fault, preserving ASID and R
+        // the datasheet says the VPN value of EntryHi is undefined here, but the systemtests
+        // require it
+        self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF) | (virtual_address & 0xC000_0000_0000_0000);
+
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
         let bad_vpn2 = virtual_address >> 13;
         self.cp0gpr[Cop0_Context] = (self.cp0gpr[Cop0_Context] & 0xFFFF_FFFF_FF80_0000) | ((bad_vpn2 & 0x7FFFF) << 4);
@@ -497,8 +502,8 @@ impl Cpu {
     fn tlb_miss(&mut self, address: Address, is_write: bool) -> Result<(), InstructionFault> {
         //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", address.virtual_address, is_write, !self.kernel_64bit_addressing);
 
-        // set EntryHi to the page that caused the fault, preserving ASID
-        self.cp0gpr[Cop0_EntryHi] = (address.virtual_address & 0xFFFF_FFFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF);
+        // set EntryHi to the vpn that caused the fault, preserving ASID and R
+        self.cp0gpr[Cop0_EntryHi] = (address.virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF) | (address.virtual_address & 0xC000_0000_0000_0000);
 
         self.cp0gpr[Cop0_BadVAddr] = address.virtual_address;
         let bad_vpn2 = address.virtual_address >> 13;
@@ -774,6 +779,9 @@ impl Cpu {
             // check if G bit is set, and skip the entry if not
             if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
 
+            // if the region (R) doesn't match, this entry isn't valid
+            if ((tlb.entry_hi ^ address.virtual_address) >> 62) != 0 { continue; }
+
             //info!(target: "CPU", "checking TLB entry {}", tlb_index);
 
             // PageMask is (either 0, 3, 5, 7, F, 3F) at bit position 13
@@ -795,7 +803,6 @@ impl Cpu {
             //info!(target: "CPU", "TLB: virtual_address & vpn_mask = ${:016X}", virtual_address & vpn_mask);
             if (virtual_address & vpn_mask) != vpn2 { continue; }
 
-            //info!(target: "CPU", "TLB: address matches tlb index {tlb_index}!");
             address.tlb_index = Some(tlb_index);
 
             // the odd bit is the 1 bit above the offset bits
