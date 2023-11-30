@@ -851,10 +851,11 @@ impl Cpu {
         // increment Cop0_Count at half PClock and trigger exception
         self.half_clock ^= 1;
         self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + self.half_clock) as u64;
+        //println!("Count=${:08X} Compare=${:08X}", self.cp0gpr[Cop0_Count], self.cp0gpr[Cop0_Compare]);
         if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
             // Timer interrupt enable, bit 7 of IM field 
             if self.interrupts_enabled(STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG) { // TODO move to self.timer_interrupt()
-                //println!("COP0: timer interrupt");
+                println!("COP0: timer interrupt");
                 self.timer_interrupt()?;
             }
         }
@@ -1636,6 +1637,11 @@ impl Cpu {
             self.address_exception(address, false)?;
         } else {
             self.gpr[self.inst.rt] = (self.read_u32(address as usize)? as i32) as u64;
+            match self.current_instruction_pc & 0xFFFF_FFFF {
+                0x8000_0228 => { info!(target: "CPU", "IPL3 computed CRC1: ${:016X}, PIF computed CRC1: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[7]); }
+                0x8000_0234 => { info!(target: "CPU", "IPL3 computed CRC2: ${:016X}, PIF computed CRC2: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[16]); }
+                _ => {},
+            }
         }
         Ok(())
     }

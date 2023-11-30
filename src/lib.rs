@@ -82,11 +82,11 @@ pub struct System {
 
 impl System {
     pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str) -> System {
-        // load system rom
-        let pif = pifrom::PifRom::new(boot_rom_file_name);
-
         // load cartridge
-        let pi = peripheral::PeripheralInterface::new(cartridge_file_name);
+        let mut pi = peripheral::PeripheralInterface::new(cartridge_file_name);
+
+        // load system rom. the pifrom needs to know what CIC chip the cart is using
+        let pif = pifrom::PifRom::new(boot_rom_file_name, &mut pi);
 
         // create the RCP
         let rcp = Rc::new(RefCell::new(rcp::Rcp::new(pif, pi)));
@@ -110,6 +110,7 @@ impl System {
     }
 
     pub fn step(&mut self) -> Result<(), cpu::InstructionFault> {
+        self.rcp.borrow_mut().step();
         self.cpu.step()
     }
 }

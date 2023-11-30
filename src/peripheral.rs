@@ -54,6 +54,54 @@ impl PeripheralInterface {
                 }
                 Ok(ret)
             },
+
+            // PI_BSD_DOM1_LAT
+            0x0_0014 => {
+                info!(target: "PI", "read PI_BSD_DOM1_LAT");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM1_PWD
+            0x0_0018 => {
+                info!(target: "PI", "read PI_BSD_DOM1_PWD");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM1_PGS
+            0x0_001C => {
+                info!(target: "PI", "read PI_BSD_DOM1_PGS");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM1_RLS
+            0x0_0020 => {
+                info!(target: "PI", "read PI_BSD_DOM1_RLS");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM2_LAT
+            0x0_0024 => {
+                info!(target: "PI", "read PI_BSD_DOM2_LAT");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM2_PWD
+            0x0_0028 => {
+                info!(target: "PI", "read PI_BSD_DOM2_PWD");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM2_PGS
+            0x0_002C => {
+                info!(target: "PI", "read PI_BSD_DOM2_PGS");
+                Ok(0)
+            },
+
+            // PI_BSD_DOM2_RLS
+            0x0_0030 => {
+                info!(target: "PI", "read PI_BSD_DOM2_RLS");
+                Ok(0)
+            },
             _ => panic!("PI: unhandled register read ${:08X}", offset),
         }
     }
@@ -153,8 +201,12 @@ impl Addressable for PeripheralInterface {
 
         if offset < 0x0500_0000 {
             self.read_register(offset)
+        } else if offset < 0x0600_0000 {
+            info!(target: "PI", "read32 N64DD registers offset=${:08X}", offset);
+            Ok(0)
         } else if offset < 0x0800_0000 {
-            panic!("N64DD read")
+            info!(target: "PI", "read32 N64DD IPL rom offset=${:08X}", offset);
+            Ok(0)
         } else if offset < 0x1000_0000 {
             error!(target: "PI", "unimplemented Cartridge SRAM/FlashRAM read");
             Ok(0)

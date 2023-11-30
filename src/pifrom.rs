@@ -15,12 +15,37 @@ pub struct PifRom {
 }
 
 impl PifRom {
-    pub fn new(boot_rom_file: &str) -> PifRom {
+    pub fn new(boot_rom_file: &str, pi: &mut peripheral::PeripheralInterface) -> PifRom {
         let boot_rom_data = fs::read(boot_rom_file).expect("Boot rom not found");
+        let mut ram = vec![0u32; 16]; // 64 byte RAM
+
+        // CRC the IPL3 code, which starts after the 64 byte header and goes up to address 0x1000
+        let mut crc: u64 = 0;
+        for i in (0x40..0x1000).step_by(4) {
+            crc += match pi.read_u32((0x1000_0000 | i) as usize) {
+                Ok(value) => value as u64,
+                Err(_) => panic!("could not read cartridge, this shouldn't happen"),
+            }
+        }
+
+        match crc {
+            0xD057C85244 => { // CIC 6102, GoldenEye
+                info!(target: "PIF", "CIC 6102 detected");
+                ram[9] = 0x00003F3F;
+            },
+
+            0x11A49F60E96 => { // CIC CIC 6105, Ocarina of Time, Majora's Mask
+                info!(target: "PIF", "CIC 6105 detected");
+                ram[9] = 0x00029100;
+            },
+
+            _ => {
+                info!(target: "PIF", "unknown IPL3/CIC checksum ${:08X}", crc);
+            }
+        }
 
         // HACK! To simulate the CIC exchange, we need seeds at location 0x7E4 in PIF memory
-        let mut ram = vec![0u32; 16]; // 64 byte RAM
-        ram[9] = 0x0000_3F3F;
+        //ram[9] = 0x0002_3F3F;
 
         PifRom {
             boot_rom: boot_rom_data,
@@ -35,10 +60,10 @@ impl Addressable for PifRom {
         debug!(target: "PIF", "read32 offset=${:08X}", offset);
 
         if offset < 1984 {
-            Ok(((self.boot_rom[offset+0] as u32) << 24)
-               | ((self.boot_rom[offset+1] as u32) << 16)
-               | ((self.boot_rom[offset+2] as u32) << 8)
-               | (self.boot_rom[offset+3] as u32))
+            Ok(((self.boot_rom[offset+1] as u32) << 24)
+               | ((self.boot_rom[offset+0] as u32) << 16)
+               | ((self.boot_rom[offset+3] as u32) << 8)
+               | (self.boot_rom[offset+2] as u32))
         } else if offset == 0x7FC {
             // HACK! data is always available (bit 7 set)
             if self.command_finished { 

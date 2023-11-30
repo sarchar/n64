@@ -36,6 +36,10 @@ impl Rcp {
         }
     }
 
+    pub fn step(&mut self) {
+        self.rsp.step();
+    }
+
     fn rcp_read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         trace!(target: "RCP", "read32 offset=${:08X}", offset);
 

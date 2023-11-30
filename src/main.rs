@@ -55,6 +55,8 @@ fn main() {
     // the starting filter disables all of rustyline and the rest of the program to INFO
     let default_filter = filter::Targets::new()
                             .with_target("rustyline", tracing_core::Level::ERROR)
+                            .with_target("RDP", tracing_core::Level::DEBUG)
+                            .with_target("RSP", tracing_core::Level::DEBUG)
                             .with_default(Level::INFO);
 
     // create a reload layer so logging levels can be modified

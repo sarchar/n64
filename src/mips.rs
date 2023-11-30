@@ -1,4 +1,4 @@
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::*;
 
@@ -37,11 +37,11 @@ impl Addressable for MipsInterface {
 
         match offset {
             0x0_0000 => { 
-                debug!(target: "MI", "write MI_MODE value=${:08X}", value);
+                info!(target: "MI", "write MI_MODE value=${:08X}", value);
             },
 
             0x0_000C => {
-                debug!(target: "MI", "write MI_MASK value=${:08X}", value);
+                info!(target: "MI", "write MI_MASK value=${:08X}", value);
             },
             _ => panic!("MI: unhandled write32 ${:08X}", offset),
         };
