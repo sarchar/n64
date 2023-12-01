@@ -1,3 +1,6 @@
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+
 use tracing::{trace, debug, error, info, warn};
 
 use crate::*;
@@ -9,30 +12,101 @@ pub struct Rsp {
 
     pc: u32,
 
-    si_status: u32,
+    dma_busy: bool,
 
     semaphore: bool,
+
+    core: Arc<Mutex<RspCpuCore>>,
+
+    wakeup_tx: Option<mpsc::Sender<()>>,
+    broke_rx: Option<mpsc::Receiver<()>>,
+
+    // these are copies of state in RspCpuCore so we don't need a lock
+    halted: bool,
+    broke: bool,
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+struct RspCpuCore {
+    halted: bool,
+    broke: bool,
 }
 
 impl Rsp {
     pub fn new() -> Rsp {
+        let core = Arc::new(Mutex::new(RspCpuCore::default()));
+        core.lock().unwrap().reset();
+
         Rsp {
             mem: vec![0u32; 2*1024], // 8KiB
             pc: 0x0000_0000,
-            si_status: 0b0000_0000_0000_0001, // bit 0 (HALTED) set
             semaphore: false,
+            core: core,
+
+            dma_busy: false,
+
+            wakeup_tx: None,
+            broke_rx: None,
+
+            halted: true,
+            broke: false,
         }
     }
 
-    pub fn step(&mut self) {
-        // don't step if halted
-        if (self.si_status & 0x01) != 0 { return; }
+    pub fn start(&mut self) {
+        // create the awake channel
+        let (wakeup_tx, wakeup_rx) = mpsc::channel();
+        self.wakeup_tx = Some(wakeup_tx);
 
-        if let Ok(inst) = self.read_u32(self.pc as usize | 0x1000) {
-            //info!(target: "RSP", "${:08X}: ${:08X}", self.pc | 0x1000, inst);
-            self.pc = (self.pc + 4) & 0x0FFC;
-        }
+        // create the broke signal channel
+        let (broke_tx, broke_rx) = mpsc::channel();
+        self.broke_rx = Some(broke_rx);
+
+        let core = Arc::clone(&self.core);
+
+        thread::spawn(move || {
+            loop {
+                let mut c = core.lock().unwrap();
+
+                // halted can only be set while we don't have a lock, so check here
+                if c.halted || c.broke {
+                    // drop the lock on the core and wait for a wakeup signal
+                    drop(c);
+
+                    // wait forever for a signal
+                    let _ = wakeup_rx.recv().unwrap();
+
+                    // running!
+                    let mut c = core.lock().unwrap();
+                    c.halted = false;
+                    c.broke = false;
+                } else {
+                    // run for some cycles or until break
+                    for _ in 0..100 {
+                        c.step();
+
+                        if c.broke { 
+                            c.halted = true; // signal the core is halted before dropping the lock
+
+                            // write break signal to channel
+                            broke_tx.send(()).unwrap();
+                            break; 
+                        }
+                    }
+                }
+            }
+        });
     }
+
+    //pub fn step(&mut self) {
+    //    // don't step if halted
+    //    if (self.si_status & 0x01) != 0 { return; }
+
+    //    if let Ok(inst) = self.read_u32(self.pc as usize | 0x1000) {
+    //        //info!(target: "RSP", "${:08X}: ${:08X}", self.pc | 0x1000, inst);
+    //        self.pc = (self.pc + 4) & 0x0FFC;
+    //    }
+    //}
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         trace!(target: "RSP", "read32 register offset=${:08X}", offset);
@@ -41,7 +115,17 @@ impl Rsp {
             // SP_STATUS
             0x4_0010 => {
                 info!(target: "RSP", "read SP_STATUS");
-                self.si_status
+
+                // check if BREAK happened
+                if let Some(broke_rx) = &self.broke_rx {
+                    if let Ok(_) = broke_rx.try_recv() {
+                        self.broke = true;
+                    }
+                }
+
+                ((self.halted as u32) << 0)
+                    | ((self.broke as u32) << 1)
+                    | ((self.dma_busy as u32) << 2)
             },
 
             // SP_DMA_BUSY
@@ -49,7 +133,7 @@ impl Rsp {
                 debug!(target: "RSP", "read SP_DMA_BUSY");
 
                 // mirror of DMA_BUSY in self.si_status
-                (self.si_status & 0x04) >> 2
+                self.dma_busy as u32
             },
 
             // SP_SEMAPHORE
@@ -85,10 +169,23 @@ impl Rsp {
             0x4_0010 => {
                 debug!(target: "RSP", "write SP_STATUS value=${:08X}", value);
 
-                // clear halt flag
-                if (value & 0x01) != 0 { 
-                    self.si_status &= !0x01; 
+                // CLR_BROKE: clear the broke flag
+                if (value & 0x04) != 0 {
+                    if let Some(broke_rx) = &self.broke_rx {
+                        // clear the broke_rx channel (which should never have more than 1 in it
+                        // because a break halts the cpu). I imagine if you set set CLR_BROKE
+                        // while the CPU is running (you wrote CLR_HALT previously), this might
+                        // cause a break signal to get lost. hopefully that's not a problem.
+                        loop {
+                            if let Err(_) = broke_rx.try_recv() { 
+                                break;
+                            }
+                        }
+                    }
+                }
 
+                // CLR_HALT: clear halt flag and start RSP
+                if (value & 0x01) != 0 { 
                     // sum up the first 44 bytes of imem
                     let mut sum: u32 = 0;
                     for i in 0..44 {
@@ -99,7 +196,25 @@ impl Rsp {
                     info!(target: "RSP", "sum of IMEM at start: ${:08X} (if this value is 0x9E2, it is a bootcode program)", sum);
 
                     info!(target: "RSP", "starting RSP at PC=${:08X}", self.pc);
+
+                    // set local copy
+                    self.halted = false;
+
+                    // send wakeup signal
+                    if let Some(wakeup_tx) = &self.wakeup_tx {
+                        wakeup_tx.send(()).unwrap();
+                    }
                 }
+
+                // SET_HALT: halt the RSP
+                if (value & 0x02) != 0 {
+                    // TODO it might be worth converting this to a mpsc channel as well,
+                    // depending on if anything uses SET_HALT often enough to causes stalls
+                    let mut c = self.core.lock().unwrap();
+                    c.halted = true;
+                    self.halted = true;
+                }
+
             },
 
             // SP_SEMAPHORE
@@ -184,4 +299,13 @@ impl Addressable for Rsp {
     }
 }
 
+impl RspCpuCore {
+    fn reset(&mut self) {
+        self.halted = true;
+    }
+
+    fn step(&mut self) {
+        info!(target: "RSP", "core step");
+    }
+}
 

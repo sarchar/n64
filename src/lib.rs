@@ -88,8 +88,9 @@ impl System {
         // load system rom. the pifrom needs to know what CIC chip the cart is using
         let pif = pifrom::PifRom::new(boot_rom_file_name, &mut pi);
 
-        // create the RCP
+        // create the RCP and start it
         let rcp = Rc::new(RefCell::new(rcp::Rcp::new(pif, pi)));
+        rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
         let cpu = cpu::Cpu::new(rcp.clone());

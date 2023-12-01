@@ -36,8 +36,13 @@ impl Rcp {
         }
     }
 
+    pub fn start(&mut self) {
+        self.rsp.start();
+    }
+
     pub fn step(&mut self) {
-        self.rsp.step();
+        // RSP runs in its own thread now:
+        //self.rsp.step();
     }
 
     fn rcp_read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
