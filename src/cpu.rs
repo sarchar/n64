@@ -55,28 +55,29 @@ const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
 const InterruptCode_Timer: u64 = 0x80;
 
-struct InstructionDecode {
-    v : u32,      // full 32-bit instruction
-    op: u32,      // 6-bit opcode field
-    regimm: u32,  // 5-bit regimm op
-    special: u32, // 6-bit special op
+#[derive(Debug, Default)]
+pub struct InstructionDecode {
+    pub v : u32,      // full 32-bit instruction
+    pub op: u32,      // 6-bit opcode field
+    pub regimm: u32,  // 5-bit regimm op
+    pub special: u32, // 6-bit special op
 
     // rd, rs, and rt are mostly used to index into self.gpr, so they will be usize
     // but they are 5 bits in the instruction
-    rd: usize,
-    rs: usize,
-    rt: usize,
+    pub rd: usize,
+    pub rs: usize,
+    pub rt: usize,
 
     // 16-bit immediate and sign extended value
     // the signed_imm value needs to be casted to i64/i32 for signed comparisons
-    imm: u64,
-    signed_imm: u64,
+    pub imm: u64,
+    pub signed_imm: u64,
 
     // 5 bit shift amount
-    sa: u32,
+    pub sa: u32,
 
     // 27-bit jump targets
-    target: u32,
+    pub target: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -217,7 +218,7 @@ impl Cpu {
             ],
 
             regimm_table: [
-                    //   _000                      _001                      _010                      _011                      _100                      _101                      _110                      _111
+               //   _000                 _001                 _010                 _011                 _100                 _101                 _110                 _111
    /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::regimm_bgezl  , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
    /* 01_ */    Cpu::regimm_tgei   , Cpu::regimm_tgeiu  , Cpu::regimm_tlti   , Cpu::regimm_tltiu  , Cpu::regimm_teqi   , Cpu::inst_reserved , Cpu::regimm_tnei   , Cpu::inst_reserved ,
    /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::regimm_bgezall, Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
