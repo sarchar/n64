@@ -1,19 +1,42 @@
+#![allow(non_upper_case_globals)]
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
 use tracing::{trace, debug, error, info, warn};
 
 use crate::*;
-use crate::cpu::{InstructionDecode, InstructionFault};
+use cpu::{InstructionDecode, InstructionFault};
+
+use rcp::DmaInfo;
+
+/// COP0 "registers"
+const Cop0_DmaCache      : usize = 0; // IMEM or DMEM address for a DMA transfer
+const Cop0_DmaDram       : usize = 1; // RDRAM address for a DMA
+const Cop0_DmaReadLength : usize = 2;
+const Cop0_DmaWriteLength: usize = 3;
+const _Cop0_Status        : usize = 4;
+const Cop0_DmaFull       : usize = 5;
+const Cop0_DmaBusy       : usize = 6;
+const _Cop0_Semaphore     : usize = 7;
+const _Cop0_CmdStart      : usize = 8;
+const _Cop0_CmdEnd        : usize = 9;
+const _Cop0_CmdCurrent    : usize = 10;
+const _Cop0_CmdStatus     : usize = 11;
+const _Cop0_CmdClock      : usize = 12;
+const _Cop0_CmdBusy       : usize = 13;
+const _Cop0_CmdPipeBusy   : usize = 14;
+const _Cop0_CmdTMemBusy   : usize = 15;
 
 /// N64 Reality Signal Processor
 /// Resides on the die of the RCP.
 pub struct Rsp {
-    dma_busy: bool,
+    intbreak: bool,
+    should_interrupt: bool,
 
     semaphore: bool,
 
     core: Arc<Mutex<RspCpuCore>>,
+    shared_state: Arc<RwLock<RspSharedState>>,
 
     wakeup_tx: Option<mpsc::Sender<()>>,
     broke_rx: Option<mpsc::Receiver<()>>,
@@ -24,6 +47,16 @@ pub struct Rsp {
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
     broke: bool,
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct RspSharedState {
+    dma_cache: u32,
+    dma_dram: u32,
+    dma_read_length: u32,
+    dma_write_length: u32,
+    dma_busy: bool,
+    dma_full: bool,
 }
 
 #[derive(Debug)]
@@ -48,28 +81,38 @@ struct RspCpuCore {
     // multiple reader single writer memory
     mem: Arc<RwLock<Vec<u32>>>,
 
+    shared_state: Arc<RwLock<RspSharedState>>,
+
+    start_dma_tx: mpsc::Sender<DmaInfo>,
+
+    // running state
     halted: bool,
     broke: bool,
 }
 
-pub type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
+type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new() -> Rsp {
+    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
-        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone())));
+        let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
+
+        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), start_dma_tx)));
 
         Rsp {
+            intbreak: false,
+            should_interrupt: false,
+
             semaphore: false,
             core: core,
 
             mem: mem,
 
-            dma_busy: false,
-
             wakeup_tx: None,
             broke_rx: None,
+
+            shared_state: shared_state,
 
             halted: true,
             broke: false,
@@ -84,7 +127,7 @@ impl Rsp {
         // create the broke signal channel
         let (broke_tx, broke_rx) = mpsc::channel();
         self.broke_rx = Some(broke_rx);
-
+    
         let core = Arc::clone(&self.core);
 
         thread::spawn(move || {
@@ -93,10 +136,13 @@ impl Rsp {
 
                 // halted can only be set while we don't have a lock, so check here
                 if c.halted || c.broke {
+                    let halted = c.halted;
+                    let broke = c.broke;
                     // drop the lock on the core and wait for a wakeup signal
                     drop(c);
 
                     // wait forever for a signal
+                    info!(target: "RSP", "RSP core halted (halted={}, broke={}), waiting for wakeup", halted, broke);
                     let _ = wakeup_rx.recv().unwrap();
 
                     // running!
@@ -110,7 +156,7 @@ impl Rsp {
 
                         if c.broke { 
                             c.halted = true; // signal the core is halted before dropping the lock
-
+                            
                             // write break signal to channel
                             broke_tx.send(()).unwrap();
                             break; 
@@ -121,6 +167,26 @@ impl Rsp {
         });
     }
 
+    pub fn is_broke(&mut self) -> bool {
+        // check if BREAK happened
+        if let Some(broke_rx) = &self.broke_rx {
+            if let Ok(_) = broke_rx.try_recv() {
+                self.broke = true;
+                if self.intbreak {
+                    self.should_interrupt = true;
+                }
+            }
+        }
+        self.broke
+    }
+
+    pub fn should_interrupt(&mut self) -> bool {
+        let _ = self.is_broke();
+        let r = self.should_interrupt;
+        self.should_interrupt = false;
+        r
+    }
+    
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         trace!(target: "RSP", "read32 register offset=${:08X}", offset);
 
@@ -129,16 +195,16 @@ impl Rsp {
             0x4_0010 => {
                 info!(target: "RSP", "read SP_STATUS");
 
-                // check if BREAK happened
-                if let Some(broke_rx) = &self.broke_rx {
-                    if let Ok(_) = broke_rx.try_recv() {
-                        self.broke = true;
-                    }
-                }
+                // update self.broke
+                let _ = self.is_broke();
+
+                let shared_state = self.shared_state.read().unwrap();
 
                 ((self.halted as u32) << 0)
                     | ((self.broke as u32) << 1)
-                    | ((self.dma_busy as u32) << 2)
+                    | ((shared_state.dma_busy as u32) << 2)
+                    | ((shared_state.dma_full as u32) << 3)
+                    | ((self.intbreak as u32) << 6)
             },
 
             // SP_DMA_BUSY
@@ -146,7 +212,8 @@ impl Rsp {
                 debug!(target: "RSP", "read SP_DMA_BUSY");
 
                 // mirror of DMA_BUSY in self.si_status
-                self.dma_busy as u32
+                let shared_state = self.shared_state.read().unwrap();
+                shared_state.dma_busy as u32
             },
 
             // SP_SEMAPHORE
@@ -227,11 +294,21 @@ impl Rsp {
                 if (value & 0x02) != 0 {
                     // TODO it might be worth converting this to a mpsc channel as well,
                     // depending on if anything uses SET_HALT often enough to causes stalls
+                    info!(target: "RSP", "CPU has halted the RSP");
                     let mut c = self.core.lock().unwrap();
                     c.halted = true;
                     self.halted = true;
                 }
 
+                // SET_INTBREAK: enable the interrupt on BREAK signal
+                if (value & 0x100) != 0 {
+                    self.intbreak = true;
+                }
+
+                // CLR_INTBREAK: disable the interrupt on break signal
+                if (value & 0x80) != 0 {
+                    self.intbreak = false;
+                }
             },
 
             // SP_SEMAPHORE
@@ -314,7 +391,7 @@ impl Addressable for Rsp {
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
-    fn new(mem: Arc<RwLock<Vec<u32>>>) -> Self {
+    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, start_dma_tx: mpsc::Sender<DmaInfo>) -> Self {
         let mut core = RspCpuCore {
             pc: 0,
             current_instruction_pc: 0,
@@ -328,6 +405,8 @@ impl RspCpuCore {
             inst: InstructionDecode::default(),
 
             mem: mem,
+            shared_state: shared_state,
+            start_dma_tx: start_dma_tx,
 
             halted: false,
             broke: false,
@@ -502,6 +581,7 @@ impl RspCpuCore {
     }
 
     fn inst_bne(&mut self) -> Result<(), InstructionFault> {
+        info!(target: "RSP", "bne r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm & 0xFFFF);
         let condition = self.gpr[self.inst.rs] != self.gpr[self.inst.rt];
         self.branch(condition);
         Ok(())
@@ -568,14 +648,6 @@ impl RspCpuCore {
         Ok(())
     }
 
-    fn inst_cop0(&mut self) -> Result<(), InstructionFault> {
-        Ok(())
-    }
-
-    fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
-        Ok(())
-    }
-
     fn inst_lb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
         self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as i8) as u32;
@@ -619,38 +691,40 @@ impl RspCpuCore {
     }
 
     fn inst_sw(&mut self) -> Result<(), InstructionFault> {
-        Ok(())
-    }
-
-    fn inst_lwc2(&mut self) -> Result<(), InstructionFault> {
-        Ok(())
-    }
-
-    fn inst_swc2(&mut self) -> Result<(), InstructionFault> {
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
+        self.write_u32(self.gpr[self.inst.rt], address as usize)?;
         Ok(())
     }
 
     fn special_sll(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
         Ok(())
     }
 
     fn special_srl(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> self.inst.sa;
         Ok(())
     }
 
     fn special_sra(&mut self) -> Result<(), InstructionFault> {
+        // shift right with sign
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i32) >> self.inst.sa) as u32;
         Ok(())
     }
 
     fn special_sllv(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (self.gpr[self.inst.rs] & 0x3F);
         Ok(())
     }
 
     fn special_srlv(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x3F);
         Ok(())
     }
 
     fn special_srav(&mut self) -> Result<(), InstructionFault> {
+        // shift right with sign
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i32) >> (self.gpr[self.inst.rs] & 0x3F)) as u32;
         Ok(())
     }
 
@@ -680,55 +754,162 @@ impl RspCpuCore {
     }
 
     fn special_add(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
         Ok(())
     }
 
     fn special_addu(&mut self) -> Result<(), InstructionFault> {
+        // since the RSP does not signal exceptions, this instruction behaves identically to ADD
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
         Ok(())
     }
 
     fn special_sub(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
         Ok(())
     }
 
     fn special_subu(&mut self) -> Result<(), InstructionFault> {
+        // identical to SUB
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
         Ok(())
     }
 
     fn special_and(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
         Ok(())
     }
 
     fn special_or(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] | self.gpr[self.inst.rt];
         Ok(())
     }
 
     fn special_xor(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = self.gpr[self.inst.rs] ^ self.gpr[self.inst.rt];
         Ok(())
     }
 
     fn special_nor(&mut self) -> Result<(), InstructionFault> {
+        self.gpr[self.inst.rd] = !(self.gpr[self.inst.rs] | self.gpr[self.inst.rt]);
         Ok(())
     }
 
     fn special_slt(&mut self) -> Result<(), InstructionFault> {
+        // set rd to 1 if rs < rt, otherwise 0
+        self.gpr[self.inst.rd] = ((self.gpr[self.inst.rs] as i32) < (self.gpr[self.inst.rt] as i32)) as u32;
         Ok(())
     }
 
     fn special_sltu(&mut self) -> Result<(), InstructionFault> {
+        // unsigned
+        self.gpr[self.inst.rd] = (self.gpr[self.inst.rs] < self.gpr[self.inst.rt]) as u32;
         Ok(())
     }
 
     fn regimm_bltz(&mut self) -> Result<(), InstructionFault> {
+        let condition = (self.gpr[self.inst.rs] as i32) < 0;
+        self.branch(condition);
         Ok(())
     }
 
     fn regimm_bgez(&mut self) -> Result<(), InstructionFault> {
+        let condition = (self.gpr[self.inst.rs] as i32) >= 0;
+        self.branch(condition);
         Ok(())
     }
 
     fn regimm_bgezal(&mut self) -> Result<(), InstructionFault> {
+        // compute condition before changing gpr31, as rs can be 31...
+        let condition = (self.gpr[self.inst.rs] as i32) >= 0;
+        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
+        self.branch(condition);
         Ok(())
+    }
+
+    fn inst_cop0(&mut self) -> Result<(), InstructionFault> {
+        let cop0_op = (self.inst.v >> 21) & 0x1F;
+        match cop0_op {
+            0b00_000 => { // MFC
+                info!(target: "RSP", "mfc0 r{}, c{}", self.inst.rt, self.inst.rd);
+                self.gpr[self.inst.rt] = match self.inst.rd {
+                    Cop0_DmaFull => {
+                        let shared_state = self.shared_state.read().unwrap();
+                        shared_state.dma_full as u32
+                    },
+
+                    Cop0_DmaBusy => {
+                        let shared_state = self.shared_state.read().unwrap();
+                        shared_state.dma_busy as u32
+                    },
+
+                    _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
+                };
+                Ok(())
+            },
+
+            0b00_100 => { // MTC
+                let val = self.gpr[self.inst.rt];
+
+                // fix bits of the various registers
+                match self.inst.rd {
+                    Cop0_DmaCache => {
+                        info!(target: "RSP", "DMA RSP address set to ${:04X}", val & 0x1FFF);
+                        let mut shared_state = self.shared_state.write().unwrap();
+                        shared_state.dma_cache = val & 0x1FFF;
+                        Ok(())
+                    },
+
+                    Cop0_DmaDram => {
+                        info!(target: "RSP", "DMA DRAM address set to ${:04X}", val & 0x00FF_FFFF);
+                        let mut shared_state = self.shared_state.write().unwrap();
+                        shared_state.dma_dram = val & 0x00FF_FFFF;
+
+                        let dma_info = DmaInfo::default();
+                        self.start_dma_tx.send(dma_info).unwrap();
+
+                        Ok(())
+                    },
+
+                    Cop0_DmaReadLength => {
+                        info!(target: "RSP", "DMA read length set to ${:04X}", val);
+                        let mut shared_state = self.shared_state.write().unwrap();
+                        shared_state.dma_read_length = val;
+
+                        let dma_info = DmaInfo::default();
+                        self.start_dma_tx.send(dma_info).unwrap();
+
+                        Ok(())
+                    },
+
+                    Cop0_DmaWriteLength => {
+                        info!(target: "RSP", "DMA write length set to ${:04X}", val);
+                        let mut shared_state = self.shared_state.write().unwrap();
+                        shared_state.dma_write_length = val;
+                        Ok(())
+                    },
+
+                    _ => todo!("unhandled cop0 register write $c{}", self.inst.rd),
+                }
+            },
+
+            _ => {
+                error!(target: "RSP", "unimplemented RSP COP0 instruction 0b{:02b}_{:03b}", cop0_op >> 3, cop0_op & 0x07);
+                Ok(())
+            }
+        }
+    }
+
+    fn inst_lwc2(&mut self) -> Result<(), InstructionFault> {
+        Ok(())
+    }
+
+    fn inst_swc2(&mut self) -> Result<(), InstructionFault> {
+        Ok(())
+    }
+
+    fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
+        todo!("cop2!");
     }
 }
 
@@ -739,8 +920,8 @@ impl Addressable for RspCpuCore {
             let mem = self.mem.read().unwrap();
             Ok(mem[mem_offset as usize])
         } else {
-            panic!("TODO");
-            Err(ReadWriteFault::Invalid)
+            todo!("TODO");
+            //.Err(ReadWriteFault::Invalid)
         }
     }
 
@@ -751,8 +932,8 @@ impl Addressable for RspCpuCore {
             mem[mem_offset as usize] = value;
             Ok(WriteReturnSignal::None)
         } else {
-            panic!("TODO");
-            Err(ReadWriteFault::Invalid)
+            todo!("TODO");
+            //.Err(ReadWriteFault::Invalid)
         }
     }
 }

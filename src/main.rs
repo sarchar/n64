@@ -87,7 +87,7 @@ fn main() {
 
     // create the n64 system
     #[allow(unused_mut)]
-    let mut system = System::new("boot.rom", args[1].as_str());
+    let mut system = System::new("bios/pifrom.v64", args[1].as_str());
 
     // either run or debug
     if args.len() == 3 && args[2] == "-D" {

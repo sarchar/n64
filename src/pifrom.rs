@@ -1,5 +1,3 @@
-use std::fs;
-
 #[allow(unused_imports)]
 use tracing::{debug, error, info};
 
@@ -15,8 +13,7 @@ pub struct PifRom {
 }
 
 impl PifRom {
-    pub fn new(boot_rom_file: &str, pi: &mut peripheral::PeripheralInterface) -> PifRom {
-        let boot_rom_data = fs::read(boot_rom_file).expect("Boot rom not found");
+    pub fn new(boot_rom: Vec<u8>, pi: &mut peripheral::PeripheralInterface) -> PifRom {
         let mut ram = vec![0u32; 16]; // 64 byte RAM
 
         // CRC the IPL3 code, which starts after the 64 byte header and goes up to address 0x1000
@@ -28,6 +25,7 @@ impl PifRom {
             }
         }
 
+        // HACK! To simulate the CIC exchange, we need certain seed values at 0x7E4 in PIF ram
         match crc {
             0xD057C85244 => { // CIC 6102, GoldenEye
                 info!(target: "PIF", "CIC 6102 detected");
@@ -40,15 +38,12 @@ impl PifRom {
             },
 
             _ => {
-                info!(target: "PIF", "unknown IPL3/CIC checksum ${:08X}", crc);
+                info!(target: "PIF", "unknown IPL3/CIC checksum ${:08X}. game probably won't run", crc);
             }
-        }
-
-        // HACK! To simulate the CIC exchange, we need seeds at location 0x7E4 in PIF memory
-        //ram[9] = 0x0002_3F3F;
+        };
 
         PifRom {
-            boot_rom: boot_rom_data,
+            boot_rom: boot_rom,
             ram: ram,
             command_finished: false,
         }

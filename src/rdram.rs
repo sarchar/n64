@@ -123,6 +123,18 @@ impl Addressable for RdramInterface {
 
         Ok(WriteReturnSignal::None)
     }
+
+    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if offset < 0x0080_0000 {
+            // why doesn't std::vec have copy_into(offset, source_slice)?
+            let (_, right) = self.ram.split_at_mut(offset >> 2);
+            let (left, _) = right.split_at_mut(block.len());
+            left.copy_from_slice(block);
+            Ok(WriteReturnSignal::None)
+        } else {
+            todo!("not likely");
+        }
+    }
 }
 
 

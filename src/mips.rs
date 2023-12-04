@@ -12,13 +12,31 @@ const IMask_DP: u32 = 5;
 
 pub struct MipsInterface {
     interrupt_mask: u32,
+    interrupt     : u32,
+    should_interrupt: bool,
 }
 
 impl MipsInterface {
     pub fn new() -> MipsInterface {
         MipsInterface { 
             interrupt_mask: 0,
+            interrupt     : 0,
+            should_interrupt: false,
         }
+    }
+    
+    pub fn step(&mut self, rsp_interrupt: bool) {
+        if rsp_interrupt && (self.interrupt_mask & IMask_SP) != 0 {
+            self.should_interrupt = true;
+            self.interrupt |= 1 << IMask_SP;
+            self.should_interrupt = true;
+        }
+    }
+
+    pub fn should_interrupt(&mut self) -> bool {
+        let r = self.should_interrupt;
+        self.should_interrupt = false;
+        r
     }
 }
 

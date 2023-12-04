@@ -1,11 +1,13 @@
 use std::cmp;
-use std::fs;
 use std::str;
+use std::sync::mpsc;
 
 #[allow(unused_imports)]
 use tracing::{trace,debug,info,warn,error};
 
 use crate::*;
+
+use rcp::DmaInfo;
 
 /// N64 Peripheral Interface
 /// Connects EEPROM, cartridge, controllers, and more
@@ -15,16 +17,22 @@ pub struct PeripheralInterface {
     dma_status: u32,
     io_busy: u32,
 
-    cartridge_rom: Vec<u8>,
+    cartridge_rom: Vec<u32>,
     cartridge_rom_write: Option<u32>,
 
     debug_buffer: Vec<u8>,
     debug_string: String,
+
+    start_dma_tx: mpsc::Sender<DmaInfo>
 }
 
 impl PeripheralInterface {
-    pub fn new(cartridge_rom_file: &str) -> PeripheralInterface {
-        let cartridge_rom = fs::read(cartridge_rom_file).expect("Could not open cartridge ROM file");
+    pub fn new(cartridge_rom: Vec<u8>, start_dma_tx: mpsc::Sender<DmaInfo>) -> PeripheralInterface {
+        // convert cartridge_rom to u32
+        let mut word_rom = vec![];
+        for i in (0..cartridge_rom.len()).step_by(4) {
+            word_rom.push(u32::from_be_bytes([cartridge_rom[i+0], cartridge_rom[i+1], cartridge_rom[i+2], cartridge_rom[i+3]]));
+        }
 
         PeripheralInterface {
             dram_addr: 0,
@@ -32,11 +40,13 @@ impl PeripheralInterface {
             dma_status: 0,
             io_busy: 0,
 
-            cartridge_rom: cartridge_rom,
+            cartridge_rom: word_rom,
             cartridge_rom_write: None,
 
             debug_buffer: vec![0; 0x200],
             debug_string: String::new(),
+
+            start_dma_tx: start_dma_tx,
         }
     }
 
@@ -132,19 +142,24 @@ impl PeripheralInterface {
 
                 let cart_addr = self.cart_addr & !0xF000_0000;
                 let mut end = cart_addr + value + 1;
-                if (cart_addr as usize) <= self.cartridge_rom.len() {
+                if (cart_addr as usize) <= self.cartridge_rom.len() * 4 {
                     // truncate dma
-                    end = cmp::min(self.cartridge_rom.len() as u32, end);
+                    end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
 
                     //let cart_data = &self.cartridge_rom[(self.cart_addr as usize)..end];
                     let dma_info = DmaInfo {
-                        source_address: cart_addr,
-                        dest_address: self.dram_addr,
-                        count: end - cart_addr,
+                        initiator     : "PI",
+                        source_address: self.cart_addr,
+                        dest_address  : self.dram_addr,
+                        count         : 1,
+                        length        : end - cart_addr,
+                        source_stride : 0,
+                        dest_stride   : 0
                     };
 
                     self.dma_status = 0x01;
-                    WriteReturnSignal::StartDMA(dma_info)
+                    self.start_dma_tx.send(dma_info).unwrap();
+                    WriteReturnSignal::None
                 } else {
                     WriteReturnSignal::None
                 }
@@ -188,11 +203,6 @@ impl PeripheralInterface {
 
         Ok(result)
     }
-
-    pub fn get_dma_info(&self, dma_info: &DmaInfo) -> &[u8] {
-        let end = dma_info.source_address + dma_info.count;
-        return &self.cartridge_rom[(dma_info.source_address as usize)..(end as usize)];
-    }
 }
 
 impl Addressable for PeripheralInterface {
@@ -218,13 +228,10 @@ impl Addressable for PeripheralInterface {
                 self.cartridge_rom_write = None;
                 Ok(value)
             } else {
-                if cartridge_rom_offset >= self.cartridge_rom.len() {
+                if cartridge_rom_offset >= self.cartridge_rom.len() * 4 {
                     Ok(0x00000000)
                 } else {
-                    Ok(((self.cartridge_rom[cartridge_rom_offset + 0] as u32) << 24)
-                        | ((self.cartridge_rom[cartridge_rom_offset + 1] as u32) << 16)
-                        | ((self.cartridge_rom[cartridge_rom_offset + 2] as u32) << 8)
-                        | (self.cartridge_rom[cartridge_rom_offset + 3] as u32))
+                    Ok(self.cartridge_rom[(cartridge_rom_offset >> 2) as usize])
                 }
             }
         } else {
@@ -310,6 +317,16 @@ impl Addressable for PeripheralInterface {
             Addressable::write_u8(self, value, offset)
         }
 	}
+
+    fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
+            let start = (offset & !0x1000_0000) >> 2;
+            let end = start + (length as usize >> 2);
+            Ok((&self.cartridge_rom[start..end]).to_vec())
+        } else {
+            todo!("probably not used ever");
+        }
+    }
 }
 
 

@@ -2009,14 +2009,10 @@ impl Cpu {
     }
 
     fn regimm_bgezal(&mut self) -> Result<(), InstructionFault> {
-        // compute condition before changing gpr31 rs can be 31...
+        // compute condition before changing gpr31 as rs can be 31...
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
-
-        // addresses are sign extended
         self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
-
         self.branch(condition);
-
         Ok(())
     }
 

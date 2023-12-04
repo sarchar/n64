@@ -1,5 +1,18 @@
 use std::cell::RefCell;
+use std::fs;
 use std::rc::Rc;
+
+pub mod cop1;
+pub mod cpu;
+pub mod debugger;
+pub mod mips;
+pub mod peripheral;
+pub mod pifrom;
+pub mod rcp;
+pub mod rdp;
+pub mod rdram;
+pub mod rsp;
+pub mod video;
 
 pub enum MemorySegment {
     UserSpace,
@@ -9,15 +22,8 @@ pub enum MemorySegment {
     KSeg3,
 }
 
-pub struct DmaInfo {
-    source_address: u32,
-    dest_address: u32,
-    count: u32
-}
-
 pub enum WriteReturnSignal {
-    None,
-    StartDMA(DmaInfo),
+    None
 }
 
 pub enum ReadWriteFault {
@@ -59,21 +65,15 @@ pub trait Addressable {
         self.write_u32(((value & 0xFF) << shift) | (word & !(0xFFu32 << shift)), offset & !0x03)
     }
 
-    /// TEMP 
-    fn print_debug_ipl2(&self) {}
-}
+    // block read/write functions. takes/returns a slice of block data to/from a given offset
+    fn read_block(&mut self, _offset: usize, _length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        Ok(vec![])
+    }
 
-pub mod cop1;
-pub mod cpu;
-pub mod debugger;
-pub mod mips;
-pub mod peripheral;
-pub mod pifrom;
-pub mod rcp;
-pub mod rdp;
-pub mod rdram;
-pub mod rsp;
-pub mod video;
+    fn write_block(&mut self, _offset: usize, _block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        Ok(WriteReturnSignal::None)
+    }
+}
 
 pub struct System {
     pub rcp: Rc<RefCell<rcp::Rcp>>,
@@ -82,14 +82,14 @@ pub struct System {
 
 impl System {
     pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str) -> System {
-        // load cartridge
-        let mut pi = peripheral::PeripheralInterface::new(cartridge_file_name);
+        // load cartridge into memory
+        let cartridge_rom = fs::read(cartridge_file_name).expect("Could not open cartridge ROM file");
 
         // load system rom. the pifrom needs to know what CIC chip the cart is using
-        let pif = pifrom::PifRom::new(boot_rom_file_name, &mut pi);
+        let boot_rom = fs::read(boot_rom_file_name).expect("Boot rom not found");
 
         // create the RCP and start it
-        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(pif, pi)));
+        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom)));
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
@@ -111,7 +111,14 @@ impl System {
     }
 
     pub fn step(&mut self) -> Result<(), cpu::InstructionFault> {
-        self.rcp.borrow_mut().step();
+        { // scope rcp borrow_mut()
+            let mut rcp = self.rcp.borrow_mut();
+            rcp.step();
+            if rcp.should_interrupt() {
+                panic!("need to signal int on cpu");
+            }
+        }
+
         self.cpu.step()
     }
 }
