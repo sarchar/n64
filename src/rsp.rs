@@ -17,7 +17,7 @@ const Cop0_DmaWriteLength: usize = 3;
 const _Cop0_Status        : usize = 4;
 const Cop0_DmaFull       : usize = 5;
 const Cop0_DmaBusy       : usize = 6;
-const _Cop0_Semaphore     : usize = 7;
+const Cop0_Semaphore     : usize = 7;
 const _Cop0_CmdStart      : usize = 8;
 const _Cop0_CmdEnd        : usize = 9;
 const _Cop0_CmdCurrent    : usize = 10;
@@ -32,8 +32,6 @@ const _Cop0_CmdTMemBusy   : usize = 15;
 pub struct Rsp {
     intbreak: bool,
     should_interrupt: bool,
-
-    semaphore: bool,
 
     core: Arc<Mutex<RspCpuCore>>,
     shared_state: Arc<RwLock<RspSharedState>>,
@@ -57,6 +55,7 @@ pub struct RspSharedState {
     dma_write_length: u32,
     dma_busy: bool,
     dma_full: bool,
+    semaphore: bool,
 }
 
 #[derive(Debug)]
@@ -77,6 +76,7 @@ struct RspCpuCore {
     instruction_table: [CpuInstruction; 64],
     special_table: [CpuInstruction; 64],
     regimm_table: [CpuInstruction; 32],
+    cop2_table: [CpuInstruction; 64],
 
     // multiple reader single writer memory
     mem: Arc<RwLock<Vec<u32>>>,
@@ -104,7 +104,6 @@ impl Rsp {
             intbreak: false,
             should_interrupt: false,
 
-            semaphore: false,
             core: core,
 
             mem: mem,
@@ -218,8 +217,9 @@ impl Rsp {
 
             // SP_SEMAPHORE
             0x4_001C => {
-                if !self.semaphore {
-                    self.semaphore = true;
+                let mut shared_state = self.shared_state.write().unwrap();
+                if !shared_state.semaphore {
+                    shared_state.semaphore = true;
                     0
                 } else {
                     1
@@ -314,7 +314,8 @@ impl Rsp {
             // SP_SEMAPHORE
             0x4_001C => {
                 if value == 0 {
-                    self.semaphore = false;
+                    let mut shared_state = self.shared_state.write().unwrap();
+                    shared_state.semaphore = false;
                 }
             },
 
@@ -387,6 +388,18 @@ impl Addressable for Rsp {
 
         Ok(WriteReturnSignal::None)
     }
+
+    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if offset < 0x2000 { // I/DRAM
+            let mut mem = self.mem.write().unwrap();
+            let (_, right) = mem.split_at_mut(offset >> 2);
+            let (left, _) = right.split_at_mut(block.len());
+            left.copy_from_slice(block);
+            Ok(WriteReturnSignal::None)
+        } else {
+            todo!("DMA into ${offset:8X}");
+        }
+    }
 }
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
@@ -441,6 +454,18 @@ impl RspCpuCore {
    /* 01_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 11_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved
+            ],
+
+            cop2_table: [
+               //   _000                _001                _010                _011                _100                _101                _110                _111
+   /* 000_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 010_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 011_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 100_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 101_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 111_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown 
             ],
         };
 
@@ -843,6 +868,16 @@ impl RspCpuCore {
                         shared_state.dma_busy as u32
                     },
 
+                    Cop0_Semaphore => {
+                        let mut shared_state = self.shared_state.write().unwrap();
+                        if !shared_state.semaphore {
+                            shared_state.semaphore = true;
+                            0
+                        } else {
+                            1
+                        }
+                    },
+
                     _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
                 };
                 Ok(())
@@ -864,19 +899,29 @@ impl RspCpuCore {
                         info!(target: "RSP", "DMA DRAM address set to ${:04X}", val & 0x00FF_FFFF);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_dram = val & 0x00FF_FFFF;
-
-                        let dma_info = DmaInfo::default();
-                        self.start_dma_tx.send(dma_info).unwrap();
-
                         Ok(())
                     },
 
-                    Cop0_DmaReadLength => {
+                    Cop0_DmaReadLength => { // RDRAM -> I/DRAM
                         info!(target: "RSP", "DMA read length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_read_length = val;
 
-                        let dma_info = DmaInfo::default();
+                        let length = ((val & 0x0FFF) | 0x07) + 1;
+                        let count  = ((val >> 12) & 0xFF) + 1;
+                        let skip   = (val >> 20) & 0xFFF;
+
+                        let dma_info = DmaInfo {
+                            initiator     : "RSP-READ",
+                            source_address: shared_state.dma_dram,
+                            dest_address  : shared_state.dma_cache | 0x0400_0000,
+                            count         : count,
+                            length        : length,
+                            source_stride : skip,
+                            dest_stride   : 0,
+                            completed     : None,
+                        };
+
                         self.start_dma_tx.send(dma_info).unwrap();
 
                         Ok(())
@@ -886,7 +931,12 @@ impl RspCpuCore {
                         info!(target: "RSP", "DMA write length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_write_length = val;
-                        Ok(())
+
+                        todo!();
+                        //let dma_info = DmaInfo::default();
+                        //self.start_dma_tx.send(dma_info).unwrap();
+
+                        //Ok(())
                     },
 
                     _ => todo!("unhandled cop0 register write $c{}", self.inst.rd),
@@ -895,7 +945,8 @@ impl RspCpuCore {
 
             _ => {
                 error!(target: "RSP", "unimplemented RSP COP0 instruction 0b{:02b}_{:03b}", cop0_op >> 3, cop0_op & 0x07);
-                Ok(())
+                todo!();
+                //Ok(())
             }
         }
     }
@@ -909,7 +960,26 @@ impl RspCpuCore {
     }
 
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
-        todo!("cop2!");
+        if (self.inst.v & (1 << 25)) != 0 {
+            let func = self.inst.v & 0x3F;
+            self.cop2_table[func as usize](self)
+        } else {
+            let cop2_op = (self.inst.v >> 21) & 0x1F;
+            match cop2_op {
+                _ => {
+                    error!(target: "RSP", "unimplemented RSP COP2 instruction 0b{:02b}_{:03b}", cop2_op >> 3, cop2_op & 0x07);
+                    todo!();
+                    //Ok(())
+                }
+            }
+        }
+    }
+
+    fn cop2_unknown(&mut self) -> Result<(), InstructionFault> {
+        let func = self.inst.v & 0x3F;
+        error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
+        todo!();
+        Ok(())
     }
 }
 

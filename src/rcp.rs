@@ -1,4 +1,5 @@
 use std::fmt;
+use std::mem;
 use std::sync::mpsc;
 
 #[allow(unused_imports)]
@@ -14,7 +15,6 @@ use crate::rdram::RdramInterface;
 use crate::rsp::Rsp;
 use crate::video::VideoInterface;
 
-#[derive(Clone, Copy, Default)]
 pub struct DmaInfo {
     pub initiator     : &'static str, // for debugging
     pub source_address: u32, // RCP physical address
@@ -23,6 +23,9 @@ pub struct DmaInfo {
     pub length        : u32, // length of a line
     pub source_stride : u32, // bytes to skip on the source after copy
     pub dest_stride   : u32, // bytes to skip on the dest after a copy 
+
+    // callback function to let the initiator know the DMA has completed
+    pub completed     : Option<mpsc::Sender<DmaInfo>>,
 }
 
 impl fmt::Debug for DmaInfo {
@@ -86,9 +89,15 @@ impl Rcp {
 
         // run all the DMAs for the cycle
         loop {
-            if let Some(dma_info) = self.should_dma() {
+            if let Some(mut dma_info) = self.should_dma() {
                 info!(target: "RCP", "starting dma, DmaInfo = {:?}", dma_info);
-                self.do_dma(dma_info);
+                self.do_dma(&dma_info);
+                let cb_maybe = mem::replace(&mut dma_info.completed, None);
+                if let Some(cb) = cb_maybe {
+                    info!(target: "RSP", "sending dma done");
+                    let _ = cb.send(dma_info).unwrap();
+                    info!(target: "RSP", "sent dma done");
+                }
                 continue;
             }
             break;
@@ -254,7 +263,7 @@ impl Rcp {
     }
 
     // Slow, maybe at some point we can do more of a direct memory copy
-    fn do_dma(&mut self, dma_info: DmaInfo) -> Result<(), ReadWriteFault> {
+    fn do_dma(&mut self, dma_info: &DmaInfo) -> Result<(), ReadWriteFault> {
         debug!(target: "RCP::DMA", "performing DMA!");
 
         if (dma_info.length % 4) != 0 {

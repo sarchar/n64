@@ -66,12 +66,12 @@ pub trait Addressable {
     }
 
     // block read/write functions. takes/returns a slice of block data to/from a given offset
-    fn read_block(&mut self, _offset: usize, _length: u32) -> Result<Vec<u32>, ReadWriteFault> {
-        Ok(vec![])
+    fn read_block(&mut self, offset: usize, _length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        todo!("read_block not implemented for address offset ${offset:08X}");
     }
 
-    fn write_block(&mut self, _offset: usize, _block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
-        Ok(WriteReturnSignal::None)
+    fn write_block(&mut self, offset: usize, _block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        todo!("write_block not implemented for address offset ${offset:08X}");
     }
 }
 

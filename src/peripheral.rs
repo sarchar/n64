@@ -23,7 +23,10 @@ pub struct PeripheralInterface {
     debug_buffer: Vec<u8>,
     debug_string: String,
 
-    start_dma_tx: mpsc::Sender<DmaInfo>
+    start_dma_tx: mpsc::Sender<DmaInfo>,
+
+    dma_completed_rx: mpsc::Receiver<DmaInfo>,
+    dma_completed_tx: mpsc::Sender<DmaInfo>,
 }
 
 impl PeripheralInterface {
@@ -33,6 +36,9 @@ impl PeripheralInterface {
         for i in (0..cartridge_rom.len()).step_by(4) {
             word_rom.push(u32::from_be_bytes([cartridge_rom[i+0], cartridge_rom[i+1], cartridge_rom[i+2], cartridge_rom[i+3]]));
         }
+
+        // need some dma completed channels
+        let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
         PeripheralInterface {
             dram_addr: 0,
@@ -47,6 +53,9 @@ impl PeripheralInterface {
             debug_string: String::new(),
 
             start_dma_tx: start_dma_tx,
+
+            dma_completed_rx: dma_completed_rx,
+            dma_completed_tx: dma_completed_tx,
         }
     }
 
@@ -55,13 +64,22 @@ impl PeripheralInterface {
             // PI_STATUS
             0x0_0010 => {
                 debug!(target: "PI", "read PI_STATUS");
+
+                // return dma in progress at least once
                 let ret = self.dma_status | self.io_busy;
-                if self.dma_status == 0x01 {
-                    self.dma_status = 0x08;
+
+                // if dma is running, check for dma completed
+                if (self.dma_status & 0x01) != 0 {
+                    if let Ok(_) = self.dma_completed_rx.try_recv() {
+                        info!(target: "RSP", "got dma done");
+                        self.dma_status = 0x08;
+                    }
                 }
+
                 if self.io_busy != 0 {
                     self.io_busy = 0;
                 }
+
                 Ok(ret)
             },
 
@@ -140,36 +158,56 @@ impl PeripheralInterface {
 
                 assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000); // right now only cartridge rom is valid for dma
 
-                let cart_addr = self.cart_addr & !0xF000_0000;
-                let mut end = cart_addr + value + 1;
-                if (cart_addr as usize) <= self.cartridge_rom.len() * 4 {
-                    // truncate dma
-                    end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
+                // TODO the logic determining DMA completions might not be correct, but it's fine for now.
 
-                    //let cart_data = &self.cartridge_rom[(self.cart_addr as usize)..end];
-                    let dma_info = DmaInfo {
-                        initiator     : "PI",
-                        source_address: self.cart_addr,
-                        dest_address  : self.dram_addr,
-                        count         : 1,
-                        length        : end - cart_addr,
-                        source_stride : 0,
-                        dest_stride   : 0
-                    };
+                // see if previous dma has completed
+                if (self.dma_status & 0x01) != 0 {
+                    if let Ok(_) = self.dma_completed_rx.try_recv() {
+                        self.dma_status = 0x08;
+                    }
+                }
 
-                    self.dma_status = 0x01;
-                    self.start_dma_tx.send(dma_info).unwrap();
-                    WriteReturnSignal::None
+                if (self.dma_status & 0x01) == 0 { // don't initiate another DMA if one is in progress
+                    let start = self.cart_addr & !0xF000_0000;
+                    let mut end = start + value + 1;
+                    if (start as usize) <= self.cartridge_rom.len() * 4 {
+                        // truncate dma
+                        end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
+
+                        let dma_info = DmaInfo {
+                            initiator     : "PI",
+                            source_address: self.cart_addr,
+                            dest_address  : self.dram_addr,
+                            count         : 1,
+                            length        : end - start,
+                            source_stride : 0,
+                            dest_stride   : 0,
+                            completed     : Some(self.dma_completed_tx.clone()),
+                        };
+
+                        self.dma_status |= 0x01;
+                        info!(target:"RSP", "sending dma_info");
+                        self.start_dma_tx.send(dma_info).unwrap();
+                        info!(target:"RSP", "sent dma_info");
+                        WriteReturnSignal::None
+                    } else {
+                        WriteReturnSignal::None
+                    }
                 } else {
-                    WriteReturnSignal::None
+                    panic!("might need to handle this case at some point");
                 }
             },
 
             // PI_STATUS
             0x0_0010 => {
                 debug!(target: "PI", "write PI_STATUS value=${:08X}", value);
-                if (value & 0x01) != 0 { debug!(target: "PI", "DMA reset"); }
-                if (value & 0x02) != 0 { debug!(target: "PI", "clear interrupt flag"); }
+
+                if (value & 0x01) != 0 { // DMA stop/reset
+                }
+
+                if (value & 0x02) != 0 { // clear INT flag 
+                    self.dma_status &= !0x08;
+                }
 
                 WriteReturnSignal::None
             },
