@@ -111,12 +111,15 @@ impl System {
     }
 
     pub fn step(&mut self) -> Result<(), cpu::InstructionFault> {
-        { // scope rcp borrow_mut()
+        let interrupt_mask = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
             rcp.step();
-            if rcp.should_interrupt() {
-                panic!("need to signal int on cpu");
-            }
+            rcp.should_interrupt()
+        };
+
+
+        if interrupt_mask != 0 {
+            let _ = self.cpu.external_interrupt(interrupt_mask);
         }
 
         self.cpu.step()

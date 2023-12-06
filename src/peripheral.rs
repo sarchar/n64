@@ -1,4 +1,5 @@
 use std::cmp;
+use std::mem;
 use std::str;
 use std::sync::mpsc;
 
@@ -27,6 +28,8 @@ pub struct PeripheralInterface {
 
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
+
+    interrupt_flag: bool,
 }
 
 impl PeripheralInterface {
@@ -56,7 +59,23 @@ impl PeripheralInterface {
 
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
+
+            interrupt_flag: false,
         }
+    }
+
+    pub fn step(&mut self) {
+        // if dma is running, check for dma completed
+        if let Ok(_) = self.dma_completed_rx.try_recv() {
+            if (self.dma_status & 0x01) != 0 {
+                self.dma_status = 0x08;
+                self.interrupt_flag = true;
+            }
+        }
+    }
+
+    pub fn should_interrupt(&mut self) -> bool {
+        mem::replace(&mut self.interrupt_flag, false)
     }
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
@@ -67,14 +86,6 @@ impl PeripheralInterface {
 
                 // return dma in progress at least once
                 let ret = self.dma_status | self.io_busy;
-
-                // if dma is running, check for dma completed
-                if (self.dma_status & 0x01) != 0 {
-                    if let Ok(_) = self.dma_completed_rx.try_recv() {
-                        info!(target: "RSP", "got dma done");
-                        self.dma_status = 0x08;
-                    }
-                }
 
                 if self.io_busy != 0 {
                     self.io_busy = 0;
@@ -186,9 +197,7 @@ impl PeripheralInterface {
                         };
 
                         self.dma_status |= 0x01;
-                        info!(target:"RSP", "sending dma_info");
                         self.start_dma_tx.send(dma_info).unwrap();
-                        info!(target:"RSP", "sent dma_info");
                         WriteReturnSignal::None
                     } else {
                         WriteReturnSignal::None

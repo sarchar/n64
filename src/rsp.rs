@@ -1,7 +1,9 @@
 #![allow(non_upper_case_globals)]
+use std::mem;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
+#[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 
 use crate::*;
@@ -14,7 +16,7 @@ const Cop0_DmaCache      : usize = 0; // IMEM or DMEM address for a DMA transfer
 const Cop0_DmaDram       : usize = 1; // RDRAM address for a DMA
 const Cop0_DmaReadLength : usize = 2;
 const Cop0_DmaWriteLength: usize = 3;
-const _Cop0_Status        : usize = 4;
+const Cop0_Status        : usize = 4;
 const Cop0_DmaFull       : usize = 5;
 const Cop0_DmaBusy       : usize = 6;
 const Cop0_Semaphore     : usize = 7;
@@ -30,32 +32,45 @@ const _Cop0_CmdTMemBusy   : usize = 15;
 /// N64 Reality Signal Processor
 /// Resides on the die of the RCP.
 pub struct Rsp {
-    intbreak: bool,
     should_interrupt: bool,
 
     core: Arc<Mutex<RspCpuCore>>,
     shared_state: Arc<RwLock<RspSharedState>>,
 
     wakeup_tx: Option<mpsc::Sender<()>>,
-    broke_rx: Option<mpsc::Receiver<()>>,
+    broke_rx: Option<mpsc::Receiver<bool>>,
 
     // access to RspCpuCore memory
     mem: Arc<RwLock<Vec<u32>>>,
+
+    start_dma_tx: mpsc::Sender<DmaInfo>,
+    dma_completed_rx: mpsc::Receiver<DmaInfo>,
 
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
     broke: bool,
 }
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct RspSharedState {
+    intbreak: bool,
+
     dma_cache: u32,
     dma_dram: u32,
     dma_read_length: u32,
     dma_write_length: u32,
     dma_busy: bool,
-    dma_full: bool,
+    dma_full: Option<DmaInfo>,
     semaphore: bool,
+
+    // current or most recent DMA, and the data that is readable in the DMA registers
+    dma_current_cache: u32,
+    dma_current_dram: u32,
+    dma_current_read_length: u32,
+    dma_current_write_length: u32,
+
+    // signals
+    signals: u32,
 }
 
 #[derive(Debug)]
@@ -83,7 +98,9 @@ struct RspCpuCore {
 
     shared_state: Arc<RwLock<RspSharedState>>,
 
+    broke_tx: Option<mpsc::Sender<bool>>,
     start_dma_tx: mpsc::Sender<DmaInfo>,
+    dma_completed_tx: mpsc::Sender<DmaInfo>,
 
     // running state
     halted: bool,
@@ -97,11 +114,13 @@ impl Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
+    
+        // dma_completed channel is created here and sent with every DmaInfo message
+        let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
-        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), start_dma_tx)));
+        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), start_dma_tx.clone(), dma_completed_tx)));
 
         Rsp {
-            intbreak: false,
             should_interrupt: false,
 
             core: core,
@@ -110,6 +129,9 @@ impl Rsp {
 
             wakeup_tx: None,
             broke_rx: None,
+
+            start_dma_tx: start_dma_tx,
+            dma_completed_rx: dma_completed_rx,
 
             shared_state: shared_state,
 
@@ -128,20 +150,23 @@ impl Rsp {
         self.broke_rx = Some(broke_rx);
     
         let core = Arc::clone(&self.core);
+        {
+            let mut c = core.lock().unwrap();
+            c.broke_tx = Some(broke_tx);
+        }
 
         thread::spawn(move || {
             loop {
                 let mut c = core.lock().unwrap();
 
                 // halted can only be set while we don't have a lock, so check here
-                if c.halted || c.broke {
-                    let halted = c.halted;
+                if c.halted {
                     let broke = c.broke;
                     // drop the lock on the core and wait for a wakeup signal
                     drop(c);
 
                     // wait forever for a signal
-                    info!(target: "RSP", "RSP core halted (halted={}, broke={}), waiting for wakeup", halted, broke);
+                    info!(target: "RSP", "RSP core halted (broke={}), waiting for wakeup", broke);
                     let _ = wakeup_rx.recv().unwrap();
 
                     // running!
@@ -155,9 +180,6 @@ impl Rsp {
 
                         if c.broke { 
                             c.halted = true; // signal the core is halted before dropping the lock
-                            
-                            // write break signal to channel
-                            broke_tx.send(()).unwrap();
                             break; 
                         }
                     }
@@ -166,13 +188,34 @@ impl Rsp {
         });
     }
 
+    pub fn step(&mut self) {
+        if let Ok(_) = self.dma_completed_rx.try_recv() {
+            // we got a completed DMA, so if one is pending start it immediately
+            let mut shared_state = self.shared_state.write().unwrap();
+            shared_state.dma_busy = false;
+            if let Some(dma_info) = mem::replace(&mut shared_state.dma_full, None) {
+                shared_state.dma_current_cache = shared_state.dma_cache;
+                shared_state.dma_current_dram = shared_state.dma_dram;
+                shared_state.dma_current_read_length = shared_state.dma_read_length;
+                shared_state.dma_current_write_length = shared_state.dma_write_length;
+                shared_state.dma_busy = true;
+                self.start_dma_tx.send(dma_info).unwrap(); 
+            }
+        }
+    }
+
     pub fn is_broke(&mut self) -> bool {
         // check if BREAK happened
         if let Some(broke_rx) = &self.broke_rx {
-            if let Ok(_) = broke_rx.try_recv() {
-                self.broke = true;
-                if self.intbreak {
-                    self.should_interrupt = true;
+            if let Ok(set) = broke_rx.try_recv() {
+                self.broke = false;
+                if set {
+                    self.broke = true;
+                    self.halted = true;
+                    let shared_state = self.shared_state.read().unwrap();
+                    if shared_state.intbreak {
+                        self.should_interrupt = true;
+                    }
                 }
             }
         }
@@ -192,7 +235,7 @@ impl Rsp {
         let value = match offset {
             // SP_STATUS
             0x4_0010 => {
-                info!(target: "RSP", "read SP_STATUS");
+                //debug!(target: "RSP", "read SP_STATUS");
 
                 // update self.broke
                 let _ = self.is_broke();
@@ -202,15 +245,15 @@ impl Rsp {
                 ((self.halted as u32) << 0)
                     | ((self.broke as u32) << 1)
                     | ((shared_state.dma_busy as u32) << 2)
-                    | ((shared_state.dma_full as u32) << 3)
-                    | ((self.intbreak as u32) << 6)
+                    | ((shared_state.dma_full.is_some() as u32) << 3)
+                    | ((shared_state.intbreak as u32) << 6)
+                    | (shared_state.signals << 7)
             },
 
             // SP_DMA_BUSY
             0x4_0018 => {
-                debug!(target: "RSP", "read SP_DMA_BUSY");
+                //debug!(target: "RSP", "read SP_DMA_BUSY");
 
-                // mirror of DMA_BUSY in self.si_status
                 let shared_state = self.shared_state.read().unwrap();
                 shared_state.dma_busy as u32
             },
@@ -228,10 +271,10 @@ impl Rsp {
 
             // SP_PC
             0x8_0000 => {
-                debug!(target: "RSP", "read SP_PC");
+                //debug!(target: "RSP", "read SP_PC");
 
                 let core = self.core.lock().unwrap();
-                core.pc
+                core.next_instruction_pc
             },
 
             _ => {
@@ -244,14 +287,16 @@ impl Rsp {
         Ok(value)
     }
 
-    fn write_register(&mut self, value: u32, offset: usize) {
+    fn write_register(&mut self, mut value: u32, offset: usize) {
         match offset {
             // SP_STATUS 
             0x4_0010 => {
-                debug!(target: "RSP", "write SP_STATUS value=${:08X}", value);
+                //debug!(target: "RSP", "write SP_STATUS value=${:08X}", value);
 
                 // CLR_BROKE: clear the broke flag
                 if (value & 0x04) != 0 {
+                    self.broke = false; // set local copy
+
                     if let Some(broke_rx) = &self.broke_rx {
                         // clear the broke_rx channel (which should never have more than 1 in it
                         // because a break halts the cpu). I imagine if you set set CLR_BROKE
@@ -274,11 +319,11 @@ impl Rsp {
                             sum = sum.wrapping_add(v as u32);
                         }
                     }
-                    info!(target: "RSP", "sum of IMEM at start: ${:08X} (if this value is 0x9E2, it is a bootcode program)", sum);
 
+                    info!(target: "RSP", "sum of IMEM at start: ${:08X} (if this value is 0x9E2, it is a bootcode program)", sum);
                     {
                         let core = self.core.lock().unwrap();
-                        info!(target: "RSP", "starting RSP at PC=${:08X}", core.pc);
+                        info!(target: "RSP", "starting RSP at PC=${:08X}", core.next_instruction_pc);
                     }
 
                     // set local copy
@@ -302,12 +347,33 @@ impl Rsp {
 
                 // SET_INTBREAK: enable the interrupt on BREAK signal
                 if (value & 0x100) != 0 {
-                    self.intbreak = true;
+                    let mut shared_state = self.shared_state.write().unwrap();
+                    shared_state.intbreak = true;
                 }
 
                 // CLR_INTBREAK: disable the interrupt on break signal
                 if (value & 0x80) != 0 {
-                    self.intbreak = false;
+                    let mut shared_state = self.shared_state.write().unwrap();
+                    shared_state.intbreak = false;
+                }
+
+                // loop over the signals
+                value >>= 9; // signals start at bit 9
+                if value != 0 {
+                    let mut shared_state = self.shared_state.write().unwrap();
+                    for i in 0..16 {
+                        // i loops over 8 signals each CLEAR then SET bits
+                        // so signal number is i/2, and SET when i is odd, otherwise clear
+                        if (value & (1 << i)) == 0 { continue; }
+
+                        let signo = i >> 1;
+
+                        if (i & 0x01) == 0 { // CLEAR signal
+                            shared_state.signals &= !(1 << signo);
+                        } else { // SET signal
+                            shared_state.signals |= 1 << signo;
+                        }
+                    }
                 }
             },
 
@@ -321,10 +387,11 @@ impl Rsp {
 
             // SP_PC
             0x8_0000 => {
-                debug!(target: "RSP", "write SP_PC value=${:08X}", value);
+                //debug!(target: "RSP", "write SP_PC value=${:08X}", value);
 
                 let mut core = self.core.lock().unwrap();
                 core.pc = value & 0x0FFC;
+                core.prefetch();
             },
 
             _ => {
@@ -404,7 +471,7 @@ impl Addressable for Rsp {
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
-    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, start_dma_tx: mpsc::Sender<DmaInfo>) -> Self {
+    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, start_dma_tx: mpsc::Sender<DmaInfo>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
         let mut core = RspCpuCore {
             pc: 0,
             current_instruction_pc: 0,
@@ -419,7 +486,9 @@ impl RspCpuCore {
 
             mem: mem,
             shared_state: shared_state,
+            broke_tx: None,
             start_dma_tx: start_dma_tx,
+            dma_completed_tx: dma_completed_tx,
 
             halted: false,
             broke: false,
@@ -430,7 +499,7 @@ impl RspCpuCore {
    /* 001_ */   Cpu::inst_addi    , Cpu::inst_addiu   , Cpu::inst_slti    , Cpu::inst_sltiu   , Cpu::inst_andi    , Cpu::inst_ori     , Cpu::inst_xori    , Cpu::inst_lui     ,
    /* 010_ */   Cpu::inst_cop0    , Cpu::inst_reserved, Cpu::inst_cop2    , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 011_ */   Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
-   /* 100_ */   Cpu::inst_lb      , Cpu::inst_lh      , Cpu::inst_reserved, Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_reserved, Cpu::inst_reserved,
+   /* 100_ */   Cpu::inst_lb      , Cpu::inst_lh      , Cpu::inst_reserved, Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_reserved, Cpu::inst_lw      , // LWU = LW on RSP
    /* 101_ */   Cpu::inst_sb      , Cpu::inst_sh      , Cpu::inst_reserved, Cpu::inst_sw      , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 110_ */   Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_lwc2    , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_reserved,
    /* 111_ */   Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_swc2    , Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_reserved
@@ -452,7 +521,7 @@ impl RspCpuCore {
                //   _000                 _001                 _010                 _011                 _100               _101                _110                _111
    /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 01_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
-   /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
+   /* 10_ */    Cpu::regimm_bltzal , Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved,
    /* 11_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved, Cpu::inst_reserved
             ],
 
@@ -480,12 +549,64 @@ impl RspCpuCore {
         self.prefetch()
     }
 
-    fn prefetch(&mut self) -> Result<(), ReadWriteFault> {
+    pub fn prefetch(&mut self) -> Result<(), ReadWriteFault> {
         self.next_instruction = self.read_u32(self.pc as usize | 0x1000)?; 
         self.next_instruction_pc = self.pc;
-        self.pc += 4;
+        self.pc = (self.pc + 4) & 0xFFC;
 
         Ok(())
+    }
+
+    // The RSP cpu supports unaligned reads, so we may have to do two fetches if on a word boundary
+    fn read_u32_wrapped(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
+        if (offset & 0x03) != 0 { // any offset other than 0 means two read_32s
+            let upper_bits = offset & 0xFFFF_F000;
+            let shift = (offset & 0x03) << 3;
+            Ok((self.read_u32(offset & !0x03)? << shift)
+                | (self.read_u32((((offset & !0x03) + 4) & 0xFFF) | upper_bits)? >> (32 - shift)))
+        } else {
+            self.read_u32(offset)
+        }
+    }
+
+    fn write_u32_wrapped(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (offset & 0x03) != 0 { // any offset other than 0 means two writes
+            let upper_bits = offset & 0xFFFF_F000;
+            let shift = (offset & 0x03) << 3;
+
+            let word = self.read_u32(offset & !0x03)?;
+            self.write_u32((word & !(0xFFFF_FFFF >> shift)) | (value >> shift), offset & !0x03)?;
+
+            let offset = (((offset & !0x03) + 4) & 0x0FFF) | upper_bits; // recompute offset to next byte, wrapping
+            let word = self.read_u32(offset)?;
+            self.write_u32((word & (0xFFFF_FFFF >> shift)) | (value << (32 - shift)), offset)
+        } else {
+            self.write_u32(value, offset)
+        }
+    }
+
+    fn read_u16_wrapped(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
+        if (offset & 0x03) == 3 { // only wraps to the next word with this one offset
+            let upper_bits = offset & 0xFFFF_F000;
+            Ok((((self.read_u32(offset & !0x03)? & 0x0000_00FF) << 8)
+                | (self.read_u32(((offset + 1) & 0xFFF) | upper_bits)? >> 24)) as u16)
+        } else {
+            let word = self.read_u32(offset & !0x03)?;
+            let shift = 16 - ((offset & 0x03) << 3);
+            Ok(((word >> shift) & 0xFFFF) as u16)
+        }
+    }
+
+    fn write_u16_wrapped(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (offset & 0x03) == 3 { // only wraps to the next word with this one offset
+            let upper_bits = offset & 0xFFFF_F000;
+            self.write_u8((value >> 8) & 0xFF, offset)?;
+            self.write_u8(value & 0xFF, ((offset + 1) & 0x0FFF) | upper_bits)
+        } else {
+            let word = self.read_u32(offset & !0x03)?;
+            let shift = (offset & 0x03) << 3;
+            self.write_u32((word & !(0xFFFF_0000 >> shift)) | ((value & 0xFFFF) << (16 - shift)), offset & !0x03)
+        }
     }
 
     fn step(&mut self) -> Result<(), InstructionFault> {
@@ -517,13 +638,13 @@ impl RspCpuCore {
         // update and increment PC
         self.current_instruction_pc = self.next_instruction_pc;
         self.next_instruction_pc = self.pc;
-        self.pc += 4;
+        self.pc = (self.pc + 4) & 0xFFC;
 
         // in delay slot flag
         self.is_delay_slot = self.next_is_delay_slot;
         self.next_is_delay_slot = false;
 
-        info!(target: "RSP", "${:08X}: inst ${:08X} (op=0b{:06b}", self.current_instruction_pc | 0x1000, inst, self.inst.op);
+        //info!(target: "RSP", "${:08X}: inst ${:08X} (op=0b{:06b}", self.current_instruction_pc | 0x1000, inst, self.inst.op);
 
         let result = match self.instruction_table[self.inst.op as usize](self) {
             // faults like Break, Unimplemented actually stop processing
@@ -606,7 +727,6 @@ impl RspCpuCore {
     }
 
     fn inst_bne(&mut self) -> Result<(), InstructionFault> {
-        info!(target: "RSP", "bne r{}, r{}, ${:04X}", self.inst.rs, self.inst.rt, self.inst.imm & 0xFFFF);
         let condition = self.gpr[self.inst.rs] != self.gpr[self.inst.rt];
         self.branch(condition);
         Ok(())
@@ -675,49 +795,49 @@ impl RspCpuCore {
 
     fn inst_lb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as i8) as u32;
+        self.gpr[self.inst.rt] = (self.read_u8(address as usize & 0x0FFF)? as i8) as u32;
         Ok(())
     }
 
     fn inst_lh(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.gpr[self.inst.rt] = (self.read_u16(address as usize)? as i16) as u32;
+        self.gpr[self.inst.rt] = (self.read_u16_wrapped(address as usize & 0x0FFF)? as i16) as u32;
         Ok(())
     }
 
     fn inst_lw(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.gpr[self.inst.rt] = self.read_u32(address as usize)?;
+        self.gpr[self.inst.rt] = self.read_u32_wrapped(address as usize & 0x0FFF)?;
         Ok(())
     }
 
     fn inst_lbu(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.gpr[self.inst.rt] = self.read_u8(address as usize)? as u32;
+        self.gpr[self.inst.rt] = self.read_u8(address as usize & 0x0FFF)? as u32;
         Ok(())
     }
 
     fn inst_lhu(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.gpr[self.inst.rt] = self.read_u16(address as usize)? as u32;
+        self.gpr[self.inst.rt] = self.read_u16_wrapped(address as usize & 0x0FFF)? as u32;
         Ok(())
     }
 
     fn inst_sb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.write_u8(self.gpr[self.inst.rt] as u32, address as usize)?;
+        self.write_u8(self.gpr[self.inst.rt] as u32, address as usize & 0x0FFF)?;
         Ok(())
     }
 
     fn inst_sh(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.write_u16(self.gpr[self.inst.rt], address as usize)?;
+        self.write_u16_wrapped(self.gpr[self.inst.rt], address as usize & 0x0FFF)?;
         Ok(())
     }
 
     fn inst_sw(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        self.write_u32(self.gpr[self.inst.rt], address as usize)?;
+        self.write_u32_wrapped(self.gpr[self.inst.rt], address as usize & 0x0FFF)?;
         Ok(())
     }
 
@@ -775,6 +895,12 @@ impl RspCpuCore {
 
     fn special_break(&mut self) -> Result<(), InstructionFault> {
         self.broke = true;
+                            
+        // write break signal to channel
+        if let Some(broke_tx) = &self.broke_tx {
+            broke_tx.send(true).unwrap();
+        }
+
         Ok(())
     }
 
@@ -838,6 +964,14 @@ impl RspCpuCore {
         Ok(())
     }
 
+    fn regimm_bltzal(&mut self) -> Result<(), InstructionFault> {
+        // compute condition before changing gpr31, as rs can be 31...
+        let condition = (self.gpr[self.inst.rs] as i32) < 0;
+        self.gpr[31] = self.pc; // unconditionally, the address after the delay slot is stored in the link register
+        self.branch(condition);
+        Ok(())
+    }
+
     fn regimm_bgez(&mut self) -> Result<(), InstructionFault> {
         let condition = (self.gpr[self.inst.rs] as i32) >= 0;
         self.branch(condition);
@@ -856,16 +990,31 @@ impl RspCpuCore {
         let cop0_op = (self.inst.v >> 21) & 0x1F;
         match cop0_op {
             0b00_000 => { // MFC
-                info!(target: "RSP", "mfc0 r{}, c{}", self.inst.rt, self.inst.rd);
                 self.gpr[self.inst.rt] = match self.inst.rd {
+                    Cop0_DmaDram => {
+                        let shared_state = self.shared_state.read().unwrap();
+                        shared_state.dma_current_dram
+                    },
+
                     Cop0_DmaFull => {
                         let shared_state = self.shared_state.read().unwrap();
-                        shared_state.dma_full as u32
+                        shared_state.dma_full.is_some() as u32
                     },
 
                     Cop0_DmaBusy => {
                         let shared_state = self.shared_state.read().unwrap();
                         shared_state.dma_busy as u32
+                    },
+
+                    Cop0_Status => {
+                        let shared_state = self.shared_state.read().unwrap();
+
+                        ((self.halted as u32) << 0) // never true if we get here
+                            | ((self.broke as u32) << 1)  // might be true if broke flag isn't cleared?
+                            | ((shared_state.dma_busy as u32) << 2)
+                            | ((shared_state.dma_full.is_some() as u32) << 3)
+                            | ((shared_state.intbreak as u32) << 6)
+                            | (shared_state.signals << 7)
                     },
 
                     Cop0_Semaphore => {
@@ -884,7 +1033,7 @@ impl RspCpuCore {
             },
 
             0b00_100 => { // MTC
-                let val = self.gpr[self.inst.rt];
+                let mut val = self.gpr[self.inst.rt];
 
                 // fix bits of the various registers
                 match self.inst.rd {
@@ -919,10 +1068,21 @@ impl RspCpuCore {
                             length        : length,
                             source_stride : skip,
                             dest_stride   : 0,
-                            completed     : None,
+                            completed     : Some(self.dma_completed_tx.clone()),
                         };
 
-                        self.start_dma_tx.send(dma_info).unwrap();
+                        if shared_state.dma_busy {
+                            if shared_state.dma_full.is_none() {
+                                shared_state.dma_full = Some(dma_info);
+                            }
+                        } else {
+                            shared_state.dma_current_cache = shared_state.dma_cache;
+                            shared_state.dma_current_dram = shared_state.dma_dram;
+                            shared_state.dma_current_read_length = shared_state.dma_read_length;
+                            shared_state.dma_current_write_length = shared_state.dma_write_length;
+                            shared_state.dma_busy = true;
+                            self.start_dma_tx.send(dma_info).unwrap();
+                        }
 
                         Ok(())
                     },
@@ -937,6 +1097,47 @@ impl RspCpuCore {
                         //self.start_dma_tx.send(dma_info).unwrap();
 
                         //Ok(())
+                    },
+
+                    Cop0_Status => {
+                        info!(target: "RSP", "Cop0_Status write value ${:08X}", val);
+
+                        // CLR_BROKE
+                        if (val & 0x04) != 0 {
+                            self.broke = false;
+                            if let Some(broke_tx) = &self.broke_tx {
+                                broke_tx.send(false).unwrap();
+                            }
+
+                            val &= !0x04;
+                        }
+
+                        if (val & 0x1FF) != 0 { // TODO
+                            todo!("wrote status bits ${val:08X}");
+                        }
+
+                        // loop over the signals
+                        val >>= 9; // signals start at bit 9
+                        if val != 0 {
+                            let mut shared_state = self.shared_state.write().unwrap();
+                            for i in 0..16 {
+                                // i loops over 8 signals each CLEAR then SET bits
+                                // so signal number is i/2, and SET when i is odd, otherwise clear
+                                if (val & (1 << i)) == 0 { continue; }
+
+                                let signo = i >> 1;
+
+                                if (i & 0x01) == 0 { // CLEAR signal
+                                    info!(target: "RSP", "clearing signal {}", signo);
+                                    shared_state.signals &= !(1 << signo);
+                                } else { // SET signal
+                                    info!(target: "RSP", "setting signal {}", signo);
+                                    shared_state.signals |= 1 << signo;
+                                }
+                            }
+                        }
+
+                        Ok(())
                     },
 
                     _ => todo!("unhandled cop0 register write $c{}", self.inst.rd),
@@ -979,7 +1180,6 @@ impl RspCpuCore {
         let func = self.inst.v & 0x3F;
         error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
         todo!();
-        Ok(())
     }
 }
 
@@ -1006,4 +1206,5 @@ impl Addressable for RspCpuCore {
             //.Err(ReadWriteFault::Invalid)
         }
     }
+
 }

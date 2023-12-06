@@ -578,11 +578,25 @@ impl Cpu {
         self.exception(ExceptionCode_CpU, false)
     }
 
-    fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
+    pub fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
         //println!("CPU: interrupt!");
         self.exception(ExceptionCode_Int, false)
+    }
+
+    // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
+    pub fn external_interrupt(&mut self, int_pins: u32) -> Result<(), InstructionFault> {
+        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | ((int_pins as u64) << 10);
+
+        // check if the interrupts are enabled
+        if ((int_pins as u64) & (self.cp0gpr[Cop0_Status] >> 10)) != 0 { // interrupt mask IM2-6
+            if (self.cp0gpr[Cop0_Status] & 0x01) != 0 { // interrupt enable IE
+                return self.exception(ExceptionCode_Int, false);
+            }
+        }
+
+        Ok(())
     }
 
     #[inline(always)]

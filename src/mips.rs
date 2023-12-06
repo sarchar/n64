@@ -1,4 +1,6 @@
 #![allow(non_upper_case_globals)]
+use std::mem;
+
 use tracing::{debug, error, info};
 
 use crate::*;
@@ -13,7 +15,6 @@ const IMask_DP: u32 = 5;
 pub struct MipsInterface {
     interrupt_mask: u32,
     interrupt     : u32,
-    should_interrupt: bool,
 }
 
 impl MipsInterface {
@@ -21,22 +22,21 @@ impl MipsInterface {
         MipsInterface { 
             interrupt_mask: 0,
             interrupt     : 0,
-            should_interrupt: false,
         }
     }
     
-    pub fn step(&mut self, rsp_interrupt: bool) {
+    pub fn step(&mut self, rsp_interrupt: bool, pi_interrupt: bool) {
         if rsp_interrupt && (self.interrupt_mask & IMask_SP) != 0 {
-            self.should_interrupt = true;
             self.interrupt |= 1 << IMask_SP;
-            self.should_interrupt = true;
+        }
+
+        if pi_interrupt && (self.interrupt_mask & IMask_PI) != 0 {
+            self.interrupt |= 1 << IMask_PI;
         }
     }
 
-    pub fn should_interrupt(&mut self) -> bool {
-        let r = self.should_interrupt;
-        self.should_interrupt = false;
-        r
+    pub fn should_interrupt(&mut self) -> u32 {
+        mem::replace(&mut self.interrupt, 0)
     }
 }
 

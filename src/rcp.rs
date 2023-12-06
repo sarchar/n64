@@ -15,6 +15,7 @@ use crate::rdram::RdramInterface;
 use crate::rsp::Rsp;
 use crate::video::VideoInterface;
 
+#[derive(Default)]
 pub struct DmaInfo {
     pub initiator     : &'static str, // for debugging
     pub source_address: u32, // RCP physical address
@@ -82,9 +83,14 @@ impl Rcp {
     }
 
     pub fn step(&mut self) {
+        self.rsp.step();
+
+        self.pi.step();
+
         // TODO move interrupts to mpsc?
         self.mi.step(
             self.rsp.should_interrupt(),
+            self.pi.should_interrupt(),
         );
 
         // run all the DMAs for the cycle
@@ -94,9 +100,7 @@ impl Rcp {
                 self.do_dma(&dma_info);
                 let cb_maybe = mem::replace(&mut dma_info.completed, None);
                 if let Some(cb) = cb_maybe {
-                    info!(target: "RSP", "sending dma done");
                     let _ = cb.send(dma_info).unwrap();
-                    info!(target: "RSP", "sent dma done");
                 }
                 continue;
             }
@@ -112,7 +116,7 @@ impl Rcp {
     }
 
 
-    pub fn should_interrupt(&mut self) -> bool {
+    pub fn should_interrupt(&mut self) -> u32 {
         self.mi.should_interrupt()
     }
 
