@@ -3,6 +3,9 @@ use std::mem;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+use core::arch::x86_64::*;
+
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 
@@ -86,6 +89,9 @@ struct RspCpuCore {
 
     gpr: [u32; 32],
 
+    v: [__m128i; 32],            // 32 128-bit VU registers
+    rotate_base: __m128i,
+
     inst: InstructionDecode,
 
     instruction_table: [CpuInstruction; 64],
@@ -161,12 +167,12 @@ impl Rsp {
 
                 // halted can only be set while we don't have a lock, so check here
                 if c.halted {
-                    let broke = c.broke;
+                    //.info!(target: "RSP", "RSP core halted (broke={}), waiting for wakeup", c.broke);
+
                     // drop the lock on the core and wait for a wakeup signal
                     drop(c);
 
                     // wait forever for a signal
-                    info!(target: "RSP", "RSP core halted (broke={}), waiting for wakeup", broke);
                     let _ = wakeup_rx.recv().unwrap();
 
                     // running!
@@ -320,11 +326,11 @@ impl Rsp {
                         }
                     }
 
-                    info!(target: "RSP", "sum of IMEM at start: ${:08X} (if this value is 0x9E2, it is a bootcode program)", sum);
-                    {
-                        let core = self.core.lock().unwrap();
-                        info!(target: "RSP", "starting RSP at PC=${:08X}", core.next_instruction_pc);
-                    }
+                    //.info!(target: "RSP", "sum of IMEM at start: ${:08X} (if this value is 0x9E2, it is a bootcode program)", sum);
+                    //.{
+                    //.    let core = self.core.lock().unwrap();
+                    //.    info!(target: "RSP", "starting RSP at PC=${:08X}", core.next_instruction_pc);
+                    //.}
 
                     // set local copy
                     self.halted = false;
@@ -391,7 +397,7 @@ impl Rsp {
 
                 let mut core = self.core.lock().unwrap();
                 core.pc = value & 0x0FFC;
-                core.prefetch();
+                let _ = core.prefetch(); // ignore errors here, since core.pc should never be invalid
             },
 
             _ => {
@@ -425,21 +431,21 @@ impl Addressable for Rsp {
             0x0000_0000..=0x0003_FFFF => {
                 let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
                 if mem_offset < (0x1000>>2) {
-                    const TASK_TYPE: usize = 0xFC0 >> 2;
-                    const DL_START: usize = 0xFF0 >> 2;
-                    const DL_LEN: usize = 0xFF4 >> 2;
-                    match mem_offset {
-                        DL_START => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
-                        },
-                        DL_LEN => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
-                        },
-                        TASK_TYPE => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
-                        },
-                        _ => {},
-                    }
+                    //const TASK_TYPE: usize = 0xFC0 >> 2;
+                    //const DL_START: usize = 0xFF0 >> 2;
+                    //const DL_LEN: usize = 0xFF4 >> 2;
+                    //.match mem_offset {
+                    //.    DL_START => {
+                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
+                    //.    },
+                    //.    DL_LEN => {
+                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
+                    //.    },
+                    //.    TASK_TYPE => {
+                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
+                    //.    },
+                    //.    _ => {},
+                    //.}
                 } else {
                     //info!(target: "RSPMEM", "write value=${:08X} offset=${:08X}", value, offset);
                 }
@@ -481,6 +487,9 @@ impl RspCpuCore {
             next_is_delay_slot: false,
 
             gpr: [0u32; 32],
+
+            v: [unsafe { _mm_setzero_si128() }; 32],
+            rotate_base: unsafe { _mm_set_epi8(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16) },
 
             inst: InstructionDecode::default(),
 
@@ -1152,11 +1161,423 @@ impl RspCpuCore {
         }
     }
 
+    #[inline(always)]
+    fn v_byte(src: &__m128i, element: u8) -> u8 {
+        // that the second parameter to _mm_extract_epi8 is const is unfortunate
+        (unsafe { match element & 0x0F {
+             0 => _mm_extract_epi8(*src, 15),  1 => _mm_extract_epi8(*src, 14),  2 => _mm_extract_epi8(*src, 13),
+             3 => _mm_extract_epi8(*src, 12),  4 => _mm_extract_epi8(*src, 11),  5 => _mm_extract_epi8(*src, 10),
+             6 => _mm_extract_epi8(*src,  9),  7 => _mm_extract_epi8(*src,  8),  8 => _mm_extract_epi8(*src,  7),
+             9 => _mm_extract_epi8(*src,  6), 10 => _mm_extract_epi8(*src,  5), 11 => _mm_extract_epi8(*src,  4),
+            12 => _mm_extract_epi8(*src,  3), 13 => _mm_extract_epi8(*src,  2), 14 => _mm_extract_epi8(*src,  1),
+            15 => _mm_extract_epi8(*src,  0),  _ => 0,
+        }}) as u8
+    }
+
+    #[inline(always)]
+    fn v_short(src: &__m128i, element: u8) -> u16 {
+        // that the second parameter to _mm_extract_epi8 is const is unfortunate
+        (unsafe { match element & 0x07 {
+            0 => _mm_extract_epi16(*src, 7), 1 => _mm_extract_epi16(*src, 6), 2 => _mm_extract_epi16(*src, 5),
+            3 => _mm_extract_epi16(*src, 4), 4 => _mm_extract_epi16(*src, 3), 5 => _mm_extract_epi16(*src, 2),
+            6 => _mm_extract_epi16(*src, 1), 7 => _mm_extract_epi16(*src, 0), _ => 0,
+        }}) as u16
+    }
+
+    #[inline(always)]
+    fn v_long(src: &__m128i, element: u8) -> u32 {
+        // that the second parameter to _mm_extract_epi8 is const is unfortunate
+        (unsafe { match element & 0x03 {
+            0 => _mm_extract_epi32(*src, 3), 1 => _mm_extract_epi32(*src, 2), 
+            2 => _mm_extract_epi32(*src, 1), 3 => _mm_extract_epi32(*src, 0), 
+            _ => 0,
+        }}) as u32
+    }
+
+    #[inline(always)]
+    fn v_double(src: &__m128i, element: u8) -> u64 {
+        // that the second parameter to _mm_extract_epi8 is const is unfortunate
+        (unsafe { 
+            if (element & 0x01) != 0 { 
+                _mm_extract_epi64(*src, 0) 
+            } else { 
+                _mm_extract_epi64(*src, 1)  
+            }
+        }) as u64
+    }
+
+    // byte_element essentially causes a left rotate
+    #[inline(always)]
+    fn v_quad(&mut self, vt: usize, byte_element: u8) -> u128 {
+        let src = &self.v[vt];
+        let d = ((Self::v_double(src, 0) as u128) << 64) | (Self::v_double(src, 1) as u128);
+
+        // rotate d by `element` bytes
+        if byte_element != 0 {
+            let shift = byte_element * 8;
+            (d << shift) | (d >> (128 - shift))
+        } else {
+            d
+        }
+    }
+
+    // get u128 from __m128i
+    #[inline(always)]
+    fn v_as_u128(src: &__m128i) -> u128 {
+        unsafe {
+            ((_mm_extract_epi64(*src, 0) as u64) as u128)
+                | (((_mm_extract_epi64(*src, 1) as u64) as u128) << 64)
+        }
+    }
+
+    #[inline(always)]
+    fn v_reversed(src: &__m128i) -> __m128i {
+        unsafe {
+            _mm_shuffle_epi8(*src, _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+        }
+    }
+
+    // returns __m128i that's been left-rotated
+    // TODO I haven't found a way to do a full variable bit shift on __m128i yet
+    // _mm_bslli_si128 exists, but requires a constant value shift
+    // and _mm_sllv_ doesn't have an si128 version
+    fn v_left_rotated(&self, v: &__m128i, byte_shift: u8) -> __m128i {
+        // rotate_base is the array 15..0 with 16 added to all positions, because
+        // byte_shift will be a value 0-15 and is subtracted from the array
+        // since _mm_shuffle_epi8 wraps the byte indices
+        unsafe {
+            let shuffle = _mm_sub_epi8(self.rotate_base, _mm_set1_epi8((byte_shift & 0x0F) as i8));
+            _mm_shuffle_epi8(*v, shuffle)
+        }
+    }
+
     fn inst_lwc2(&mut self) -> Result<(), InstructionFault> {
+        let lwc_op = self.inst.rd; // the Rd field contains a function code for which store operation is being done
+        let offset = (((self.inst.v & 0x7F) | ((self.inst.v & 0x40) << 1)) as i8) as u32; // signed 7-bit offset
+        let _e = (self.inst.v >> 7) & 0x0F;
+
+        match lwc_op {
+            0b00_100 => { // LQV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let b0 = self.read_u32_wrapped((address +  0) & 0x0FFF)? as i32;
+                let b1 = self.read_u32_wrapped((address +  4) & 0x0FFF)? as i32;
+                let b2 = self.read_u32_wrapped((address +  8) & 0x0FFF)? as i32;
+                let b3 = self.read_u32_wrapped((address + 12) & 0x0FFF)? as i32;
+                self.v[self.inst.rt as usize] = unsafe { _mm_set_epi32(b0, b1, b2, b3) };
+                //.let rt = self.inst.rt;
+                //.let rs = self.inst.rs;
+                //.info!(target: "RSP", "LQV v{}, ${:04X}(r{}) // v{} = ${:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}", rt, offset, rs, rt,
+                //.    self.v_short(rt as usize, 0), self.v_short(rt as usize, 1), self.v_short(rt as usize, 2), self.v_short(rt as usize, 3),
+                //.    self.v_short(rt as usize, 4), self.v_short(rt as usize, 5), self.v_short(rt as usize, 6), self.v_short(rt as usize, 7));
+            },
+
+            _ => {
+                error!(target: "RSP", "unknown LWC2 operation 0b{:02b}_{:03b}", lwc_op >> 3, lwc_op & 0x07);
+                todo!();
+            }
+        }
+
         Ok(())
     }
 
     fn inst_swc2(&mut self) -> Result<(), InstructionFault> {
+        let swc_op = self.inst.rd; // the Rd field contains a function code for which store operation is being done
+        let offset = (((self.inst.v & 0x7F) | ((self.inst.v & 0x40) << 1)) as i8) as u32; // signed 7-bit offset
+        let element = ((self.inst.v >> 7) & 0x0F) as u8;
+
+        match swc_op {
+            0b00_000 => { // SBV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset) as usize;
+                let byte = Self::v_byte(&self.v[self.inst.rt], element);
+                self.write_u8(byte as u32, address & 0x0FFF)?;
+            },
+
+            0b00_001 => { // SSV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 1) as usize;
+                let copy = self.v[self.inst.rt];
+                let short = Self::v_short(&self.v_left_rotated(&copy, element), 0);
+                self.write_u16_wrapped(short as u32, address & 0x0FFF)?;
+            },
+
+            0b00_010 => { // SLV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 2) as usize;
+                let copy = self.v[self.inst.rt];
+                let long = Self::v_long(&self.v_left_rotated(&copy, element), 0);
+                self.write_u32_wrapped(long, address & 0x0FFF)?;
+            },
+
+            0b00_011 => { // SDV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+                let copy = self.v[self.inst.rt];
+                let double = Self::v_double(&self.v_left_rotated(&copy, element), 0);
+                self.write_u32_wrapped((double >> 32) as u32, address & 0x0FFF)?;
+                self.write_u32_wrapped(double as u32, (address + 4) & 0x0FFF)?;
+            },
+
+            0b00_100 => { // SQV vt, offset(base)
+                let mut address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let mut d = self.v_quad(self.inst.rt as usize, element);
+
+                let mut byte_count = ((address & !0x0F) + 15) - address  + 1;
+                while byte_count >= 4 {
+                    self.write_u32_wrapped((d >> 96) as u32, address & 0x0FFF)?;
+                    d <<= 32;
+                    address += 4;
+                    byte_count -= 4;
+                }
+
+                match byte_count {
+                    3 => {
+                        self.write_u16_wrapped(((d >> 112) as u16) as u32, address & 0x0FFF)?;
+                        self.write_u8(((d >> 104) as u8) as u32, (address + 2) & 0x0FFF)?;
+                    },
+                    2 => {
+                        self.write_u16_wrapped(((d >> 112) as u16) as u32, address & 0x0FFF)?;
+                    },
+                    1 => {
+                        self.write_u8(((d >> 120) as u8) as u32, address & 0x0FFF)?;
+                    },
+                    _ => {},
+                };
+            },
+
+            0b00_101 => { // SRV vt[element], offset(base)
+                let mut address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let d = self.v_quad(self.inst.rt as usize, element);
+
+                let mut byte_count = address & 0x0F;
+                let start_byte = 16 - byte_count;
+
+                // rotate d again, and then perform the same as SQV
+                let mut d = if start_byte != 0 {
+                    let shift = start_byte * 8;
+                    (d << shift) | (d >> (128 - shift))
+                } else {
+                    d
+                };
+
+                // write starts at the quad word aligned address and writes byte_count bytes
+                address &= !0x0F;
+
+                while byte_count >= 4 {
+                    self.write_u32_wrapped((d >> 96) as u32, address & 0x0FFF)?;
+                    d <<= 32;
+                    address += 4;
+                    byte_count -= 4;
+                }
+
+                match byte_count {
+                    3 => {
+                        self.write_u16_wrapped(((d >> 112) as u16) as u32, address & 0x0FFF)?;
+                        self.write_u8(((d >> 104) as u8) as u32, (address + 2) & 0x0FFF)?;
+                    },
+                    2 => {
+                        self.write_u16_wrapped(((d >> 112) as u16) as u32, address & 0x0FFF)?;
+                    },
+                    1 => {
+                        self.write_u8(((d >> 120) as u8) as u32, address & 0x0FFF)?;
+                    },
+                    _ => {},
+                };
+            },
+
+            // Store packed vector
+            0b00_110 => { // SPV vt[e], offset(base)
+                //info!(target: "RSP", "spv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+
+                // we have to shift right by 8 (and also by 7 if element is not 0)
+                // the datasheet says element should be zero, but it doesn't have to be and there's weird behavior when its not
+                let src = &self.v[self.inst.rt as usize];
+
+                let shift8 = unsafe { _mm_srli_epi16(*src, 8) };
+                let shift7 = unsafe { _mm_srli_epi16(*src, 7) };
+
+                // we need to extract the low byte of each of the 8 elements into the lower 64-bits of a new quadword
+                let shift8 = unsafe {
+                    let shuffled = _mm_shuffle_epi8(shift8, _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 14, 12, 10, 8, 6, 4, 2, 0));
+                    _mm_extract_epi64(shuffled, 0) as u64
+                };
+
+                let shift7 = unsafe {
+                    let shuffled = _mm_shuffle_epi8(shift7, _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 14, 12, 10, 8, 6, 4, 2, 0));
+                    _mm_extract_epi64(shuffled, 0) as u64
+                };
+
+                // combine shift8 and shift7 into one 128-bit word, and rotate it
+                let d = (shift8 as u128) << 64 | (shift7 as u128);
+                let d = if element != 0 {
+                    (d << (element * 8)) | (d >> (128 - (element * 8)))
+                } else {
+                    d
+                };
+
+                // write the upper packed 8 bytes to memory
+                self.write_u32_wrapped((d >> 96) as u32, (address + 0) & 0x0FFF)?;
+                self.write_u32_wrapped((d >> 64) as u32, (address + 4) & 0x0FFF)?;
+            },
+
+            0b00_111 => { // suv vt[element], offset(base)
+                //info!(target: "RSP", "spv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+
+                // we have to shift right by 8 (and also by 7 if element is not 0)
+                // the datasheet says element should be zero, but it doesn't have to be and there's weird behavior when its not
+                let src = &self.v[self.inst.rt as usize];
+
+                let shift8 = unsafe { _mm_srli_epi16(*src, 8) };
+                let shift7 = unsafe { _mm_srli_epi16(*src, 7) };
+
+                // we need to extract the low byte of each of the 8 elements into the lower 64-bits of a new quadword
+                let shift8 = unsafe {
+                    let shuffled = _mm_shuffle_epi8(shift8, _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 14, 12, 10, 8, 6, 4, 2, 0));
+                    _mm_extract_epi64(shuffled, 0) as u64
+                };
+
+                let shift7 = unsafe {
+                    let shuffled = _mm_shuffle_epi8(shift7, _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 14, 12, 10, 8, 6, 4, 2, 0));
+                    _mm_extract_epi64(shuffled, 0) as u64
+                };
+
+                // combine shift8 and shift7 into one 128-bit word, and rotate it
+                // for SUV, shift7 is stored first
+                let d = (shift7 as u128) << 64 | (shift8 as u128);
+                let d = if element != 0 {
+                    (d << (element * 8)) | (d >> (128 - (element * 8)))
+                } else {
+                    d
+                };
+
+                // write the upper packed 8 bytes to memory
+                self.write_u32_wrapped((d >> 96) as u32, (address + 0) & 0x0FFF)?;
+                self.write_u32_wrapped((d >> 64) as u32, (address + 4) & 0x0FFF)?;
+            },
+
+            0b01_000 => { // SHV vt[element], offset(base)
+                //info!(target: "RSP", "shv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let offset = address & 0x07;
+                let addr_base = address & !0x07;
+
+                // shift all elements right 7, take the lower bytes of each elements
+                // then write those bytes to every 2nd byte of memory
+                let src = &self.v[self.inst.rt as usize];
+                let rotated = self.v_left_rotated(src, element);
+                let shifted = unsafe { _mm_srli_epi16(rotated, 7) };
+                let shuffled = unsafe {
+                    // i'm extracting the bytes in reverse, so that shifting them and extracting them is simpler
+                    _mm_shuffle_epi8(shifted, _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 6, 8, 10, 12, 14))
+                };
+
+                let mut d = unsafe { 
+                    _mm_extract_epi64(shuffled, 0) as u64 
+                };
+
+                for i in 0..8 {
+                    let addr = addr_base + ((offset + i * 2) & 0x0F);
+                    self.write_u8((d as u8) as u32, addr & 0x0FFF)?;
+                    d >>= 8;
+                }
+            },
+
+            0b01_001 => { // SFV vt[element], offset(base)
+                //info!(target: "RSP", "sfv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let offset = address & 0x07;
+                let addr_base = address & !0x07;
+
+                // only certain element values work here
+                const VALID: [bool; 16] = [true, true, false, false, true, true, false, false, true, false, false, true, true, false, false, true];
+
+                // shift all elements right 7, take a certain group of four elements
+                // then write those bytes to every 4th byte of memory
+                let mut d = if VALID[element as usize] {
+                    let src = &self.v[self.inst.rt as usize];
+                    let shifted = unsafe { _mm_srli_epi16(*src, 7) };
+                    let shuffled = unsafe {
+                        // i'm extracting the bytes in reverse, so that shifting them and extracting them is simpler
+                        _mm_shuffle_epi8(shifted, match element {
+                                // the element bytes we want are the low bytes of the word
+                                // element 0th, 1st, 2nd, ...
+                                // byte     14,  12,  10,  8,  6,  4,  2,  0
+                                // notice they wrap within the half-vector
+                                 0 | 15 => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  8, 10, 12, 14), // 0, 1, 2, 3
+                                 1      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  4,  6,  0,  2), // 6, 7, 4, 5
+                                 4      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14,  8, 10, 12), // 1, 2, 3, 0
+                                 5      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  2,  4,  6,  0), // 7, 4, 5, 6
+                                 8      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  0,  2,  4,  6), // 4, 5, 6, 7
+                                11      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 12, 14,  8), // 3, 0, 1, 2
+                                12      => _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  6,  0,  2,  4), // 5, 6, 7, 4
+                                _ => _mm_setzero_si128(),
+                            }
+                        )
+                    };
+
+                    (unsafe { _mm_extract_epi32(shuffled, 0) }) as u32
+                } else {
+                    0
+                };
+
+                for i in 0..4 {
+                    let addr = addr_base + ((offset + i * 4) & 0x0F);
+                    self.write_u8((d as u8) as u32, addr & 0x0FFF)?;
+                    d >>= 8;
+                }
+            },
+
+            0b01_010 => { // SWV vt[element], offset(base)
+                //info!(target: "RSP", "swv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let offset = address & 0x07;
+                let addr_base = address & !0x07;
+
+                // get vt rotated by `element` amount, and then rotate and store 
+                let src = &self.v[self.inst.rt];
+                let mut d = Self::v_as_u128(&Self::v_reversed(&self.v_left_rotated(src, element)));
+
+                for i in 0..16 {
+                    self.write_u8((d as u8) as u32, (addr_base + ((offset + i) & 0x0F)) & 0x0FFF)?;
+                    d >>= 8;
+
+                    // want element `element + i` in rightmost byte, and sure would be nice to have a non-const extract
+                    //.let src = &self.v[self.inst.rt];
+                    //.let mut rotated = self.v_left_rotated(src, element + (i as u8) + 1);
+                    //.let e = unsafe { _mm_extract_epi8(rotated, 0) } as u8;
+                    //.self.write_u8((e as u8) as u32, (addr_base + ((offset + i) & 0x0F)) & 0x0FFF)?;
+                }
+            },
+
+            0b01_011 => { // STV vt[element], offset(base)
+                //info!(target: "RSP", "stv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let addr_offset = address & 0x07;
+                let addr_base = address & !0x07;
+                let v_base = self.inst.rt & !0x07;
+
+                for i in 0..8 {
+                    // src register is current slice (i) shifted by selected element, wrapping within group of 8 VU regs
+                    let src = &self.v[v_base | ((i + (element >> 1)) & 0x07) as usize];
+
+                    // grab the i'th element into the left-most index
+                    let rotated = self.v_left_rotated(src, i * 2);
+
+                    // extract it
+                    let e = unsafe { _mm_extract_epi16(rotated, 7) } as u16;
+
+                    // can't use write_u16_wrapped because we need to wrap within a 16 byte block, 
+                    // so write upper and lower bytes individually
+                    let offset = (addr_offset + (i * 2) as usize) & 0x0F;
+                    self.write_u8(((e >> 8) as u8) as u32, (addr_base + ((offset    )       )) & 0x0FFF)?;
+                    self.write_u8(((e >> 0) as u8) as u32, (addr_base + ((offset + 1) & 0x0F)) & 0x0FFF)?;
+                }
+            },
+
+            _ => {
+                error!(target: "RSP", "unknown SWC2 operation 0b{:02b}_{:03b}", swc_op >> 3, swc_op & 0x07);
+                todo!();
+            }
+        };
+
         Ok(())
     }
 
