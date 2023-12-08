@@ -97,7 +97,11 @@ impl Rcp {
         loop {
             if let Some(mut dma_info) = self.should_dma() {
                 info!(target: "RCP", "starting dma, DmaInfo = {:?}", dma_info);
-                self.do_dma(&dma_info);
+
+                if let Err(_) = self.do_dma(&dma_info) {
+                    todo!("handle dma error");
+                }
+
                 let cb_maybe = mem::replace(&mut dma_info.completed, None);
                 if let Some(cb) = cb_maybe {
                     let _ = cb.send(dma_info).unwrap();
