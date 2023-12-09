@@ -88,6 +88,7 @@ struct RspCpuCore {
     next_is_delay_slot: bool,    // set to true on branching instructions
 
     gpr: [u32; 32],
+    ccr: [u32; 4],
 
     v: [__m128i; 32],            // 32 128-bit VU registers
     rotate_base: __m128i,
@@ -487,6 +488,7 @@ impl RspCpuCore {
             next_is_delay_slot: false,
 
             gpr: [0u32; 32],
+            ccr: [0u32; 4],
 
             v: [unsafe { _mm_setzero_si128() }; 32],
             rotate_base: unsafe { _mm_set_epi8(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16) },
@@ -1175,6 +1177,68 @@ impl RspCpuCore {
     }
 
     #[inline(always)]
+    fn v_insert_byte(src: &__m128i, byte: u8, element: u8) -> __m128i {
+        unsafe { 
+            // sure do which we had non-const versions...
+            match element {
+                 0 => _mm_insert_epi8(*src, byte as i32, 15),
+                 1 => _mm_insert_epi8(*src, byte as i32, 14),
+                 2 => _mm_insert_epi8(*src, byte as i32, 13),
+                 3 => _mm_insert_epi8(*src, byte as i32, 12),
+                 4 => _mm_insert_epi8(*src, byte as i32, 11),
+                 5 => _mm_insert_epi8(*src, byte as i32, 10),
+                 6 => _mm_insert_epi8(*src, byte as i32,  9),
+                 7 => _mm_insert_epi8(*src, byte as i32,  8),
+                 8 => _mm_insert_epi8(*src, byte as i32,  7),
+                 9 => _mm_insert_epi8(*src, byte as i32,  6),
+                10 => _mm_insert_epi8(*src, byte as i32,  5),
+                11 => _mm_insert_epi8(*src, byte as i32,  4),
+                12 => _mm_insert_epi8(*src, byte as i32,  3),
+                13 => _mm_insert_epi8(*src, byte as i32,  2),
+                14 => _mm_insert_epi8(*src, byte as i32,  1),
+                15 => _mm_insert_epi8(*src, byte as i32,  0),
+                 _ => _mm_setzero_si128(),
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn v_insert_short(src: &__m128i, short: u16, element: u8) -> __m128i {
+        if element != 15 {
+            Self::v_insert_byte(&Self::v_insert_byte(src, (short >> 8) as u8, element), short as u8, element + 1)
+        } else {
+            Self::v_insert_byte(&src, (short >> 8) as u8, element)
+        }
+    }
+
+    #[inline(always)]
+    fn v_insert_long(src: &__m128i, long: u32, element: u8) -> __m128i {
+        let high_short = Self::v_insert_short(src, (long >> 16) as u16, element);
+        match element {
+            13 => Self::v_insert_byte(&high_short, (long >> 8) as u8, element + 2),
+            14 => high_short,
+            15 => high_short,
+             _ => Self::v_insert_short(&high_short, long as u16, element + 2),
+        }
+    }
+
+    #[inline(always)]
+    fn v_insert_double(src: &__m128i, double: u64, element: u8) -> __m128i {
+        let high_long = Self::v_insert_long(src, (double >> 32) as u32, element);
+        match element {
+             9 => Self::v_insert_byte(&Self::v_insert_short(&high_long, (double >> 16) as u16, element + 4),
+                                      (double >> 8) as u8, element + 6),
+            10 => Self::v_insert_short(&high_long, (double >> 16) as u16, element + 4),
+            11 => Self::v_insert_byte(&high_long, (double >> 24) as u8, element + 4),
+            12 => high_long,
+            13 => high_long,
+            14 => high_long,
+            15 => high_long,
+             _ => Self::v_insert_long(&high_long, double as u32, element + 4),
+        }
+    }
+
+    #[inline(always)]
     fn v_short(src: &__m128i, element: u8) -> u16 {
         // that the second parameter to _mm_extract_epi8 is const is unfortunate
         (unsafe { match element & 0x07 {
@@ -1251,24 +1315,280 @@ impl RspCpuCore {
         }
     }
 
+    fn v_left_shifted(&self, v: &__m128i, byte_shift: u8) -> __m128i {
+        // left rotate and then mask out lowest bits to 0
+        let rotated = self.v_left_rotated(v, byte_shift);
+
+        // vector filled with a mask and return lower bytes zeroed
+        unsafe { 
+            let i = u128::MAX << (byte_shift * 8);
+            _mm_and_si128(rotated, _mm_set_epi64x((i >> 64) as i64, i as i64))
+        }
+    }
+
     fn inst_lwc2(&mut self) -> Result<(), InstructionFault> {
         let lwc_op = self.inst.rd; // the Rd field contains a function code for which store operation is being done
         let offset = (((self.inst.v & 0x7F) | ((self.inst.v & 0x40) << 1)) as i8) as u32; // signed 7-bit offset
-        let _e = (self.inst.v >> 7) & 0x0F;
+        let element = ((self.inst.v >> 7) & 0x0F) as u8;
 
         match lwc_op {
+            0b00_000 => { // LBV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset) as usize;
+                let byte = self.read_u8(address & 0x0FFF)?;
+                let copy = self.v[self.inst.rt];
+                self.v[self.inst.rt] = Self::v_insert_byte(&copy, byte, element);
+            },
+
+            0b00_001 => { // LSV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 1) as usize;
+                let short = self.read_u16_wrapped(address & 0x0FFF)?;
+                let copy = self.v[self.inst.rt];
+                self.v[self.inst.rt] = Self::v_insert_short(&copy, short, element);
+            },
+
+            0b00_010 => { // LLV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 2) as usize;
+                let long = self.read_u32_wrapped(address & 0x0FFF)?;
+                let copy = self.v[self.inst.rt];
+                self.v[self.inst.rt] = Self::v_insert_long(&copy, long, element);
+            },
+
+            0b00_011 => { // LDV vt[element], offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+                let double = ((self.read_u32_wrapped(address & 0x0FFF)? as u64) << 32)
+                                | (self.read_u32_wrapped((address + 4) & 0x0FFF)? as u64);
+                let copy = self.v[self.inst.rt];
+                self.v[self.inst.rt] = Self::v_insert_double(&copy, double, element);
+            },
+
             0b00_100 => { // LQV vt, offset(base)
+                //info!(target: "RSP", "lqv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
                 let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
-                let b0 = self.read_u32_wrapped((address +  0) & 0x0FFF)? as i32;
-                let b1 = self.read_u32_wrapped((address +  4) & 0x0FFF)? as i32;
-                let b2 = self.read_u32_wrapped((address +  8) & 0x0FFF)? as i32;
-                let b3 = self.read_u32_wrapped((address + 12) & 0x0FFF)? as i32;
-                self.v[self.inst.rt as usize] = unsafe { _mm_set_epi32(b0, b1, b2, b3) };
+                let size = 16 - (address & 0x0F);
+
+                let b0 = self.read_u32_wrapped((address + 0) & 0x0FFF)? as u128;
+                let b1 = if size <=  4 { 0 } else { self.read_u32_wrapped((address +  4) & 0x0FFF)? as u128 };
+                let b2 = if size <=  8 { 0 } else { self.read_u32_wrapped((address +  8) & 0x0FFF)? as u128 };
+                let b3 = if size <= 12 { 0 } else { self.read_u32_wrapped((address + 12) & 0x0FFF)? as u128 };
+                let mut b = (b0 << 96) | (b1 << 64) | (b2 << 32) | b3;
+
+                let v = &mut self.v[self.inst.rt];
+                for i in 0..size {
+                    let x = (b >> 120) as u8;
+                    b <<= 8;
+                    let n = element + (i as u8);
+                    if n > 15 { break; }
+                    *v = Self::v_insert_byte(v, x, n as u8);
+                }
+
+                //self.v[self.inst.rt as usize] = unsafe { _mm_set_epi32(b0, b1, b2, b3) };
                 //.let rt = self.inst.rt;
                 //.let rs = self.inst.rs;
                 //.info!(target: "RSP", "LQV v{}, ${:04X}(r{}) // v{} = ${:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}_{:04X}", rt, offset, rs, rt,
                 //.    self.v_short(rt as usize, 0), self.v_short(rt as usize, 1), self.v_short(rt as usize, 2), self.v_short(rt as usize, 3),
                 //.    self.v_short(rt as usize, 4), self.v_short(rt as usize, 5), self.v_short(rt as usize, 6), self.v_short(rt as usize, 7));
+            },
+
+            0b00_101 => { // LRV vt, offset(base)
+                //info!(target: "RSP", "lrv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                let addr_base = address & !0x0F;
+                let size = 16 - (address & 0x0F);
+
+                let b0 = self.read_u32_wrapped((addr_base +  0) & 0x0FFF)? as u128;
+                let b1 = self.read_u32_wrapped((addr_base +  4) & 0x0FFF)? as u128;
+                let b2 = self.read_u32_wrapped((addr_base +  8) & 0x0FFF)? as u128;
+                let b3 = self.read_u32_wrapped((addr_base + 12) & 0x0FFF)? as u128;
+                let mut b = (b0 << 96) | (b1 << 64) | (b2 << 32) | b3;
+
+                let v = &mut self.v[self.inst.rt];
+                for i in size..16 {
+                    let x = (b >> 120) as u8;
+                    b <<= 8;
+                    let n = element + (i as u8);
+                    if n > 15 { break; }
+                    *v = Self::v_insert_byte(v, x, n as u8);
+                }
+            },
+
+            0b00_110 => { // LPV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+                //info!(target: "RSP", "lpv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}, address = ${address:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let addr_base = address & !0x07;
+                let addr_offset = address & 0x07;
+
+                // load 8 consecutive bytes from memory to the upper byte of each element
+
+                // we have to read individual bytes because elements have to be read and
+                // wrap within a 128-aligned block of data
+                // with the element as part of the address read, this also performs the
+                // rotate into the register (v ends up having the data already rotated)
+                let mut v: u64 = 0;
+                for i in 0..8 {
+                    v <<= 8;
+                    let element_offset = (16 - element + i + addr_offset as u8) & 0x0F;
+                    let src_addr = element_offset as usize + addr_base;
+                    v |= self.read_u8(src_addr & 0x0FFF)? as u64;
+                }
+                
+                self.v[self.inst.rt] = unsafe { 
+                    // place 8 bytes in low i64
+                    let m = _mm_set_epi64x(0, v as i64);
+
+                    // mask into upper bytes (0x80 means output is set to 0)
+                    _mm_shuffle_epi8(m, _mm_set_epi8(7, i8::MIN, 6, i8::MIN, 5, i8::MIN, 4, i8::MIN, 3, i8::MIN, 2, i8::MIN, 1, i8::MIN, 0, i8::MIN))
+                };
+            },
+
+            0b00_111 => { // LUV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 3) as usize;
+                //info!(target: "RSP", "luv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}, address = ${address:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let addr_base = address & !0x07;
+                let addr_offset = address & 0x07;
+
+                // load 8 consecutive bytes from memory to the upper byte of each element, and then shift all elements right 1
+                // i.e., bytes are loaded into bit position 14
+
+                // we have to read individual bytes because elements have to be read and
+                // wrap within a 128-aligned block of data
+                // with the element as part of the address read, this also performs the
+                // rotate into the register (v ends up having the data already rotated)
+                let mut v: u64 = 0;
+                for i in 0..8 {
+                    v <<= 8;
+                    let element_offset = (16 - element + i + addr_offset as u8) & 0x0F;
+                    let src_addr = element_offset as usize + addr_base;
+                    v |= self.read_u8(src_addr & 0x0FFF)? as u64;
+                }
+                
+                self.v[self.inst.rt] = unsafe { 
+                    // place 8 bytes in low i64
+                    let m = _mm_set_epi64x(0, v as i64);
+
+                    // mask into upper bytes (0x80 means output is set to 0)
+                    let m = _mm_shuffle_epi8(m, _mm_set_epi8(7, i8::MIN, 6, i8::MIN, 5, i8::MIN, 4, i8::MIN, 3, i8::MIN, 2, i8::MIN, 1, i8::MIN, 0, i8::MIN));
+
+                    // shift everything right 1
+                    _mm_srli_epi16(m, 1)
+                };
+            },
+
+            0b01_000 => { // LHV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                //info!(target: "RSP", "lhv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}, address = ${address:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let addr_base = address & !0x07;
+                let addr_offset = address & 0x07;
+
+                // load 8 (every second-)bytes from memory to the upper byte of each element, and then shift all elements right 1
+                // i.e., bytes are loaded into bit position 14
+
+                // we have to read individual bytes because elements have to be read and
+                // wrap within a 128-aligned block of data
+                // with the element as part of the address read, this also performs the
+                // rotate into the register (v ends up having the data already rotated)
+                let mut v: u64 = 0;
+                for i in 0..8 {
+                    v <<= 8;
+                    let element_offset = (16 - element + (i << 1) + addr_offset as u8) & 0x0F;
+                    let src_addr = element_offset as usize + addr_base;
+                    v |= self.read_u8(src_addr & 0x0FFF)? as u64;
+                }
+                
+                self.v[self.inst.rt] = unsafe { 
+                    // place 8 bytes in low i64
+                    let m = _mm_set_epi64x(0, v as i64);
+
+                    // mask into upper bytes (0x80 means output is set to 0)
+                    let m = _mm_shuffle_epi8(m, _mm_set_epi8(7, i8::MIN, 6, i8::MIN, 5, i8::MIN, 4, i8::MIN, 3, i8::MIN, 2, i8::MIN, 1, i8::MIN, 0, i8::MIN));
+
+                    // shift everything right 1
+                    _mm_srli_epi16(m, 1)
+                };
+            },
+
+            0b01_001 => { // LFV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                //info!(target: "RSP", "lfv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}, address = ${address:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let addr_base = address & !0x07;
+                let addr_offset = address & 0x07;
+
+                const fixed_offsets: [i8; 8] = [ 0, 4, 8, 12, 8, 12, 0, 4 ];
+                const element_mod: [i8; 8] = [ 1, -1, -1, -1, -1, -1, -1, -1 ];
+
+                // load 8 (every second-)bytes from memory to the upper byte of each element, and then shift all elements right 1
+                // i.e., bytes are loaded into bit position 14
+
+                // we have to read individual bytes because elements have to be read and
+                // wrap within a 128-aligned block of data
+                // with the element as part of the address read, this also performs the
+                // rotate into the register (v ends up having the data already rotated)
+                let mut v: u64 = 0;
+                for i in 0..8 {
+                    v <<= 8;
+                    let element_offset = (addr_offset as i8 + fixed_offsets[i] + element_mod[i] * element as i8) & 0x0F;
+                    let src_addr = element_offset as usize + addr_base;
+                    v |= self.read_u8(src_addr & 0x0FFF)? as u64;
+                }
+                
+                let tmp = unsafe { 
+                    // place 8 bytes in low i64
+                    let m = _mm_set_epi64x(0, v as i64);
+
+                    // mask into upper bytes (0x80 means output is set to 0)
+                    let m = _mm_shuffle_epi8(m, _mm_set_epi8(7, i8::MIN, 6, i8::MIN, 5, i8::MIN, 4, i8::MIN, 3, i8::MIN, 2, i8::MIN, 1, i8::MIN, 0, i8::MIN));
+
+                    // shift everything right 1
+                    _mm_srli_epi16(m, 1)
+                };
+
+                let size = std::cmp::min(8, 16 - element);
+
+                // so tmp has the 4 shorts we want at byte offset `element`, and we can only write a maximum of 4 shorts
+                // the lower bytes are zeroed out and we end up with
+                // 0xAABB_CCDD_EEFF_GGHH_0000_0000_0000 or less, like 
+                // 0xAABB_CC00_0000_0000_0000_0000_0000
+                let tmp = if size < 8 {
+                    // for less than 8 bytes, we can just shift filling in zeros
+                    self.v_left_shifted(&tmp, element)
+                } else {
+                    // for 8 or more, we have to clear bits by rotating the entire vec and shifting in zeroes
+                    self.v_left_shifted(&self.v_left_rotated(&tmp, 8 + element), 8)
+                };
+
+                // now we need the opposite bytes masked in from the source vector
+                // clear `size` bytes starting at byte offset element, and then rotate into position 16 - `size`
+                let vt = self.v_left_rotated(&self.v_left_shifted(&self.v_left_rotated(&self.v[self.inst.rt], element), size), 16 - size);
+
+                // now we OR them together, and perform a final shift into the correct location
+                let tmp = unsafe { _mm_or_si128(tmp, vt) };
+                self.v[self.inst.rt] = self.v_left_rotated(&tmp, 16 - element);
+            },
+
+            0b01_010 => { // LWV vt, offset(base) -- NOP
+            },
+
+            0b01_011 => { // LTV vt, offset(base)
+                let address = self.gpr[self.inst.rs].wrapping_add(offset << 4) as usize;
+                //info!(target: "RSP", "ltv v{}[{}], ${:04X}(r{}) // r{} = ${:08X}, address = ${address:08X}", self.inst.rt, element, offset, self.inst.rs, self.inst.rs, self.gpr[self.inst.rs]);
+                let addr_base = address & !0x07;
+                let v_base = self.inst.rt & !0x07;
+
+                // every other vector in memory is rotated by 8 bytes rather than use the true address offset
+                let addr_offset = if (addr_base & 0x08) != 0 { 8 } else { 0 };
+
+                for i in 0..8 {
+                    // can't use read_u16_wrapped because we need to wrap within a 16 byte block, 
+                    // so read upper and lower bytes individually
+                    let offset = (addr_offset + (i * 2) as usize + element as usize) & 0x0F;
+                    let b0 = self.read_u8((addr_base + ((offset    )       )) & 0x0FFF)?;
+                    let b1 = self.read_u8((addr_base + ((offset + 1) & 0x0F)) & 0x0FFF)?;
+
+                    // dest register is current slice (i) shifted by selected element, wrapping within group of 8 VU regs
+                    let register_index = v_base | ((i + (element >> 1)) & 0x07) as usize;
+
+                    // insert the short into element i position
+                    self.v[register_index] = Self::v_insert_short(&self.v[register_index], ((b0 as u16) << 8) | (b1 as u16), (i * 2) as u8);
+                }
             },
 
             _ => {
@@ -1588,12 +1908,48 @@ impl RspCpuCore {
         } else {
             let cop2_op = (self.inst.v >> 21) & 0x1F;
             match cop2_op {
+                0b00_000 => { // MFC2 rt, vd[e]
+                    let src = &self.v[self.inst.rd];
+                    let rt = &mut self.gpr[self.inst.rt];
+                    let element = (self.inst.v >> 7) & 0x0F;
+                    *rt = (((Self::v_byte(src, element as u8) as i16) << 8) 
+                            | (Self::v_byte(src, ((element + 1) & 0x0F) as u8) as i16)) as u32;
+                },
+
+                0b00_100 => { // MTC2 rt, vd[e]
+                    let rt = self.gpr[self.inst.rt] as u16;
+                    let copy = self.v[self.inst.rd];
+                    let element = (self.inst.v >> 7) & 0x0F;
+                    self.v[self.inst.rd] = Self::v_insert_short(&copy, rt, element as u8);
+                },
+
+                0b00_010 => { // CFC2
+                    let mut rd = self.inst.rd & 0x03;
+                    if rd == 2 || rd == 3 { 
+                        rd = 2; 
+                    }
+                    let s = self.ccr[rd];
+                    self.gpr[self.inst.rt] = s;
+                },
+
+                0b00_110 => { // CTC2
+                    let mut s = self.gpr[self.inst.rt] as i16;    // truncate to 16 bits
+                    let mut rd = self.inst.rd & 0x03;
+                    if rd == 2 || rd == 3 { 
+                        rd = 2; 
+                        s &= 0xFF;
+                    }
+                    self.ccr[rd] = s as u32; // sign-extend
+                },
+
                 _ => {
                     error!(target: "RSP", "unimplemented RSP COP2 instruction 0b{:02b}_{:03b}", cop2_op >> 3, cop2_op & 0x07);
                     todo!();
                     //Ok(())
                 }
-            }
+            };
+
+            Ok(())
         }
     }
 
