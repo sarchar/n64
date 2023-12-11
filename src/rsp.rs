@@ -559,7 +559,7 @@ impl RspCpuCore {
                //   _000                _001                _010                _011                _100                _101                _110                _111
    /* 000_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
-   /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
    /* 011_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vsar    , Cpu::cop2_unknown , Cpu::cop2_unknown ,
    /* 100_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
    /* 101_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
@@ -2040,6 +2040,40 @@ impl RspCpuCore {
         }
     }
 
+    // add the parameters and only store the accumulator, setting the result to 0
+    fn cop2_vweird(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vweird v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
+
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        let dst = &mut self.v[self.inst_vd];
+
+        unsafe { 
+            *dst = _mm_setzero_si128();
+
+            // sign-extend to eight 32-bits ints (so we can correctly calculate the accumulator and saturate with one vector op)
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+            let result256 = _mm256_add_epi32(left256, right256); // the actual op: rs + rt(e)
+
+            // for the accumulator, truncate to 16-bits and then covert to __m512i
+            // truncates 8 32-bit ints for storage in the accumulator
+            asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+
+                 "vpmovdw {epi16}, {src}",        // _mm256_cvtepi32_epi16: truncate down to epi16
+                 "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepi16_epi64: zero extend epi16 to epi64 
+                 "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
+                 src = in(ymm_reg) result256,
+                 mask = in(zmm_reg) self.vacc_mask,
+                 acc = inout(zmm_reg) self.vacc,
+                 epi16 = out(xmm_reg) _, 
+                 tmp512 = out(zmm_reg) _);
+        };
+
+        Ok(())
+    }
+
     fn cop2_vadd(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vadd v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
 
@@ -2115,6 +2149,44 @@ impl RspCpuCore {
         };
 
         self.ccr[Cop2_VCO] &= !0xFFFF; // clear VCO
+        Ok(())
+    }
+
+    fn cop2_vabs(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vabs v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
+
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        let dst = &mut self.v[self.inst_vd];
+
+        unsafe { 
+            let result = _mm_sign_epi16(right, left);
+
+            // for the accumulator, transfer exactly to the low shoft
+            asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+
+                 "vpmovzxwq {tmp512}, {result}",  // _mm512_cvtepi16_epi64: zero extend epi16 to epi64 
+                 "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
+                 result = in(xmm_reg) result,
+                 mask = in(zmm_reg) self.vacc_mask,
+                 acc = inout(zmm_reg) self.vacc,
+                 tmp512 = out(zmm_reg) _);
+
+            // this is annoying...if a lane in left is negative and the corresponding right value is 0x8000 exactly, set the result to 0x7FFF
+            // (left & 0x8000) = 0x8000 means left is negative
+            let left_cmp = _mm_and_si128(left, _mm_set1_epi16(0x8000u16 as i16));
+            // (right == 0x8000 ? 0xFFFF : 0) gives us 0xFFFF if right is exactly 0x8000
+            let right_cmp = _mm_cmpeq_epi16(right, _mm_set1_epi16(0x8000u16 as i16));
+            // AND together gives us 0x8000 or 0
+            let cmp = _mm_and_si128(left_cmp, right_cmp); // 0x8000 or 0x0000
+            // shifting and oring gives us 0x8080 or 0
+            let cmp = _mm_or_si128(cmp, _mm_srli_epi16(cmp, 8)); // 0x8080 or 0x0000
+            // and then blending between the result and 0x7FFF selects 0x7FFF when that particular condition is satisfied
+            *dst = _mm_blendv_epi8(result, _mm_set1_epi16(0x7FFF), cmp); // replace with 0x7FFF
+            // is this actually faster than a loop? uhg
+        };
+
         Ok(())
     }
 
