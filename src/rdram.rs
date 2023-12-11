@@ -71,7 +71,6 @@ impl Addressable for RdramInterface {
             // RDRAM memory space
             0x0000_0000..=0x007F_FFFF => {
                 let rdram_address = offset & 0x03FF_FFFF;
-                //println!("RDRAM: translated RDRAM address=${:016X}", rdram_address);
                 self.ram[(rdram_address >> 2) as usize] = value;
             },
 
