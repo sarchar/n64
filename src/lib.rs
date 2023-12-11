@@ -1,3 +1,5 @@
+#![feature(stdsimd)]
+
 use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
@@ -39,7 +41,7 @@ pub trait Addressable {
     fn read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
         assert!((offset & 0x01) == 0);
         let word = self.read_u32(offset & !0x02)?;
-        let shift = 16 - ((offset & 0x02) << 3);
+        let shift = 16 - ((offset & 0x03) << 3);
         Ok(((word >> shift) & 0xFFFF) as u16)
     }
 
