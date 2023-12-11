@@ -1571,9 +1571,10 @@ impl Cpu {
 
         if (address & 0x01) != 0 {
             self.address_exception(address, false)?;
+        } else {
+            self.gpr[self.inst.rt] = (self.read_u16((address & !0x01) as usize)? as i16) as u64;
         }
 
-        self.gpr[self.inst.rt] = (self.read_u16((address & !0x02) as usize)? as i16) as u64;
         Ok(())
     }
 
