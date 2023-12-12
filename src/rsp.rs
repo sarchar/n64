@@ -561,7 +561,7 @@ impl RspCpuCore {
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_unknown , Cpu::cop2_unknown ,
-   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
    /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
    /* 111_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown 
@@ -783,8 +783,8 @@ impl RspCpuCore {
 
     fn inst_addiu(&mut self) -> Result<(), InstructionFault> {
         let rs = self.gpr[self.inst.rs];
-        let rt = self.inst.signed_imm as u32;
-        self.gpr[self.inst.rt] = rs.wrapping_add(rt);
+        let imm = self.inst.signed_imm as u32;
+        self.gpr[self.inst.rt] = rs.wrapping_add(imm);
         Ok(())
     }
 
@@ -809,6 +809,7 @@ impl RspCpuCore {
     }
 
     fn inst_ori(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "ori r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] | (self.inst.imm as u32);
         Ok(())
     }
@@ -819,6 +820,7 @@ impl RspCpuCore {
     }
 
     fn inst_lui(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "lui r{}, ${:04X}", self.inst.rt, self.inst.imm);
         self.gpr[self.inst.rt] = (self.inst.signed_imm as u32) << 16;
         Ok(())
     }
@@ -2141,12 +2143,8 @@ impl RspCpuCore {
             let result256 = _mm256_srli_epi32(_mm256_and_si256(result256, _mm256_set1_epi32(0x0001_0000i32)), 1);
             asm!("vpmovmskb {dst:e}, {src}",  // dst = _mm256_movemask_epi8(src) (:e is specified for a 32-bit register)
                  src = in(ymm_reg) result256, dst = out(reg) carry_bits);
-            carry_bits = _pext_u32(carry_bits, 0x2222_2222) & 0xFF; // extract carry bits into lower concatenated bits
 
-            // bits in carry_bits need to be reversed
-            carry_bits = (carry_bits & 0b11110000) >> 4 | (carry_bits & 0b00001111) << 4;
-            carry_bits = (carry_bits & 0b11001100) >> 2 | (carry_bits & 0b00110011) << 2;
-            carry_bits = (carry_bits & 0b10101010) >> 1 | (carry_bits & 0b01010101) << 1;
+            carry_bits = _pext_u32(carry_bits, 0x2222_2222) & 0xFF; // extract carry bits into lower concatenated bits
 
             result128
         };
@@ -2154,7 +2152,8 @@ impl RspCpuCore {
         let copy = self.v[self.inst_vd];
         self.v_set_accumulator_lo(&copy);
 
-        self.ccr[Cop2_VCO] = carry_bits as u32; // clear high bits
+        // bits in carry_bits need to be reversed
+        self.ccr[Cop2_VCO] = (carry_bits as u8).reverse_bits() as u32; // clear high bits
         Ok(())
     }
 
@@ -2211,29 +2210,20 @@ impl RspCpuCore {
                  src = in(ymm_reg) result256, dst = out(reg) carry_bits);
             carry_bits = _pext_u32(carry_bits, 0x8888_8888) & 0xFF; // extract carry bits into lower concatenated bits
 
-            // bits in carry_bits need to be reversed
-            carry_bits = (carry_bits & 0b11110000) >> 4 | (carry_bits & 0b00001111) << 4;
-            carry_bits = (carry_bits & 0b11001100) >> 2 | (carry_bits & 0b00110011) << 2;
-            carry_bits = (carry_bits & 0b10101010) >> 1 | (carry_bits & 0b01010101) << 1;
-
             // VCO high on the other hand depends on the 32-bit result being nonzero
             let zero_cmp = _mm256_cmpeq_epi32(result256, _mm256_setzero_si256()); // -1 if 0, 0 if not 0
             asm!("vpmovmskb {dst:e}, {src}",  // dst = _mm256_movemask_epi8(src) (:e is specified for a 32-bit register)
                  src = in(ymm_reg) zero_cmp, dst = out(reg) zero_bits);
             // if high bit is set in zero_cmp, then value is zero and vco high should be clear
             zero_bits = _pext_u32(!zero_bits, 0x8888_8888) & 0xFF; // extract zero bits into lower concatenated bits
-
-            // bits in zero_bits need to be reversed
-            zero_bits = (zero_bits & 0b11110000) >> 4 | (zero_bits & 0b00001111) << 4;
-            zero_bits = (zero_bits & 0b11001100) >> 2 | (zero_bits & 0b00110011) << 2;
-            zero_bits = (zero_bits & 0b10101010) >> 1 | (zero_bits & 0b01010101) << 1;
         };
 
         // the accumulator low gets a copy of result
         let copy = self.v[self.inst_vd];
         self.v_set_accumulator_lo(&copy);
 
-        self.ccr[Cop2_VCO] = ((zero_bits as u32) << 8) | carry_bits as u32;
+        // both carry_bits and zero_bits need to be reversed
+        self.ccr[Cop2_VCO] = (((zero_bits as u8).reverse_bits() as u32) << 8) | (carry_bits as u8).reverse_bits() as u32;
         Ok(())
     }
 
@@ -2302,7 +2292,7 @@ impl RspCpuCore {
         let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
         //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
 
-        let (result, mut result_mask) = cmp(left, right, (self.ccr[Cop2_VCO] >> 8) as u8, self.ccr[Cop2_VCO] as u8);
+        let (result, result_mask) = cmp(left, right, (self.ccr[Cop2_VCO] >> 8) as u8, self.ccr[Cop2_VCO] as u8);
 
         // store the result
         self.v[self.inst_vd] = result;
@@ -2311,11 +2301,7 @@ impl RspCpuCore {
         self.v_set_accumulator_lo(&result);
 
         // bits in result_mask need to be reversed
-        result_mask = (result_mask & 0b11110000) >> 4 | (result_mask & 0b00001111) << 4;
-        result_mask = (result_mask & 0b11001100) >> 2 | (result_mask & 0b00110011) << 2;
-        result_mask = (result_mask & 0b10101010) >> 1 | (result_mask & 0b01010101) << 1;
-
-        self.ccr[Cop2_VCC] = result_mask as u32;
+        self.ccr[Cop2_VCC] = result_mask.reverse_bits() as u32;
         self.ccr[Cop2_VCO] = 0;
 
         Ok(())
@@ -2378,6 +2364,31 @@ impl RspCpuCore {
             };
             (result, result_mask)
         })
+    }
+
+    fn cop2_vmrg(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmrg v{}, v{}, v{}[0b{:04b}] // VCC=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCC]);
+
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        // bits in merge_mask need to be reversed and inverted, but we swap right/left in the blend
+        let merge_mask = (self.ccr[Cop2_VCC] as u8).reverse_bits();
+        let result = unsafe {
+            _mm_mask_blend_epi16(merge_mask, right, left)
+        };
+
+        // store the result
+        self.v[self.inst_vd] = result;
+
+        // ACC LO gets a copy of the result
+        self.v_set_accumulator_lo(&result);
+
+        // VCO is cleared
+        self.ccr[Cop2_VCO] = 0;
+
+        Ok(())
     }
 
     fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
