@@ -560,11 +560,11 @@ impl RspCpuCore {
    /* 000_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_unknown , Cpu::cop2_unknown ,
+   /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
-   /* 101_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
-   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown ,
-   /* 111_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown 
+   /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
+   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
+   /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
             ],
         };
 
@@ -2277,6 +2277,9 @@ impl RspCpuCore {
             )
         };
 
+        // V2 needs to be initialized to specific value (for vnop)
+        self.v[2] = unsafe { _mm_set_epi16(0xffffu16 as i16, 0x8001u16 as i16, 0xffffu16 as i16, 0x0000u16 as i16, 0xffffu16 as i16, 0x0001u16 as i16, 0xffffu16 as i16, 0xffffu16 as i16) };
+
         Ok(())
     }
 
@@ -2303,6 +2306,24 @@ impl RspCpuCore {
         // bits in result_mask need to be reversed
         self.ccr[Cop2_VCC] = result_mask.reverse_bits() as u32;
         self.ccr[Cop2_VCO] = 0;
+
+        Ok(())
+    }
+
+    fn v_logical<T: FnOnce(__m128i, __m128i) -> __m128i>(&mut self, op: T) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vlt v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
+
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result = op(left, right);
+
+        // store the result
+        self.v[self.inst_vd] = result;
+
+        // ACC LO gets a copy of the result
+        self.v_set_accumulator_lo(&result);
 
         Ok(())
     }
@@ -2388,6 +2409,34 @@ impl RspCpuCore {
         // VCO is cleared
         self.ccr[Cop2_VCO] = 0;
 
+        Ok(())
+    }
+
+    fn cop2_vand(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_and_si128(left, right) } })
+    }
+
+    fn cop2_vnand(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_xor_si128(_mm_set1_epi8(0xFFu8 as i8), _mm_and_si128(left, right)) } })
+    }
+
+    fn cop2_vor(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_or_si128(left, right) } })
+    }
+
+    fn cop2_vnor(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_xor_si128(_mm_set1_epi8(0xFFu8 as i8), _mm_or_si128(left, right)) } })
+    }
+
+    fn cop2_vxor(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_xor_si128(left, right) } })
+    }
+
+    fn cop2_vnxor(&mut self) -> Result<(), InstructionFault> {
+        self.v_logical(|left, right| { unsafe { _mm_xor_si128(_mm_set1_epi8(0xFFu8 as i8), _mm_xor_si128(left, right)) } })
+    }
+
+    fn cop2_vnop(&mut self) -> Result<(), InstructionFault> {
         Ok(())
     }
 
