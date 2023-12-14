@@ -2717,8 +2717,6 @@ impl RspCpuCore {
             let right256 = _mm256_cvtepi16_epi32(right);
             // multiply and zero extend to 64 bits
             let result256 = _mm256_mullo_epi32(left256, right256); // the actual op: rs * rt(e)
-            //let (hi, lo) = Self::v_as_u256(&result256);
-            //println!("mul=${:032X}_${:032X}", hi, lo);
             let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
 
             // shift the result left 1 bit (multiply of fractions) and add 0x8000
@@ -2728,8 +2726,6 @@ impl RspCpuCore {
         // saturate the high-mid 32-bit value of the accumulator
         self.v[self.inst_vd] = unsafe {
             let vacc_highmid = self.v_get_accumulator_highmid();
-            //let (hi, lo) = Self::v_as_u256(&vacc_highmid);
-            //println!("highmid=${:032X}_${:032X}", hi, lo);
             // saturate down to 16-bit
             let vacc_saturated: __m128i = _mm256_cvtsepi32_epi16(vacc_highmid);
             vacc_saturated
@@ -2739,13 +2735,35 @@ impl RspCpuCore {
     }
 
     fn cop2_vmacf(&mut self) -> Result<(), InstructionFault> {
-        info!(target: "RSP", "vmacf v{}, v{}, v{}[0b{:04b}] // VCO=${:04X} VCC=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO], self.ccr[Cop2_VCC]);
+        //info!(target: "RSP", "vmulf v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
         let left  = self.v[self.inst_vs];
         let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
-        println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
 
-        todo!();
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // sign-extend to eight 32-bits ints and multiply
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+            // multiply and zero extend to 64 bits
+            let result256 = _mm256_mullo_epi32(left256, right256); // the actual op: rs * rt(e)
+            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+
+            // shift the result left 1 bit (multiply of fractions) and add to the accumulator
+            _mm512_add_epi64(self.vacc, _mm512_slli_epi64(result512, 1))
+        };
+
+        // saturate the high-mid 32-bit value of the accumulator
+        self.v[self.inst_vd] = unsafe {
+            let vacc_highmid = self.v_get_accumulator_highmid();
+            // saturate down to 16-bit
+            let vacc_saturated: __m128i = _mm256_cvtsepi32_epi16(vacc_highmid);
+            vacc_saturated
+        };
+
+        Ok(())
     }
+
 }
 
 impl Addressable for RspCpuCore {
