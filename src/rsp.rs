@@ -561,7 +561,7 @@ impl RspCpuCore {
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
+   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
@@ -2544,6 +2544,69 @@ impl RspCpuCore {
 
         // set VCC to the result of the comparisons
         self.ccr[Cop2_VCC] = ((vcc_high as u32) << 8) | (vcc_low as u32);
+
+        Ok(())
+    }
+
+    fn cop2_vch(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vch v{}, v{}, v{}[0b{:04b}] // VCO=${:04X} VCC=${:04X} VCE=${:02X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, 
+        //                                                                                           self.ccr[Cop2_VCO], self.ccr[Cop2_VCC], self.ccr[Cop2_VCE]);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let (new_vco_low, vt_lt_zero, vt_ne_not_vs, sum_le_zero, diff_ge_zero, sum_ne_zero, diff_ne_zero, sum_eq_neg1);
+
+        let result = unsafe {
+            // first compare vs^vt < 0
+            new_vco_low = (_mm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
+
+            // comparisons between vs and vt
+            vt_lt_zero = (_mm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
+            vt_ne_not_vs = (_mm_cmpneq_epi16_mask(right, _mm_xor_si128(left, _mm_set1_epi8(0xFFu8 as i8))) as u8).reverse_bits();
+
+            // calculate sum and diff
+            let sum  = _mm_add_epi16(left, right);
+            let diff = _mm_sub_epi16(left, right);
+
+            // sum and diff comparisons
+            sum_le_zero  = (_mm_cmple_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ge_zero = (_mm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+            sum_ne_zero  = (_mm_cmpneq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ne_zero = (_mm_cmpneq_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+            sum_eq_neg1  = (_mm_cmpeq_epi16_mask(sum, _mm_set1_epi16(-1i16)) as u8).reverse_bits();
+
+            // results...
+            // if vco_low bit is set, we select either vs or -vt based on whether the sum of the two is negative
+            let vco_low_set_result = _mm_mask_blend_epi16(sum_le_zero.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
+
+            // if vco_low bit is clear, we select either vs or vt based on whether the diff is >=0 or not
+            let vco_low_clear_result = _mm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
+
+            // pick which result based on new vco_low
+            _mm_mask_blend_epi16(new_vco_low.reverse_bits(), vco_low_clear_result, vco_low_set_result)
+        };
+
+        // low bits of accumulator get a copy of the result
+        self.v[self.inst_vd] = result;
+        self.v_set_accumulator_lo(&result);
+
+        // set VCC/VCE/VCO to the result of the comparisons
+        // vcc_low set to vt_lt_zero if vco_low is clear, otherwise set to sum_le_zero
+        let new_vcc_low = (vt_lt_zero & !new_vco_low) | (sum_le_zero & new_vco_low);
+
+        // vcc_high set to vt_lt_zero only if vco_low is set, otherwise set to diff_ge_zero
+        let new_vcc_high = (vt_lt_zero & new_vco_low) | (diff_ge_zero & !new_vco_low);
+        
+        // vce set to sum_eq_neg1 only if vco_low is set, otherwise cleared
+        let new_vce = sum_eq_neg1 & new_vco_low;
+
+        // new vco_high set to AND of sum_ne_zero and vt_ne_not_vs if vco_low set, otherwise set to diff_ne_zero
+        let new_vco_high = ((sum_ne_zero & vt_ne_not_vs) & new_vco_low) | (diff_ne_zero & !new_vco_low);
+
+        self.ccr[Cop2_VCC] = ((new_vcc_high as u32) << 8) | (new_vcc_low as u32);
+        self.ccr[Cop2_VCE] = new_vce as u32;
+        self.ccr[Cop2_VCO] = ((new_vco_high as u32) << 8) | (new_vco_low as u32);
 
         Ok(())
     }
