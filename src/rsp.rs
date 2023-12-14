@@ -561,7 +561,7 @@ impl RspCpuCore {
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
+   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
@@ -2057,6 +2057,50 @@ impl RspCpuCore {
         }
     }
 
+    fn cop2_unknown(&mut self) -> Result<(), InstructionFault> {
+        let func = self.inst.v & 0x3F;
+        error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
+        todo!();
+    }
+
+    fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vsar v{}[0b{:04b}]", self.inst_vd, self.inst_e);
+        match self.inst_e {
+             8 => {
+                // move mid 16 bits of vacc to 
+                unsafe {
+                    asm!("vpsrlq {tmp}, {acc}, 32", // _mm512_srli_epi64: shift acc values right 32 bits
+                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                         acc = in(zmm_reg) self.vacc,
+                         tmp = out(zmm_reg) _,
+                         out = out(xmm_reg) self.v[self.inst_vd]);
+                }
+            },
+             9 => {
+                // move mid 16 bits of vacc to 
+                unsafe {
+                    asm!("vpsrlq {tmp}, {acc}, 16", // _mm512_srli_epi64: shift acc values right 16 bits
+                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                         acc = in(zmm_reg) self.vacc,
+                         tmp = out(zmm_reg) _,
+                         out = out(xmm_reg) self.v[self.inst_vd]);
+                }
+            },
+            10 => {
+                // move low 16 bits of vacc to 
+                unsafe {
+                    asm!("vpmovqw {out}, {acc}", // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                         acc = in(zmm_reg) self.vacc,
+                         out = out(xmm_reg) self.v[self.inst_vd]);
+                }
+            },
+            _ => {
+                info!(target: "RSP", "vsar todo e={}", self.inst_e);
+            },
+        };
+        Ok(())
+    }
+
     // add the parameters and only store the accumulator, setting the result to 0
     fn cop2_vweird(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vweird v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
@@ -2352,7 +2396,7 @@ impl RspCpuCore {
             let result_mask: u8;
             let result = unsafe { 
                 let eq_mask = _mm_cmpeq_epi16_mask(left, right);
-                result_mask = eq_mask & !(vco_high);
+                result_mask = eq_mask & !vco_high;
                 right
             };
             (result, result_mask)
@@ -2440,48 +2484,68 @@ impl RspCpuCore {
         Ok(())
     }
 
-    fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
-        //info!(target: "RSP", "vsar v{}[0b{:04b}]", self.inst_vd, self.inst_e);
-        match self.inst_e {
-             8 => {
-                // move mid 16 bits of vacc to 
-                unsafe {
-                    asm!("vpsrlq {tmp}, {acc}, 32", // _mm512_srli_epi64: shift acc values right 32 bits
-                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         tmp = out(zmm_reg) _,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
-            },
-             9 => {
-                // move mid 16 bits of vacc to 
-                unsafe {
-                    asm!("vpsrlq {tmp}, {acc}, 16", // _mm512_srli_epi64: shift acc values right 16 bits
-                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         tmp = out(zmm_reg) _,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
-            },
-            10 => {
-                // move low 16 bits of vacc to 
-                unsafe {
-                    asm!("vpmovqw {out}, {acc}", // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
-            },
-            _ => {
-                info!(target: "RSP", "vsar todo e={}", self.inst_e);
-            },
-        };
-        Ok(())
-    }
+    fn cop2_vcl(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vcl v{}, v{}, v{}[0b{:04b}] // VCO=${:04X} VCC=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO], self.ccr[Cop2_VCC]);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
 
-    fn cop2_unknown(&mut self) -> Result<(), InstructionFault> {
-        let func = self.inst.v & 0x3F;
-        error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
-        todo!();
+        let vcc_low  = self.ccr[Cop2_VCC] as u8;
+        let vcc_high = (self.ccr[Cop2_VCC] >> 8) as u8;
+        let vco_low  = self.ccr[Cop2_VCO] as u8;
+        let vco_high = (self.ccr[Cop2_VCO] >> 8) as u8;
+        let vce      = self.ccr[Cop2_VCE] as u8;
+
+        let (result, vcc_low, vcc_high) = unsafe { 
+            //...if a vco_low bit is set...
+            //add up the elements to see if we get zero or overflow
+            let left256   = _mm256_cvtepu16_epi32(left); //zero-extend to 32-bits and add (all values are positive now)
+            let right256  = _mm256_cvtepu16_epi32(right);
+            let result256 = _mm256_add_epi32(left256, right256); // the actual op: rs + rt(e)
+            let sum       = _mm256_cvtepi32_epi16(result256); // truncate to 16-bit for the sum
+            let zero_sum  = (_mm_cmpeq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits(); // compare sum to zero, create a mask
+            let carry     = (_mm256_cmpge_epi32_mask(result256, _mm256_set1_epi32(0x10000u32 as i32)) as u8).reverse_bits(); // bitmask where 1 indicates carry occurred
+            //println!("sum=${:032X} zero_sum=0b{:08b} carry=0b{:08b}", Self::v_as_u128(&sum), zero_sum, carry);
+
+            // new vcc low contains the equal/less-equal sign
+            let mut new_vcc_low = (zero_sum & !carry) | (vce & (zero_sum | !carry));
+            // new vcc low output is only set when vco_high of corresponding bit is clear, so we mask out those bits
+            // and keep the old vcc_low bits
+            new_vcc_low = (new_vcc_low & !vco_high) | (vcc_low & vco_high);
+
+            // the output of when original vco_low is set (sign bit set) yields either -vt or vs depending on the result of le (new_vcc_low)
+            let vco_low_set_result = _mm_mask_blend_epi16(new_vcc_low.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
+
+            //...if a vco_low bit is clear...
+
+            // new vcc high contains the greater-than-or-equal result between vs and vt
+            let mut new_vcc_high = (_mm_cmpge_epu16_mask(left, right) as u8).reverse_bits();
+            // but only gets compared when vco_high is clear, so mask out those bits and keep the old vcc_high bits
+            new_vcc_high = (new_vcc_high & !vco_high) | (vcc_high & vco_high);
+
+            // the output of when original vco_low is clear (sign bit clear) yields either vs or vt depending on the ge flag (new_vcc_high)
+            let vco_low_clear_result = _mm_mask_blend_epi16(new_vcc_high.reverse_bits(), left, right);
+
+            // the final result is picking the elements based on vco_low (sign bit)
+            let result = _mm_mask_blend_epi16(vco_low, vco_low_clear_result, vco_low_set_result);
+            new_vcc_low  = (new_vcc_low  &  vco_low) | (vcc_low  & !vco_low);   // select new_vcc_low when vco_low is set, otherwise keep old vcc_low
+            new_vcc_high = (new_vcc_high & !vco_low) | (vcc_high &  vco_low);   // select new_vcc_high when vco_low is clear, otherwise keep old vcc_high
+
+            (result, new_vcc_low, new_vcc_high)
+        };
+
+        // low bits of accumulator get a copy of the result
+        self.v[self.inst_vd] = result;
+        self.v_set_accumulator_lo(&result);
+
+        // VCO and VCE are cleared
+        self.ccr[Cop2_VCO] = 0;
+        self.ccr[Cop2_VCE] = 0;
+
+        // set VCC to the result of the comparisons
+        self.ccr[Cop2_VCC] = ((vcc_high as u32) << 8) | (vcc_low as u32);
+
+        Ok(())
     }
 }
 
