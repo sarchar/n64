@@ -557,8 +557,8 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
-   /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
+   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
@@ -1308,10 +1308,24 @@ impl RspCpuCore {
 
     // get u128 from __m128i
     #[inline(always)]
+    #[allow(dead_code)]
     fn v_as_u128(src: &__m128i) -> u128 {
         unsafe {
-            ((_mm_extract_epi64(*src, 0) as u64) as u128)
-                | (((_mm_extract_epi64(*src, 1) as u64) as u128) << 64)
+            (((_mm_extract_epi64(*src, 1) as u64) as u128) << 64)
+              | ((_mm_extract_epi64(*src, 0) as u64) as u128)
+        }
+    }
+
+    // get two u128 from __m128i (hi,lo)
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn v_as_u256(src: &__m256i) -> (u128, u128) {
+        unsafe {
+            let hi = (((_mm256_extract_epi64(*src, 3) as u64) as u128) << 64)
+                      | ((_mm256_extract_epi64(*src, 2) as u64) as u128);
+            let lo = (((_mm256_extract_epi64(*src, 1) as u64) as u128) << 64)
+                      | ((_mm256_extract_epi64(*src, 0) as u64) as u128);
+            (hi, lo)
         }
     }
 
@@ -2057,6 +2071,32 @@ impl RspCpuCore {
         }
     }
 
+    // Set a 32-bit value into the high and mid values of the accumulator
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn v_set_accumulator_highmid(&mut self, v: &__m256i) {
+        unsafe {
+            let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
+            asm!("vpsllq {tmp512}, {mask}, 48",   // _mm512_slli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
+                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
+                 "vpsllq {v512}, {v512}, 16",     // _mm512_slli_epi64: shift input left 16 bits
+                 "vporq {acc}, {acc}, {v512}",    // _mm512_or_epi64: OR in 32 bits into accumulataor
+                 mask = in(zmm_reg) self.vacc_mask,
+                 acc = inout(zmm_reg) self.vacc,
+                 v512 = in(zmm_reg) v512, 
+                 tmp512 = out(zmm_reg) _);
+        }
+    }
+
+    #[inline(always)]
+    fn v_get_accumulator_highmid(&mut self) -> __m256i {
+        unsafe {
+            // shift vacc right 16 (placing high/mid in the lower 32-bits), and then truncate to __m256i
+            let vacc_shifted_truncated: __m256i = _mm512_cvtepi64_epi32(_mm512_srli_epi64(self.vacc, 16));
+            vacc_shifted_truncated
+        }
+    }
+
     fn cop2_unknown(&mut self) -> Result<(), InstructionFault> {
         let func = self.inst.v & 0x3F;
         error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
@@ -2662,6 +2702,49 @@ impl RspCpuCore {
         self.ccr[Cop2_VCO] = 0;
 
         Ok(())
+    }
+
+    fn cop2_vmulf(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmulf v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // sign-extend to eight 32-bits ints and multiply
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+            // multiply and zero extend to 64 bits
+            let result256 = _mm256_mullo_epi32(left256, right256); // the actual op: rs * rt(e)
+            //let (hi, lo) = Self::v_as_u256(&result256);
+            //println!("mul=${:032X}_${:032X}", hi, lo);
+            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+
+            // shift the result left 1 bit (multiply of fractions) and add 0x8000
+            _mm512_add_epi64(_mm512_slli_epi64(result512, 1), _mm512_set1_epi64(0x8000u64 as i64))
+        };
+
+        // saturate the high-mid 32-bit value of the accumulator
+        self.v[self.inst_vd] = unsafe {
+            let vacc_highmid = self.v_get_accumulator_highmid();
+            //let (hi, lo) = Self::v_as_u256(&vacc_highmid);
+            //println!("highmid=${:032X}_${:032X}", hi, lo);
+            // saturate down to 16-bit
+            let vacc_saturated: __m128i = _mm256_cvtsepi32_epi16(vacc_highmid);
+            vacc_saturated
+        };
+
+        Ok(())
+    }
+
+    fn cop2_vmacf(&mut self) -> Result<(), InstructionFault> {
+        info!(target: "RSP", "vmacf v{}, v{}, v{}[0b{:04b}] // VCO=${:04X} VCC=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO], self.ccr[Cop2_VCC]);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        todo!();
     }
 }
 
