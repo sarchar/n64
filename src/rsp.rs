@@ -2135,7 +2135,7 @@ impl RspCpuCore {
                 }
             },
             _ => {
-                info!(target: "RSP", "vsar todo e={}", self.inst_e);
+                self.v[self.inst_vd] = unsafe { _mm_setzero_si128() };
             },
         };
         Ok(())
