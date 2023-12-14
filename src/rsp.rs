@@ -561,7 +561,7 @@ impl RspCpuCore {
    /* 001_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_unknown , Cpu::cop2_vmrg    ,
+   /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
@@ -2607,6 +2607,59 @@ impl RspCpuCore {
         self.ccr[Cop2_VCC] = ((new_vcc_high as u32) << 8) | (new_vcc_low as u32);
         self.ccr[Cop2_VCE] = new_vce as u32;
         self.ccr[Cop2_VCO] = ((new_vco_high as u32) << 8) | (new_vco_low as u32);
+
+        Ok(())
+    }
+
+    fn cop2_vcr(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vcr v{}, v{}, v{}[0b{:04b}] // VCO=${:04X} VCC=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO], self.ccr[Cop2_VCC]);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let (high_bit, vt_lt_zero, sum_lt_zero, diff_ge_zero);
+
+        let result = unsafe {
+            // first compare vs^vt < 0, gives us whether the high bit after an op is set (number is negative)
+            high_bit = (_mm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
+
+            // calculate sum and diff
+            let sum  = _mm_add_epi16(left, right);
+            let diff = _mm_sub_epi16(left, right);
+
+            // comparisons between vs and vt
+            vt_lt_zero = (_mm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
+
+            // sum and diff comparisons
+            sum_lt_zero  = (_mm_cmplt_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ge_zero = (_mm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+
+            // results...
+            // if high_bit bit is set, we select either vs or !vt based on whether the sum of the two is negative
+            let high_bit_set_result = _mm_mask_blend_epi16(sum_lt_zero.reverse_bits(), left, _mm_xor_si128(right, _mm_set1_epi8(0xFFu8 as i8)));
+
+            // if high_bit bit is clear, we select either vs or vt based on whether the diff is >=0 or not
+            let high_bit_clear_result = _mm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
+
+            // pick which result based on new vco_low
+            _mm_mask_blend_epi16(high_bit.reverse_bits(), high_bit_clear_result, high_bit_set_result)
+        };
+
+        // low bits of accumulator get a copy of the result
+        self.v[self.inst_vd] = result;
+        self.v_set_accumulator_lo(&result);
+
+        // set VCC to the result of the comparisons
+        // vcc_low set to vt_lt_zero if vco_low is clear, otherwise set to sum_lt_zero
+        let new_vcc_low  = (sum_lt_zero & high_bit) | (vt_lt_zero   & !high_bit);
+
+        // vcc_high set to vt_lt_zero if vco_low is set, otherwise set to diff_ge_zero
+        let new_vcc_high = (vt_lt_zero  & high_bit) | (diff_ge_zero & !high_bit);
+
+        // set only VCC, clear VCE and VCO
+        self.ccr[Cop2_VCC] = ((new_vcc_high as u32) << 8) | (new_vcc_low as u32);
+        self.ccr[Cop2_VCE] = 0;
+        self.ccr[Cop2_VCO] = 0;
 
         Ok(())
     }
