@@ -557,7 +557,7 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudl   , Cpu::cop2_vmudm   , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_vmulq   , Cpu::cop2_vmudl   , Cpu::cop2_vmudm   , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_vmadl   , Cpu::cop2_vmadm   , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
@@ -3071,6 +3071,50 @@ impl RspCpuCore {
 
         Ok(())
     }
+
+    // VMULQ - passing tests
+    fn cop2_vmulq(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmulq v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let mut result256: __m256i;
+
+        // set the high and mid lanes of the accumulator, with zero in the low
+        self.vacc = unsafe {
+            // sign-extende vs and zero-extend vt
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+            
+            // add 31 to all lanes that have a negative result
+            let rplus31 = _mm256_add_epi32(result256, _mm256_set1_epi32(31));
+            let rneg    = _mm256_cmplt_epi32_mask(result256, _mm256_setzero_si256());
+            result256   = _mm256_mask_blend_epi32(rneg, result256, rplus31);
+
+            // set vacc mid and low only with sign extension
+            _mm512_slli_epi64(_mm512_cvtepi32_epi64(result256), 16)
+        };
+
+        // shift right 1, clamp down to 16 bits, then mask out lower 4 bits
+        self.v[self.inst_vd] = unsafe { 
+            // _mm256_cvtsepi32_epi16 seems to work like the below ops
+            _mm_and_si128(_mm256_cvtsepi32_epi16(_mm256_srai_epi32(result256, 1)), _mm_set1_epi16(0xFFF0u16 as i16)) 
+
+            //let shifted = _mm256_srai_epi32(result256, 1);
+            //let neg = _mm256_cmplt_epi32_mask(shifted, _mm256_set1_epi32(0xFFFF8000u32 as i32));
+            //let result = _mm256_mask_blend_epi32(!neg, _mm256_set1_epi32(0x8000i32), shifted);
+            //let pos = _mm256_cmpge_epi32_mask(shifted, _mm256_set1_epi32(0x8000i32));
+            //let result = _mm256_mask_blend_epi32(!pos, _mm256_set1_epi32(0x7FFFi32), result);
+            //_mm_and_si128(_mm256_cvtepi32_epi16(result), _mm_set1_epi16(0xFFF0u16 as i16)) 
+        };
+
+        Ok(())
+    }
+
 
     // VMACU - passing tests
     fn cop2_vmacu(&mut self) -> Result<(), InstructionFault> {
