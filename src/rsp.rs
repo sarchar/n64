@@ -558,7 +558,7 @@ impl RspCpuCore {
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
    /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudl   , Cpu::cop2_vmudm   , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
-   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
+   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_vmadl   , Cpu::cop2_vmadm   , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
@@ -2790,6 +2790,35 @@ impl RspCpuCore {
         Ok(())
     }
 
+    // VMADL - passing tests
+    fn cop2_vmadl(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmadl v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result256: __m256i;
+
+        // add only the high short of the result to the accumulator
+        self.vacc = unsafe {
+            // zero-extend the inputs to 32-bit
+            let left256  = _mm256_cvtepu16_epi32(left);
+            let right256 = _mm256_cvtepu16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            // then shift the high 16 bits into the low position
+            result256 = _mm256_srli_epi32(_mm256_mullo_epi32(left256, right256), 16);
+
+            // add result to the accumulator
+            _mm512_add_epi64(self.vacc, _mm512_cvtepu32_epi64(result256))
+        };
+
+        // saturate the accumulator to epi16 using the low lane for truncation
+        self.v[self.inst_vd] = self.v_accumulator_saturate_low();
+
+        Ok(())
+    }
+
     // VMUDM - passing tests
     fn cop2_vmudm(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vmudl v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
@@ -2818,6 +2847,34 @@ impl RspCpuCore {
         Ok(())
     }
 
+    // VMADM - passing tests
+    fn cop2_vmadm(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmadm v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result256: __m256i;
+
+        // set the mid and low lanes of the accumulator
+        self.vacc = unsafe {
+            // sign-extende vs and zero-extend vt
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepu16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+
+            // add result to vacc
+            _mm512_add_epi64(self.vacc, _mm512_cvtepi32_epi64(result256))
+        };
+
+        // saturate the highmid value of the accumulator
+        let highmid = self.v_get_accumulator_highmid();
+        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(highmid) };
+
+        Ok(())
+    }
 
     // VMUDN - passing tests
     // multiply a fraction (vs) times an integer (vt)
