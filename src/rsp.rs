@@ -557,7 +557,7 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
@@ -2735,6 +2735,35 @@ impl RspCpuCore {
         Ok(())
     }
 
+    // VMUDN - passing tests
+    // multiply a fraction (vs) times an integer (vt)
+    fn cop2_vmudn(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmudn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result256: __m256i;
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // zero-extend left and sign-extend right to 32-bits
+            let left256  = _mm256_cvtepu16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+
+            // set vacc mid and low, with sign extension
+            _mm512_cvtepi32_epi64(result256)
+        };
+
+        // set vd to truncated low 16 bits
+        self.v[self.inst_vd] = unsafe { _mm256_cvtepi32_epi16(result256) };
+
+        Ok(())
+    }
+
     // VMUDH - passing tests
     // The datasheet bit indices seem completely way off.  
     // Multiply vs and vt[e], placing the result in ACC high+mid, clearing ACC lo, 
@@ -2767,7 +2796,7 @@ impl RspCpuCore {
         Ok(())
     }
 
-    // VMADH
+    // VMADH - passing tests
     // Multiply vs and vt[e] adding the result to ACC highmid
     // Result is Saturate(ACC highmid)
     fn cop2_vmadh(&mut self) -> Result<(), InstructionFault> {
