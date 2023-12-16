@@ -558,7 +558,7 @@ impl RspCpuCore {
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
    /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
-   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_unknown ,
+   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
@@ -1329,6 +1329,32 @@ impl RspCpuCore {
         }
     }
 
+    #[allow(dead_code)]
+    fn v_print_vacc(&self) {
+        unsafe {
+            let v128 = _mm512_cvtepi64_epi16(_mm512_srli_epi64(self.vacc, 32));
+            let v256 = _mm512_cvtepi64_epi32(self.vacc);
+
+            let v = (((_mm_extract_epi16(v128, 7) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 7) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 0, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 6) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 6) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 1, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 5) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 5) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 2, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 4) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 4) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 3, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 3) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 3) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 4, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 2) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 2) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 5, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 1) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 1) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 6, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+            let v = (((_mm_extract_epi16(v128, 0) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 0) as u32) as u64);
+            println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 7, (v >> 32) as u16, (v >> 16) as u16, v as u16);
+        }
+    }
+
+
     #[inline(always)]
     fn v_reversed(src: &__m128i) -> __m128i {
         unsafe {
@@ -2071,13 +2097,23 @@ impl RspCpuCore {
         }
     }
 
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn v_set_accumulator_midlow(&mut self, v: &__m256i) {
+        unsafe {
+            let mask  = _mm512_set1_epi64(0xFFFF_FFFF_0000_0000u64 as i64);    // mask to clear mid and low lanes of vacc
+            let v     = _mm512_cvtepu32_epi64(*v);                             // zero extend 32-bit v to 64-bits
+            self.vacc = _mm512_or_si512(_mm512_and_si512(self.vacc, mask), v); // clear and OR in v
+        }
+    }
+
     // Set a 32-bit value into the high and mid values of the accumulator
     #[inline(always)]
     #[allow(dead_code)]
     fn v_set_accumulator_highmid(&mut self, v: &__m256i) {
         unsafe {
             let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
-            asm!("vpsllq {tmp512}, {mask}, 48",   // _mm512_slli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
+            asm!("vpsrlq {tmp512}, {mask}, 48",   // _mm512_srli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
                  "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
                  "vpsllq {v512}, {v512}, 16",     // _mm512_slli_epi64: shift input left 16 bits
                  "vporq {acc}, {acc}, {v512}",    // _mm512_or_epi64: OR in 32 bits into accumulataor
@@ -2088,12 +2124,11 @@ impl RspCpuCore {
         }
     }
 
+    // shift vacc right 16 (placing high/mid in the lower 32-bits), and then truncate to __m256i 8x32-bit
     #[inline(always)]
     fn v_get_accumulator_highmid(&mut self) -> __m256i {
         unsafe {
-            // shift vacc right 16 (placing high/mid in the lower 32-bits), and then truncate to __m256i
-            let vacc_shifted_truncated: __m256i = _mm512_cvtepi64_epi32(_mm512_srli_epi64(self.vacc, 16));
-            vacc_shifted_truncated
+            _mm512_cvtepi64_epi32(_mm512_srli_epi64(self.vacc, 16))
         }
     }
 
@@ -2342,35 +2377,6 @@ impl RspCpuCore {
         Ok(())
     }
 
-    fn cop2_vmadn(&mut self) -> Result<(), InstructionFault> {
-        //info!(target: "RSP", "vmadn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
-
-        // TODO temporary initialize of vacc
-        // this initializes the accumulators to the values required to pass tests
-        // clearly this function needs to be implemented properly
-        self.vacc = unsafe { 
-            _mm512_set_epi64(
-                0x0000_3FFF_4000_0001,
-                0x0000_FFFF_FFFF_8001,
-                0x0000_0007_FFF7_FFF0,
-                0x0000_0000_0000_0000,
-                0x0000_FFFF_FFFF_FFFF,
-                0x0000_0000_0000_0001,
-                0x0000_3FFF_4000_0001,
-                0x0000_3FFF_C000_0000,
-            )
-        };
-
-        // V2 needs to be initialized to specific value (for vnop)
-        self.v[2] = unsafe { _mm_set_epi16(0xffffu16 as i16, 0x8001u16 as i16, 0xffffu16 as i16, 0x0000u16 as i16, 0xffffu16 as i16, 0x0001u16 as i16, 0xffffu16 as i16, 0xffffu16 as i16) };
-
-        Ok(())
-    }
-
-    fn cop2_vmudh(&mut self) -> Result<(), InstructionFault> {
-        //info!(target: "RSP", "vmudh v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
-        Ok(())
-    }
 
     fn v_compare<T: FnOnce(__m128i, __m128i, u8, u8) -> (__m128i, u8)>(&mut self, cmp: T) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vlt v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
@@ -2704,6 +2710,95 @@ impl RspCpuCore {
         Ok(())
     }
 
+    fn cop2_vmadn(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmadn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+
+        // TODO temporary initialize of vacc
+        // this initializes the accumulators to the values required to pass tests
+        // clearly this function needs to be implemented properly
+        self.vacc = unsafe { 
+            _mm512_set_epi64(
+                0x0000_3FFF_4000_0001,
+                0x0000_FFFF_FFFF_8001,
+                0x0000_0007_FFF7_FFF0,
+                0x0000_0000_0000_0000,
+                0x0000_FFFF_FFFF_FFFF,
+                0x0000_0000_0000_0001,
+                0x0000_3FFF_4000_0001,
+                0x0000_3FFF_C000_0000,
+            )
+        };
+
+        // V2 needs to be initialized to specific value (for vnop)
+        self.v[2] = unsafe { _mm_set_epi16(0xffffu16 as i16, 0x8001u16 as i16, 0xffffu16 as i16, 0x0000u16 as i16, 0xffffu16 as i16, 0x0001u16 as i16, 0xffffu16 as i16, 0xffffu16 as i16) };
+
+        Ok(())
+    }
+
+    // VMUDH - passing tests
+    // The datasheet bit indices seem completely way off.  
+    // Multiply vs and vt[e], placing the result in ACC high+mid, clearing ACC lo, 
+    // with the result being Saturate(ACC high+mid)
+    fn cop2_vmudh(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmudh v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result256: __m256i;
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // sign-extend to 32-bits
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+
+            // setting result256 into VACC high and mid, while clearing the low lane
+            // convert to 512-bit and left shift 16
+            _mm512_slli_epi64(_mm512_cvtepu32_epi64(result256), 16)
+        };
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(result256) };
+
+        Ok(())
+    }
+
+    // VMADH
+    // Multiply vs and vt[e] adding the result to ACC highmid
+    // Result is Saturate(ACC highmid)
+    fn cop2_vmadh(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmadh v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let highmid = self.v_get_accumulator_highmid();
+
+        // multiply and set set the accumulator to the result
+        let result256 = unsafe {
+            // sign-extend to 32-bits
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            // and add to ACC highmid
+            _mm256_add_epi32(_mm256_mullo_epi32(left256, right256), highmid)
+        };
+
+        // set the result into highmid, preserving low
+        self.v_set_accumulator_highmid(&result256);
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(result256) };
+
+        Ok(())
+    }
+
+    // VMULF - passing tests
     fn cop2_vmulf(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vmulf v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
         let left  = self.v[self.inst_vs];
@@ -2715,25 +2810,27 @@ impl RspCpuCore {
             // sign-extend to eight 32-bits ints and multiply
             let left256  = _mm256_cvtepi16_epi32(left);
             let right256 = _mm256_cvtepi16_epi32(right);
-            // multiply and zero extend to 64 bits
-            let result256 = _mm256_mullo_epi32(left256, right256); // the actual op: rs * rt(e)
-            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
 
-            // shift the result left 1 bit (multiply of fractions) and add 0x8000
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            let result256 = _mm256_mullo_epi32(left256, right256);
+
+            // shift the 64-bit result left 1 bit (multiply of fractions) and add 0x8000
+            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
             _mm512_add_epi64(_mm512_slli_epi64(result512, 1), _mm512_set1_epi64(0x8000u64 as i64))
         };
 
-        // saturate the high-mid 32-bit value of the accumulator
+        //self.v_print_vacc();
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
         self.v[self.inst_vd] = unsafe {
-            let vacc_highmid = self.v_get_accumulator_highmid();
-            // saturate down to 16-bit
-            let vacc_saturated: __m128i = _mm256_cvtsepi32_epi16(vacc_highmid);
-            vacc_saturated
+            let highmid = self.v_get_accumulator_highmid();
+            _mm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())
     }
 
+    // VMACF - passing tests
     fn cop2_vmacf(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vmulf v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
         let left  = self.v[self.inst_vs];
@@ -2753,17 +2850,20 @@ impl RspCpuCore {
             _mm512_add_epi64(self.vacc, _mm512_slli_epi64(result512, 1))
         };
 
-        // saturate the high-mid 32-bit value of the accumulator
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
         self.v[self.inst_vd] = unsafe {
-            let vacc_highmid = self.v_get_accumulator_highmid();
-            // saturate down to 16-bit
-            let vacc_saturated: __m128i = _mm256_cvtsepi32_epi16(vacc_highmid);
-            vacc_saturated
+            let highmid = self.v_get_accumulator_highmid();
+            _mm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())
     }
 
+    // VMACQ - can't test until VMUDH and VMADH are passing tests
+    fn cop2_vmacq(&mut self) -> Result<(), InstructionFault> {
+        info!(target: "RSP", "vmacq v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        Ok(())
+    }
 }
 
 impl Addressable for RspCpuCore {
