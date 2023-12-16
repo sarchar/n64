@@ -2859,9 +2859,45 @@ impl RspCpuCore {
         Ok(())
     }
 
-    // VMACQ - can't test until VMUDH and VMADH are passing tests
+    // VMACQ - passing tests
+    // "Oddifies" the accumulator -- adds or subtracts 0x20 based on bit 0x20 and sign of the acc
+    // ignores vs and vt entirely
     fn cop2_vmacq(&mut self) -> Result<(), InstructionFault> {
-        info!(target: "RSP", "vmacq v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        //info!(target: "RSP", "vmacq v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+
+        let highmid = self.v_get_accumulator_highmid();
+
+        // add 0 if bit 21 is clear
+        // add 0x20<<16 if highmid is negative
+        // otherwise subtract 0x20<<16 if highmid is positive
+        let highmid = unsafe {
+            // get a bitmask for all the lanes with bit 0x20_0000 clear
+            let zero_bits = _mm256_cmpeq_epi32_mask(_mm256_and_si256(highmid, _mm256_set1_epi32(0x20u32 as i32)), _mm256_setzero_si256());
+            // mask for all lanes that are <-0x20 or >0x20
+            // using the inverse mask for code readability
+            let gen20 = _mm256_cmpge_epi32_mask(highmid, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32)); // want <-0x20 but comparing >=-0x20
+            let lep20 = _mm256_cmple_epi32_mask(highmid, _mm256_set1_epi32(0x0000_0020u32 as i32)); // want > 0x20 but comparing <= 0x20
+
+            // if bit 21 is set, add 0. if bit 21 is clear, add either -0x20 or +0x20 depending on if the lane is <-0x20 or >0x20
+            let addend = _mm256_mask_blend_epi32(zero_bits, _mm256_setzero_si256(), 
+                                                 // if result <-0x20 add 0x20, otherwise check lep20
+                                                 _mm256_mask_blend_epi32(gen20, _mm256_set1_epi32(0x0000_0020u32 as i32),
+                                                                                // if result <= 0x20, add 0
+                                                                                // otherwise subtract 0x20
+                                                                                _mm256_mask_blend_epi32(lep20, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32),
+                                                                                                               _mm256_setzero_si256())));
+            _mm256_add_epi32(highmid, addend)
+        };
+
+        // set the highmid lanes of the accumulator
+        self.v_set_accumulator_highmid(&highmid);
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe {
+            // right shift with sign
+            _mm_and_si128(_mm256_cvtsepi32_epi16(_mm256_srai_epi32(highmid, 1)), _mm_set1_epi16(0xFFF0u16 as i16))
+        };
+
         Ok(())
     }
 }
