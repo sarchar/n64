@@ -557,7 +557,7 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
@@ -2829,6 +2829,49 @@ impl RspCpuCore {
 
         Ok(())
     }
+
+    // VMULU - passing tests
+    fn cop2_vmulu(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmulu v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // sign-extend to eight 32-bits ints and multiply
+            let left256  = _mm256_cvtepi16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            let result256 = _mm256_mullo_epi32(left256, right256);
+
+            // shift the 64-bit result left 1 bit (multiply of fractions) and add 0x8000
+            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+            _mm512_add_epi64(_mm512_slli_epi64(result512, 1), _mm512_set1_epi64(0x8000u64 as i64))
+        };
+
+        // unsigned saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe {
+            let highmid = self.v_get_accumulator_highmid();
+            let high = _mm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16));
+            let mid  = _mm256_cvtepi32_epi16(highmid);
+
+            // _mm_packus_epi32 and _mm256_cvtusepi32_epi16 don't work the way we want -- it won't saturate 0x0000_8000 to 0x0000_FFFF (and why should it?)
+            // so we do it ourselves!
+            let uppermask = _mm_cmplt_epi16_mask(high, _mm_setzero_si128()); // bit 0x8000_0000 is set - 32-bit number is negative, goes to 0
+            let halfmask  = _mm_cmplt_epi16_mask(_mm_xor_si128(high, mid), _mm_setzero_si128()); // when high bit is clear but bit 0x0000_8000 is set, saturate to 0xFFFF
+            // if uppermask is set, return 0
+            _mm_mask_blend_epi16(!uppermask, _mm_setzero_si128(),
+                                             // if halfmask is set, return 0xFFFF
+                                             _mm_mask_blend_epi16(!halfmask, _mm_set1_epi16(0xFFFFu16 as i16),
+                                                                             // otherwise, ACC mid is used directly
+                                                                             mid))
+        };
+
+        Ok(())
+    }
+
 
     // VMACF - passing tests
     fn cop2_vmacf(&mut self) -> Result<(), InstructionFault> {
