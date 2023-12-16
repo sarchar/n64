@@ -557,7 +557,7 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmudl   , Cpu::cop2_unknown , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
    /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
@@ -2761,31 +2761,31 @@ impl RspCpuCore {
         Ok(())
     }
 
-    // VMADN - passing tests
-    fn cop2_vmadn(&mut self) -> Result<(), InstructionFault> {
-        //info!(target: "RSP", "vmadn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+    // VMUDL - passing tests
+    fn cop2_vmudl(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmudl v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
         let left  = self.v[self.inst_vs];
         let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
         //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
 
         let result256: __m256i;
 
-        // multiply and set set the accumulator to the result
+        // set only the low lane of the accumulator
         self.vacc = unsafe {
-            // zero-extend left and sign-extend right to 32-bits
+            // zero-extend the inputs to 32-bit
             let left256  = _mm256_cvtepu16_epi32(left);
-            let right256 = _mm256_cvtepi16_epi32(right);
+            let right256 = _mm256_cvtepu16_epi32(right);
 
             // multiply into 64-bit intermedaite and use the low 32-bits of the result
-            result256 = _mm256_mullo_epi32(left256, right256);
+            // then shift the high 16 bits into the low position
+            result256 = _mm256_srli_epi32(_mm256_mullo_epi32(left256, right256), 16);
 
-            // set vacc mid and low, with sign extension
-            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFFu64 as i64);
-            _mm512_add_epi64(_mm512_and_si512(self.vacc, mask), _mm512_and_si512(_mm512_cvtepi32_epi64(result256), mask))
+            // set vacc low only
+            _mm512_cvtepu32_epi64(result256)
         };
 
-        // saturate the low 16-bit value of the accumulator
-        self.v[self.inst_vd] = self.v_accumulator_saturate_low();
+        // truncate to epi16
+        self.v[self.inst_vd] = unsafe { _mm256_cvtepi32_epi16(result256) };
 
         Ok(())
     }
@@ -2818,6 +2818,36 @@ impl RspCpuCore {
 
         Ok(())
     }
+
+    // VMADN - passing tests
+    fn cop2_vmadn(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vmadn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
+
+        let result256: __m256i;
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // zero-extend left and sign-extend right to 32-bits
+            let left256  = _mm256_cvtepu16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+
+            // set vacc mid and low, with sign extension
+            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFFu64 as i64);
+            _mm512_add_epi64(_mm512_and_si512(self.vacc, mask), _mm512_and_si512(_mm512_cvtepi32_epi64(result256), mask))
+        };
+
+        // saturate the low 16-bit value of the accumulator
+        self.v[self.inst_vd] = self.v_accumulator_saturate_low();
+
+        Ok(())
+    }
+
 
     // VMUDH - passing tests
     // The datasheet bit indices seem completely way off.  
