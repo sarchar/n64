@@ -2132,6 +2132,57 @@ impl RspCpuCore {
         }
     }
 
+    // truncate vacc to __m256i 8x32-bit
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn v_get_accumulator_midlow(&mut self) -> __m256i {
+        unsafe {
+            _mm512_cvtepi64_epi32(self.vacc)
+        }
+    }
+
+    // truncate vacc to __m128 8x16-bit
+    #[inline(always)]
+    fn v_get_accumulator_low(&mut self) -> __m128i {
+        unsafe {
+            _mm512_cvtepi64_epi16(self.vacc)
+        }
+    }
+
+    // saturate 48-bit accumulator down to 16-bits using the low short as a result when truncating
+    #[inline(always)]
+    fn v_accumulator_saturate_low(&mut self) -> __m128i {
+        // _mm512_cvtsepi64_epi16 doesn't do what we want
+        //.unsafe {
+        //.    _mm512_cvtsepi64_epi16(_mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16))
+        //.}
+        let highmid = self.v_get_accumulator_highmid();
+        let low     = self.v_get_accumulator_low();
+
+        // saturate the low 16-bit value of the accumulator, but we need to use the sign of the high lane
+        unsafe { 
+            let high      = _mm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16)); // extract high lane
+            let high_neg  = _mm_cmplt_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is negative
+            let high_neg1 = _mm_cmpeq_epi16_mask(high, _mm_set1_epi16(-1i16)); // set to 1 if vacc high is 0xFFFF
+            let high_zero = _mm_cmpeq_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is 0
+
+            let mid       = _mm256_cvtepi32_epi16(highmid); // extract mid lane
+            let mid_neg   = _mm_cmplt_epi16_mask(mid, _mm_setzero_si128()); // set to 1 if mid is negative
+            
+            // if high is negative but highmid is 0xFFFF8000 the result is saturated to zero, otherwise truncate
+            let hm_neg = (!high_neg1) | (!mid_neg);
+            let hm_neg_result = _mm_mask_blend_epi16(!hm_neg, _mm_setzero_si128(), low);
+            
+            // if highmid is less than 0x00008000 saturate to -1
+            let hm_small = (!high_zero) | mid_neg;
+            let hm_small_result = _mm_mask_blend_epi16(!hm_small, _mm_set1_epi16(-1i16), low);
+
+            // pick hm_neg or hm_small, otherwise truncate
+            _mm_mask_blend_epi16(!high_neg, hm_neg_result, hm_small_result)
+        }
+    }
+
+
     fn cop2_unknown(&mut self) -> Result<(), InstructionFault> {
         let func = self.inst.v & 0x3F;
         error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
@@ -2710,27 +2761,31 @@ impl RspCpuCore {
         Ok(())
     }
 
+    // VMADN - passing tests
     fn cop2_vmadn(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vmadn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let left  = self.v[self.inst_vs];
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+        //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
 
-        // TODO temporary initialize of vacc
-        // this initializes the accumulators to the values required to pass tests
-        // clearly this function needs to be implemented properly
-        self.vacc = unsafe { 
-            _mm512_set_epi64(
-                0x0000_3FFF_4000_0001,
-                0x0000_FFFF_FFFF_8001,
-                0x0000_0007_FFF7_FFF0,
-                0x0000_0000_0000_0000,
-                0x0000_FFFF_FFFF_FFFF,
-                0x0000_0000_0000_0001,
-                0x0000_3FFF_4000_0001,
-                0x0000_3FFF_C000_0000,
-            )
+        let result256: __m256i;
+
+        // multiply and set set the accumulator to the result
+        self.vacc = unsafe {
+            // zero-extend left and sign-extend right to 32-bits
+            let left256  = _mm256_cvtepu16_epi32(left);
+            let right256 = _mm256_cvtepi16_epi32(right);
+
+            // multiply into 64-bit intermedaite and use the low 32-bits of the result
+            result256 = _mm256_mullo_epi32(left256, right256);
+
+            // set vacc mid and low, with sign extension
+            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFFu64 as i64);
+            _mm512_add_epi64(_mm512_and_si512(self.vacc, mask), _mm512_and_si512(_mm512_cvtepi32_epi64(result256), mask))
         };
 
-        // V2 needs to be initialized to specific value (for vnop)
-        self.v[2] = unsafe { _mm_set_epi16(0xffffu16 as i16, 0x8001u16 as i16, 0xffffu16 as i16, 0x0000u16 as i16, 0xffffu16 as i16, 0x0001u16 as i16, 0xffffu16 as i16, 0xffffu16 as i16) };
+        // saturate the low 16-bit value of the accumulator
+        self.v[self.inst_vd] = self.v_accumulator_saturate_low();
 
         Ok(())
     }
