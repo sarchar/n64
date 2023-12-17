@@ -563,7 +563,7 @@ impl RspCpuCore {
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
+   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmov    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
             ],
         };
@@ -2187,6 +2187,21 @@ impl RspCpuCore {
         let func = self.inst.v & 0x3F;
         error!(target: "RSP", "unimplemented COP2 function 0b{:03b}_{:03b}", func >> 3, func & 0x07);
         todo!();
+    }
+
+    fn cop2_vmov(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vmov v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+
+        // set ACC lo to vt[e]
+        self.v_set_accumulator_lo(&right);
+
+        // move lane [de] from vt[e] to vs
+        let de = de & 7;
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], Self::v_short(&right, de), de * 2);
+
+        Ok(())
     }
 
     fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
