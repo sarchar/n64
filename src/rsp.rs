@@ -112,6 +112,12 @@ struct RspCpuCore {
     regimm_table: [CpuInstruction; 32],
     cop2_table: [CpuInstruction; 64],
 
+    // rcp and rsq tables
+    rcp_high: bool,
+    rcp_input: u16,
+    rcp_table: [u16; 512],
+    div_result: u32,
+
     // multiple reader single writer memory
     mem: Arc<RwLock<Vec<u32>>>,
 
@@ -491,6 +497,28 @@ impl Addressable for Rsp {
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
     fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, start_dma_tx: mpsc::Sender<DmaInfo>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
+        // initialize the reciprocal table.. the algorithm is widely available but I'll include the Ares license here as well, since it's used in n64-systemtest
+        // The generation of the RCP and RSP tables was ported from Ares: https://github.com/ares-emulator/ares/blob/acd2130a4d4c9e7208f61e0ff762895f7c9b8dc6/ares/n64/rsp/rsp.cpp#L102
+        // which uses the following license:
+        
+        // Copyright (c) 2004-2021 ares team, Near et al
+        //
+        // Permission to use, copy, modify, and/or distribute this software for any
+        // purpose with or without fee is hereby granted, provided that the above
+        // copyright notice and this permission notice appear in all copies.
+        //
+        // THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+        // WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+        // MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+        // ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+        // WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+        // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+        // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+        let mut rcp_table = [0xFFFFu16; 512];
+        for i in 1..512 {
+            rcp_table[i] = ((((1u64 << 34) / ((i as u64) + 512)) + 1) >> 8) as u16;
+        }
+
         let mut core = RspCpuCore {
             pc: 0,
             current_instruction_pc: 0,
@@ -501,6 +529,11 @@ impl RspCpuCore {
 
             gpr: [0u32; 32],
             ccr: [0u32; 4],
+
+            rcp_high: false,
+            rcp_input: 0,
+            rcp_table: rcp_table,
+            div_result: 0u32,
 
             v: [unsafe { _mm_setzero_si128() }; 32],
             vacc: unsafe { _mm512_setzero_si512() },
@@ -563,7 +596,7 @@ impl RspCpuCore {
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 110_ */   Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vmov    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
+   /* 110_ */   Cpu::cop2_vrcp    , Cpu::cop2_vrcpl   , Cpu::cop2_vrcph   , Cpu::cop2_vmov    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
             ],
         };
@@ -3244,6 +3277,105 @@ impl RspCpuCore {
             // right shift with sign
             _mm_and_si128(_mm256_cvtsepi32_epi16(_mm256_srai_epi32(highmid, 1)), _mm_set1_epi16(0xFFF0u16 as i16))
         };
+
+        Ok(())
+    }
+
+    // common code for cop2_vrcp and cop2_vrcpl
+    fn v_rcp(&self, src: u32) -> u32 {
+        if src == 0 {
+            0x7FFF_FFFF
+        } else if src == 0xFFFF_8000 {
+            0xFFFF_0000
+        } else {
+            // adjust src if it's value is in -1..-32,768
+            let src = if src > 0xFFFF_8000u32 { src - 1 } else { src };
+
+            // invert if negative
+            let neg = (src & 0x8000_0000) != 0;
+            let src = if neg { !src } else { src };
+
+            // calculate shift
+            let shift = src.leading_zeros() + 1; // leading zeroes plus the one 1 (must exist because src != 0)
+            
+            // compute index into reciprocal table (9 bits, 0..=511)
+            let index = ((src << shift) & 0xFF80_0000) >> 23;
+
+            // invert result for negative input
+            let result = ((0x10000 | (self.rcp_table[index as usize] as u32)) << 14) >> (32 - shift);
+            if neg { !result } else { result }
+        }
+    }
+
+    // despite being called *V*RCP, it only works on a single scalar value from vt
+    // woulda been cooler if it did all lanes in vt[e]
+    fn cop2_vrcp(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrcp v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+
+        // E selects the element of vt
+        let src = (Self::v_short(&self.v[self.inst_vt], self.inst_e & 0x07) as i16) as u32;
+        let result = self.v_rcp(src);
+        //println!("src=${:08X} result=${:08X}", src, result);
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&Self::v_math_elements(&self.v[self.inst_vt], self.inst_e));
+
+        // set the lower 16 bits to the specified lane of vd
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], result as u16, (de & 7) * 2);
+
+        // save the result
+        self.div_result = result;
+        self.rcp_high   = false;
+        
+        Ok(())
+    }
+
+    // much the same as VRCP but with a different, possibly 32 bit, input
+    fn cop2_vrcpl(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrcpl v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+
+        // E selects the element of vt
+        let tmp = Self::v_short(&self.v[self.inst_vt], self.inst_e & 0x07);
+
+        // if VRCPH was used, make use of rcp_input
+        let src = if self.rcp_high {
+            ((self.rcp_input as u32) << 16) | (tmp as u32)
+        } else {
+            (tmp as i16) as u32
+        };
+
+        let result = self.v_rcp(src);
+        //println!("src=${:08X} result=${:08X}", src, result);
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&Self::v_math_elements(&self.v[self.inst_vt], self.inst_e));
+
+        // set the lower 16 bits to the specified lane of vd
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], result as u16, (de & 7) * 2);
+
+        // save the result
+        self.div_result = result;
+        self.rcp_high   = false;
+        
+        Ok(())
+    }
+
+    fn cop2_vrcph(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrcph v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+
+        // set the input to rcph into the hidden input register
+        self.rcp_high = true;
+        self.rcp_input = Self::v_short(&right, de & 7); // grab lane de from vt[e]
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&right);
+
+        // set the lane of vd to the high short of div_result
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], (self.div_result >> 16) as u16, (de & 7) * 2);
 
         Ok(())
     }
