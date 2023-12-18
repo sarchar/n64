@@ -282,8 +282,8 @@ impl Rcp {
             return Ok(());
         }
 
-        let mut source_address = dma_info.source_address;
-        let mut dest_address = dma_info.dest_address;
+        let mut source_address = dma_info.source_address & !0x07;
+        let mut dest_address = dma_info.dest_address & !0x07;
 
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {
