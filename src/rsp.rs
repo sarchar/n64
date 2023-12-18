@@ -116,6 +116,7 @@ struct RspCpuCore {
     rcp_high: bool,
     rcp_input: u16,
     rcp_table: [u16; 512],
+    rsq_table: [u16; 512],
     div_result: u32,
 
     // multiple reader single writer memory
@@ -519,6 +520,25 @@ impl RspCpuCore {
             rcp_table[i] = ((((1u64 << 34) / ((i as u64) + 512)) + 1) >> 8) as u16;
         }
 
+        // this algorithm comes from n64-systemtest, so: Copyright (c) 2021 lemmy-64 under the MIT license
+        let mut rsq_table = [0u16; 512];
+        let alg_start_time = std::time::Instant::now();
+        for i in 0..512 {
+            let a = (if i < 256 { i + 256 } else { ((i - 256) << 1) + 512 }) as u64;
+            let mut b = 1u64 << 17;
+            rsq_table[i] = {
+                // find the largest b where b < 1.0 / sqrt(a)
+                let mut inc = 512;
+                while inc != 0 {
+                    while (a * (b + inc) * (b + inc)) < (1u64 << 44) { b += inc; }
+                    inc >>= 1;
+                }
+                (b >> 1) as u16
+            };
+        }
+        let alg_time = alg_start_time.elapsed();
+        info!(target: "RSP", "RSQ table generation took {:.2?}", alg_time);
+
         let mut core = RspCpuCore {
             pc: 0,
             current_instruction_pc: 0,
@@ -533,6 +553,7 @@ impl RspCpuCore {
             rcp_high: false,
             rcp_input: 0,
             rcp_table: rcp_table,
+            rsq_table: rsq_table,
             div_result: 0u32,
 
             v: [unsafe { _mm_setzero_si128() }; 32],
@@ -590,13 +611,13 @@ impl RspCpuCore {
 
             cop2_table: [
                //   _000                _001                _010                _011                _100                _101                _110                _111
-   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_unknown , Cpu::cop2_vmulq   , Cpu::cop2_vmudl   , Cpu::cop2_vmudm   , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
-   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_unknown , Cpu::cop2_vmacq   , Cpu::cop2_vmadl   , Cpu::cop2_vmadm   , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
+   /* 000_ */   Cpu::cop2_vmulf   , Cpu::cop2_vmulu   , Cpu::cop2_vrndp   , Cpu::cop2_vmulq   , Cpu::cop2_vmudl   , Cpu::cop2_vmudm   , Cpu::cop2_vmudn   , Cpu::cop2_vmudh   ,
+   /* 001_ */   Cpu::cop2_vmacf   , Cpu::cop2_vmacu   , Cpu::cop2_vrndn   , Cpu::cop2_vmacq   , Cpu::cop2_vmadl   , Cpu::cop2_vmadm   , Cpu::cop2_vmadn   , Cpu::cop2_vmadh   ,
    /* 010_ */   Cpu::cop2_vadd    , Cpu::cop2_vsub    , Cpu::cop2_vweird  , Cpu::cop2_vabs    , Cpu::cop2_vaddc   , Cpu::cop2_vsubc   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 011_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vsar    , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
    /* 100_ */   Cpu::cop2_vlt     , Cpu::cop2_veq     , Cpu::cop2_vne     , Cpu::cop2_vge     , Cpu::cop2_vcl     , Cpu::cop2_vch     , Cpu::cop2_vcr     , Cpu::cop2_vmrg    ,
    /* 101_ */   Cpu::cop2_vand    , Cpu::cop2_vnand   , Cpu::cop2_vor     , Cpu::cop2_vnor    , Cpu::cop2_vxor    , Cpu::cop2_vnxor   , Cpu::cop2_vweird  , Cpu::cop2_vweird  ,
-   /* 110_ */   Cpu::cop2_vrcp    , Cpu::cop2_vrcpl   , Cpu::cop2_vrcph   , Cpu::cop2_vmov    , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_unknown , Cpu::cop2_vnop    ,
+   /* 110_ */   Cpu::cop2_vrcp    , Cpu::cop2_vrcpl   , Cpu::cop2_vrcph   , Cpu::cop2_vmov    , Cpu::cop2_vrsq    , Cpu::cop2_vrsql   , Cpu::cop2_vrsqh   , Cpu::cop2_vnop    ,
    /* 111_ */   Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vweird  , Cpu::cop2_vnop    
             ],
         };
@@ -3376,6 +3397,166 @@ impl RspCpuCore {
 
         // set the lane of vd to the high short of div_result
         self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], (self.div_result >> 16) as u16, (de & 7) * 2);
+
+        Ok(())
+    }
+
+    // common code for cop2_vrsq and cop2_vrsql
+    fn v_rsq(&self, src: u32) -> u32 {
+        if src == 0 {
+            0x7FFF_FFFF
+        } else if src == 0xFFFF_8000 {
+            0xFFFF_0000
+        } else {
+            // adjust src if it's value is in -1..-32,768
+            let src = if src > 0xFFFF_8000u32 { src - 1 } else { src };
+
+            // invert if negative
+            let neg = (src & 0x8000_0000) != 0;
+            let src = if neg { !src } else { src };
+
+            // calculate shift
+            let shift = src.leading_zeros() + 1; // leading zeroes plus the one 1 (must exist because src != 0)
+            
+            // compute index into reciprocal table (9 bits, 0..=511), but odd/even shifts pick 0..255 or 256..511
+            let index = (((src << shift) & 0xFF80_0000) >> 24) | ((shift & 1) << 8);
+
+            // invert result for negative input
+            let result = ((0x10000 | (self.rsq_table[index as usize] as u32)) << 14) >> ((32 - shift) / 2);
+            if neg { !result } else { result }
+        }
+    }
+
+    fn cop2_vrsq(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrsq v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+
+        // E selects the element of vt
+        let src = (Self::v_short(&self.v[self.inst_vt], self.inst_e & 0x07) as i16) as u32;
+        let result = self.v_rsq(src);
+        //println!("src=${:08X} result=${:08X}", src, result);
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&Self::v_math_elements(&self.v[self.inst_vt], self.inst_e));
+
+        // set the lower 16 bits to the specified lane of vd
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], result as u16, (de & 7) * 2);
+
+        // save the result
+        self.div_result = result;
+        self.rcp_high   = false;
+        
+        Ok(())
+    }
+
+    // much the same as VRSQ but with a different, possibly 32 bit, input
+    fn cop2_vrsql(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrsql v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+
+        // E selects the element of vt
+        let tmp = Self::v_short(&self.v[self.inst_vt], self.inst_e & 0x07);
+
+        // if VRSQH was used, make use of rcp_input
+        let src = if self.rcp_high {
+            ((self.rcp_input as u32) << 16) | (tmp as u32)
+        } else {
+            (tmp as i16) as u32
+        };
+
+        let result = self.v_rsq(src);
+        //println!("src=${:08X} result=${:08X}", src, result);
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&Self::v_math_elements(&self.v[self.inst_vt], self.inst_e));
+
+        // set the lower 16 bits to the specified lane of vd
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], result as u16, (de & 7) * 2);
+
+        // save the result
+        self.div_result = result;
+        self.rcp_high   = false;
+        
+        Ok(())
+    }
+
+    fn cop2_vrsqh(&mut self) -> Result<(), InstructionFault> {
+        let de = ((self.inst.v >> 11) & 0x1F) as u8;
+        //info!(target: "RSP", "vrsqh v{}[0b{:05b}],  v{}[0b{:04b}]", self.inst_vd, de, self.inst_vt, self.inst_e);
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+
+        // set the input to rcph into the hidden input register
+        self.rcp_high = true;
+        self.rcp_input = Self::v_short(&right, de & 7); // grab lane de from vt[e]
+
+        // low lane of the accumulator gets vt[e]. set before changing vd
+        self.v_set_accumulator_lo(&right);
+
+        // set the lane of vd to the high short of div_result
+        self.v[self.inst_vd] = Self::v_insert_short(&self.v[self.inst_vd], (self.div_result >> 16) as u16, (de & 7) * 2);
+
+        Ok(())
+    }
+
+    fn cop2_vrndn(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vrndn v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+
+        self.vacc = unsafe {
+            // compute "product", which is either vt[e] sign-extended or shifted up
+            let product = if (self.inst_vs & 1) == 0 {
+                _mm256_cvtepi16_epi32(right)
+            } else {
+                _mm256_slli_epi32(_mm256_cvtepi16_epi32(right), 16)
+            };
+
+            // check if ACC < 0
+            let vacc    = _mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16);
+            let acc_neg = _mm512_cmplt_epi64_mask(vacc, _mm512_setzero_si512());
+
+            // if ACC < 0, add sign-extended (to 48 bit) product
+            let acc_sum = _mm512_add_epi64(vacc, _mm512_cvtepi32_epi64(product));
+
+            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFF);
+            _mm512_and_si512(_mm512_mask_blend_epi64(acc_neg, vacc, acc_sum), mask)
+        };
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe {
+            let highmid = self.v_get_accumulator_highmid();
+            _mm256_cvtsepi32_epi16(highmid)
+        };
+
+        Ok(())
+    }
+    fn cop2_vrndp(&mut self) -> Result<(), InstructionFault> {
+        //info!(target: "RSP", "vrndp v{}, v{}, v{}[0b{:04b}]", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e);
+        let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
+
+        self.vacc = unsafe {
+            // compute "product", which is either vt[e] sign-extended or shifted up
+            let product = if (self.inst_vs & 1) == 0 {
+                _mm256_cvtepi16_epi32(right)
+            } else {
+                _mm256_slli_epi32(_mm256_cvtepi16_epi32(right), 16)
+            };
+
+            // check if bit 0x0000_8000_0000_0000 is clear (checking ACC >= 0)
+            let vacc    = _mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16);
+            let acc_pos = _mm512_cmpge_epi64_mask(vacc, _mm512_setzero_si512());
+
+            // if ACC >= 0, add sign-extended (to 48 bit) product
+            let acc_sum = _mm512_add_epi64(vacc, _mm512_cvtepi32_epi64(product));
+
+            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFF);
+            _mm512_and_si512(_mm512_mask_blend_epi64(acc_pos, vacc, acc_sum), mask)
+        };
+
+        // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
+        self.v[self.inst_vd] = unsafe {
+            let highmid = self.v_get_accumulator_highmid();
+            _mm256_cvtsepi32_epi16(highmid)
+        };
 
         Ok(())
     }
