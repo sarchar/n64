@@ -1,4 +1,6 @@
-use tracing::{debug,error,trace,warn};
+use std::mem;
+
+use tracing::{debug,error,trace,warn,info};
 
 use crate::*;
 
@@ -6,7 +8,10 @@ const PAL_BURST: u32 = 0x0404233A;
 const NTSC_BURST: u32 = 0x03E52239;
 
 pub struct VideoInterface {
-    
+    should_interrupt_flag: bool,
+    resolution_changed: u32,
+    cycle_count: u64,
+
     // VI_CTRL control flags
     dedither_filter_enable: u8,
     pixel_advance: u8,
@@ -69,6 +74,10 @@ pub struct VideoInterface {
 impl VideoInterface {
     pub fn new() -> VideoInterface {
         VideoInterface {
+            should_interrupt_flag: false,
+            resolution_changed: 0,
+            cycle_count: 0,
+
             // VI_CTRL
             dedither_filter_enable: 0,
             pixel_advance: 0,
@@ -139,6 +148,36 @@ impl VideoInterface {
 
     pub fn origin(&self) -> u32 {
         self.origin
+    }
+
+    pub fn step(&mut self, cpu_cycles_elapsed: u64) {
+        if self.resolution_changed > 0 {
+            self.resolution_changed = 0;
+
+            // emit some signal?
+            let width  = ((self.h_end - self.h_start) as f32 * (self.y_scale as f32 / 1024.0)) as u32;
+            let height = ((((self.v_end - self.v_start) as f32) / 2.0) * (self.x_scale as f32 / 1024.0)) as u32;
+            let depth  = if self.pixel_type == 3 { 32 } else if self.pixel_type == 2 { 16 } else { 0 };
+            info!(target: "VI", "resolution changed to {width}x{height}x{depth}");
+        }
+
+        // CPU runs at 93.75MHz, so we should render a frame every 1,562,500 cpu cycles
+        // Just assuming a 320x240 resolution, we should complete a scanline every ~6510 cycles
+        const NUM_LINES: u32 = 280;
+        const CYC_PER_SCANLINE: u64 = 1562500 / (NUM_LINES as u64);
+        self.cycle_count += cpu_cycles_elapsed;
+        while self.cycle_count >= CYC_PER_SCANLINE { 
+            self.cycle_count -= CYC_PER_SCANLINE;
+            self.current_line = (self.current_line + 1) % NUM_LINES;
+
+            if self.current_line == self.interrupt_line {
+                self.should_interrupt_flag = true;
+            }
+        }
+    }
+
+    pub fn should_interrupt(&mut self) -> bool {
+        mem::replace(&mut self.should_interrupt_flag, false)
     }
 }
 
@@ -303,6 +342,7 @@ impl Addressable for VideoInterface {
             0x0_0024 => {
                 self.h_start = ((value >> 16) & 0x3FF) as u16;
                 self.h_end = (value & 0x3FF) as u16;
+                self.resolution_changed += 1;
                 debug!(target: "VI", "setting scanline to pixels {}..{}", self.h_start, self.h_end);
                 Ok(WriteReturnSignal::None)
             },
@@ -310,7 +350,8 @@ impl Addressable for VideoInterface {
             // VI_V_VIDEO
             0x0_0028 => {
                 self.v_start = ((value >> 16) & 0x3FF) as u16;
-                self.v_end = (value & 0x3FF) as u16;
+                self.v_end   = (value & 0x3FF) as u16;
+                self.resolution_changed += 1;
                 debug!(target: "VI", "setting field size to lines {}..{}", self.v_start, self.v_end);
                 Ok(WriteReturnSignal::None)
             },
@@ -325,6 +366,7 @@ impl Addressable for VideoInterface {
             0x0_0030 => {
                 self.x_offset = ((value >> 16) & 0x0FFF) as u16;
                 self.x_scale = (value & 0x0FFF) as u16;
+                self.resolution_changed += 1;
                 debug!(target: "VI", "setting x_scale={} x_offset={}", self.x_scale, self.x_offset);
                 Ok(WriteReturnSignal::None)
             },
@@ -333,6 +375,7 @@ impl Addressable for VideoInterface {
             0x0_0034 => {
                 self.y_offset = ((value >> 16) & 0x0FFF) as u16;
                 self.y_scale = (value & 0x0FFF) as u16;
+                self.resolution_changed += 1;
                 debug!(target: "VI", "setting y_scale={} y_offset={}", self.y_scale, self.y_offset);
                 Ok(WriteReturnSignal::None)
             },

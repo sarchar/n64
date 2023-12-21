@@ -82,15 +82,16 @@ impl Rcp {
         self.rsp.start();
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self, cpu_cycles_elapsed: u64) {
         self.rsp.step();
-
         self.pi.step();
+        self.vi.step(cpu_cycles_elapsed);
 
         // TODO move interrupts to mpsc?
         self.mi.step(
             self.rsp.should_interrupt(),
             self.pi.should_interrupt(),
+            self.vi.should_interrupt(),
         );
 
         // run all the DMAs for the cycle
@@ -244,7 +245,7 @@ impl Rcp {
 
             // SI 0x0480_0000-0x048F_FFFF
             8 => {
-                error!(target: "RCP", "unimplemented SI {mode}");
+                error!(target: "RCP", "unimplemented SI {mode} offset=${offset:08X}");
                 (None, 0)
             },
 
@@ -272,7 +273,7 @@ impl Rcp {
 
     // Slow, maybe at some point we can do more of a direct memory copy
     fn do_dma(&mut self, dma_info: &DmaInfo) -> Result<(), ReadWriteFault> {
-        debug!(target: "RCP::DMA", "performing DMA!");
+        //debug!(target: "RCP", "performing DMA!");
 
         if (dma_info.length % 4) != 0 {
             return Err(ReadWriteFault::Invalid);

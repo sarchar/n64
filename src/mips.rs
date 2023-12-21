@@ -25,13 +25,17 @@ impl MipsInterface {
         }
     }
     
-    pub fn step(&mut self, rsp_interrupt: bool, pi_interrupt: bool) {
+    pub fn step(&mut self, rsp_interrupt: bool, pi_interrupt: bool, vi_interrupt: bool) {
         if rsp_interrupt && (self.interrupt_mask & IMask_SP) != 0 {
             self.interrupt |= 1 << IMask_SP;
         }
 
         if pi_interrupt && (self.interrupt_mask & IMask_PI) != 0 {
             self.interrupt |= 1 << IMask_PI;
+        }
+
+        if vi_interrupt && (self.interrupt_mask & IMask_VI) != 0 {
+            self.interrupt |= 1 << IMask_VI;
         }
     }
 
@@ -50,6 +54,12 @@ impl Addressable for MipsInterface {
             0x0_0004 => {
                 debug!(target: "MI", "version read");
                 0x0202_0102
+            },
+
+            // MI_INTERRUPT
+            0x0_0008 => {
+                debug!(target: "MI", "interrupt cause read");
+                self.interrupt
             },
 
             // MI_MASK
@@ -76,17 +86,17 @@ impl Addressable for MipsInterface {
             },
 
             0x0_000C => {
-                info!(target: "MI", "write MI_MASK value=${:08X}", value);
+                //info!(target: "MI", "write MI_MASK value=${:08X}", value);
 
                 for mask in [IMask_DP, IMask_PI, IMask_VI, IMask_AI, IMask_SI, IMask_SP] {
-                    // Clear mask
+                    // Set mask
                     if (value & (1 << ((mask * 2) + 1))) != 0 {
-                        self.interrupt_mask &= !(1 << mask);
+                        self.interrupt_mask |= 1 << mask;
                     }
 
-                    // Set mask
+                    // Clear mask
                     if (value & (1 << (mask * 2))) != 0 {
-                        self.interrupt_mask |= 1 << mask;
+                        self.interrupt_mask &= !(1 << mask);
                     }
                 }
             },

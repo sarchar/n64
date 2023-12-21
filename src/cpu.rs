@@ -53,6 +53,7 @@ const ExceptionCode_Tr   : u64 = 13; // Trap instruction
 const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
+const InterruptCode_RPC: u64 = 0x04;
 const InterruptCode_Timer: u64 = 0x80;
 
 #[derive(Debug, Default)]
@@ -582,21 +583,20 @@ impl Cpu {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
         //println!("CPU: interrupt!");
-        self.exception(ExceptionCode_Int, false)
-    }
-
-    // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
-    pub fn external_interrupt(&mut self, int_pins: u32) -> Result<(), InstructionFault> {
-        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | ((int_pins as u64) << 10);
-
         // check if the interrupts are enabled
-        if ((int_pins as u64) & (self.cp0gpr[Cop0_Status] >> 10)) != 0 { // interrupt mask IM2-6
+        if ((interrupt_signal as u64) & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
             if (self.cp0gpr[Cop0_Status] & 0x01) != 0 { // interrupt enable IE
-                return self.exception(ExceptionCode_Int, false);
+                self.exception(ExceptionCode_Int, false)?;
             }
         }
 
         Ok(())
+    }
+
+    // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
+    #[inline(always)]
+    pub fn rpc_interrupt(&mut self) -> Result<(), InstructionFault> {
+        self.interrupt(InterruptCode_RPC)
     }
 
     #[inline(always)]
@@ -2682,9 +2682,6 @@ impl Cpu {
                     "bltzal", "bgezal", "bltzall", "bgezall", "?", "?", "?", "?",
                     "?", "?", "?", "?", "?", "?", "?", "?",
                 ];
-                if REGIMM[rt as usize].starts_with("?") {
-                    panic!("unknown regimm rs=${:02b}_{:03b}", rs >> 3, rs & 0x07);
-                }
                 i_type1_rs(REGIMM[rt as usize])
             },
 

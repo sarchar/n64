@@ -109,22 +109,27 @@ impl System {
     }
 
     pub fn run(&mut self) {
-        loop { let _ = self.step(); }
+        loop { let _ = self.step(1000); }
     }
 
-    pub fn step(&mut self) -> Result<(), cpu::InstructionFault> {
+    pub fn step(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
+        let mut i = 0;
+        while i < cpu_cycles {
+            self.cpu.step()?; // TODO should probably still call rcp.step() if this returns an error?
+            i += 1;
+        }
+
         let interrupt_mask = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
-            rcp.step();
+            rcp.step(cpu_cycles);
             rcp.should_interrupt()
         };
 
-
         if interrupt_mask != 0 {
-            let _ = self.cpu.external_interrupt(interrupt_mask);
+            let _ = self.cpu.rpc_interrupt();
         }
 
-        self.cpu.step()
+        Ok(())
     }
 }
 

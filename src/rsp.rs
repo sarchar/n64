@@ -27,7 +27,7 @@ const Cop0_Semaphore     : usize = 7;
 const _Cop0_CmdStart      : usize = 8;
 const _Cop0_CmdEnd        : usize = 9;
 const _Cop0_CmdCurrent    : usize = 10;
-const _Cop0_CmdStatus     : usize = 11;
+const Cop0_CmdStatus     : usize = 11;
 const _Cop0_CmdClock      : usize = 12;
 const _Cop0_CmdBusy       : usize = 13;
 const _Cop0_CmdPipeBusy   : usize = 14;
@@ -85,6 +85,8 @@ pub struct RspSharedState {
 
 #[derive(Debug)]
 struct RspCpuCore {
+    num_steps: u64,
+
     // registers
     pc: u32,
     current_instruction_pc: u32, // actual PC of the currently executing instruction
@@ -186,6 +188,7 @@ impl Rsp {
         }
 
         thread::spawn(move || {
+            let mut _started_time = std::time::Instant::now();
             loop {
                 let mut c = core.lock().unwrap();
 
@@ -201,11 +204,13 @@ impl Rsp {
 
                     // running!
                     let mut c = core.lock().unwrap();
+                    _started_time = std::time::Instant::now();
+                    c.num_steps = 0;
                     c.halted = false;
                     c.broke = false;
                 } else {
                     // run for some cycles or until break
-                    for _ in 0..100 {
+                    for _ in 0..20 {
                         let _ = c.step(); // TODO handle errors
 
                         if c.broke || c.halted_self { 
@@ -489,8 +494,10 @@ impl Rsp {
 
                         // if the signal is set and clear, do nothing
                         if (i & 0x01) == 0 { // CLEAR signal
+                            //info!(target: "RSP", "CPU clearing signal {}", signo);
                             shared_state.signals &= !(1 << signo);
                         } else { // SET signal
+                            //info!(target: "RSP", "CPU setting signal {}", signo);
                             shared_state.signals |= 1 << signo;
                         }
                     }
@@ -543,9 +550,9 @@ impl Addressable for Rsp {
             0x0000_0000..=0x0003_FFFF => {
                 let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
                 if mem_offset < (0x1000>>2) {
-                    //const TASK_TYPE: usize = 0xFC0 >> 2;
-                    //const DL_START: usize = 0xFF0 >> 2;
-                    //const DL_LEN: usize = 0xFF4 >> 2;
+                    //.const TASK_TYPE: usize = 0xFC0 >> 2;
+                    //.const DL_START: usize = 0xFF0 >> 2;
+                    //.const DL_LEN: usize = 0xFF4 >> 2;
                     //.match mem_offset {
                     //.    DL_START => {
                     //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
@@ -587,6 +594,25 @@ impl Addressable for Rsp {
         self.write_u32(value << shift, offset & !0x03)
     }
 
+    fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        if offset < 0x2000 { // I/DRAM
+            let mut mem = self.mem.write().unwrap();
+            let (dram, iram) = mem.split_at_mut(0x1000 >> 2);
+            let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
+            let offset = offset & 0x0FFC;
+
+            let (_, right) = which_mem.split_at_mut(offset >> 2);
+            if (length >> 2) as usize <= right.len() {
+                let (left, _) = right.split_at_mut((length >> 2) as usize);
+                Ok(left.to_owned())
+            } else {
+                todo!()
+            }
+        } else {
+            todo!("DMA out of ${offset:8X}");
+        }
+    }
+
     fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x2000 { // I/DRAM
             let mut mem = self.mem.write().unwrap();
@@ -594,7 +620,6 @@ impl Addressable for Rsp {
             let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
             let offset = offset & 0x0FFC;
             let (_, right) = which_mem.split_at_mut(offset >> 2);
-            println!("block write size = {}, right len = {}", block.len(), right.len());
             if block.len() <= right.len() {
                 let (left, _) = right.split_at_mut(block.len());
                 left.copy_from_slice(block);
@@ -656,6 +681,7 @@ impl RspCpuCore {
         info!(target: "RSP", "RSQ table generation took {:.2?}", alg_time);
 
         let mut core = RspCpuCore {
+            num_steps: 0,
             pc: 0,
             current_instruction_pc: 0,
             next_instruction: 0,
@@ -812,6 +838,7 @@ impl RspCpuCore {
     }
 
     fn step(&mut self) -> Result<(), InstructionFault> {
+        self.num_steps += 1;
         self.current_instruction_pc = self.pc;
 
         // check for invalid PC addresses
@@ -1314,11 +1341,37 @@ impl RspCpuCore {
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_write_length = val;
 
-                        todo!();
-                        //let dma_info = DmaInfo::default();
-                        //self.start_dma_tx.send(dma_info).unwrap();
+                        let length = ((val & 0x0FFF) | 0x07) + 1;
+                        let count  = ((val >> 12) & 0xFF) + 1;
+                        let skip   = (val >> 20) & 0xFFF;
+                        shared_state.dma_total_size = count * length + (count - 1) * skip;
 
-                        //Ok(())
+                        let dma_info = DmaInfo {
+                            initiator     : "RSP-WRITE",
+                            source_address: shared_state.dma_cache | 0x0400_0000,
+                            dest_address  : shared_state.dma_dram,
+                            count         : count,
+                            length        : length,
+                            source_stride : 0,
+                            dest_stride   : skip,
+                            completed     : Some(self.dma_completed_tx.clone()),
+                        };
+
+                        if shared_state.dma_busy {
+                            if shared_state.dma_full.is_none() {
+                                shared_state.dma_full = Some(dma_info);
+                            }
+                        } else {
+                            // update the addresses as if the dma has been completed
+                            shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
+                            shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
+                            shared_state.dma_current_read_length  = 0xFF8;
+                            shared_state.dma_current_write_length = 0xFF8;
+                            shared_state.dma_busy = true;
+                            self.start_dma_tx.send(dma_info).unwrap();
+                        }
+
+                        Ok(())
                     },
 
                     Cop0_Status => {
@@ -1362,10 +1415,10 @@ impl RspCpuCore {
                                 let signo = i >> 1;
 
                                 if (i & 0x01) == 0 { // CLEAR signal
-                                    info!(target: "RSP", "clearing signal {}", signo);
+                                    //info!(target: "RSP", "clearing signal {}", signo);
                                     shared_state.signals &= !(1 << signo);
                                 } else { // SET signal
-                                    info!(target: "RSP", "setting signal {}", signo);
+                                    //info!(target: "RSP", "setting signal {}", signo);
                                     shared_state.signals |= 1 << signo;
                                 }
                             }
@@ -1377,6 +1430,11 @@ impl RspCpuCore {
                     Cop0_Semaphore => {
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.semaphore = false;
+                        Ok(())
+                    },
+
+                    Cop0_CmdStatus => {
+                        warn!(target: "RSP", "RSP write to RDP command register = ${:08X}", val);
                         Ok(())
                     },
 
