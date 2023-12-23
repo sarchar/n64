@@ -220,7 +220,7 @@ impl Cpu {
 
             regimm_table: [
                //   _000                 _001                 _010                 _011                 _100                 _101                 _110                 _111
-   /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_unknown, Cpu::regimm_bgezl  , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
+   /* 00_ */    Cpu::regimm_bltz   , Cpu::regimm_bgez   , Cpu::regimm_bltzl  , Cpu::regimm_bgezl  , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
    /* 01_ */    Cpu::regimm_tgei   , Cpu::regimm_tgeiu  , Cpu::regimm_tlti   , Cpu::regimm_tltiu  , Cpu::regimm_teqi   , Cpu::inst_reserved , Cpu::regimm_tnei   , Cpu::inst_reserved ,
    /* 10_ */    Cpu::regimm_unknown, Cpu::regimm_bgezal , Cpu::regimm_unknown, Cpu::regimm_bgezall, Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
    /* 11_ */    Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved , Cpu::inst_reserved ,
@@ -595,7 +595,7 @@ impl Cpu {
 
     // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
     #[inline(always)]
-    pub fn rpc_interrupt(&mut self) -> Result<(), InstructionFault> {
+    pub fn rcp_interrupt(&mut self) -> Result<(), InstructionFault> {
         self.interrupt(InterruptCode_RPC)
     }
 
@@ -1654,8 +1654,12 @@ impl Cpu {
         } else {
             self.gpr[self.inst.rt] = (self.read_u32(address as usize)? as i32) as u64;
             match self.current_instruction_pc & 0xFFFF_FFFF {
-                0x8000_0228 => { info!(target: "CPU", "IPL3 computed CRC1: ${:016X}, PIF computed CRC1: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[7]); }
-                0x8000_0234 => { info!(target: "CPU", "IPL3 computed CRC2: ${:016X}, PIF computed CRC2: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[16]); }
+                0x8000_0228 => { info!(target: "CPU", "IPL3 computed CRC1: ${:016X}, PIF computed CRC1: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[7]); },
+                0x8000_0234 => { info!(target: "CPU", "IPL3 computed CRC2: ${:016X}, PIF computed CRC2: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[16]); },
+                // for LoZ OoT
+                0x8000_28C4 => { if (self.gpr[self.inst.rt] & 0x08) == 0 { info!(target: "CPU", "MI interrupt code = ${:08X}", self.gpr[self.inst.rt]); } },
+                // for GoldenEye
+                0x7001_0464 => { if (self.gpr[self.inst.rt] & 0x08) == 0 { info!(target: "CPU", "MI interrupt code = ${:08X}", self.gpr[self.inst.rt]); } },
                 _ => {},
             }
         }
@@ -2059,6 +2063,12 @@ impl Cpu {
 
         Ok(())
     }
+
+    fn regimm_bltzl(&mut self) -> Result<(), InstructionFault> {
+        let condition = (self.gpr[self.inst.rs] as i64) < 0;
+        self.branch_likely(condition)
+    }
+
 
     fn special_add(&mut self) -> Result<(), InstructionFault> {
         // add does cause an overflow exception
