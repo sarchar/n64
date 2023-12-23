@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::*;
 
@@ -53,21 +53,61 @@ impl PifRom {
         let value = self.ram[0x0F];
 
         //panic!("PIF: write command port");
-        if (value & 0x10) != 0 {
-            debug!(target: "PIF", "disable PIF-ROM access");
-        } else if (value & 0x20) != 0 {
-            debug!(target: "PIF", "CPU checksum ready");
-            self.command_finished = true;
-        } else if (value & 0x40) != 0 {
-            debug!(target: "PIF", "run checksum");
-        } else if (value & 0x08) != 0 {
-            info!(target: "PIF", "IPL1 finished");
-        } else if (value & 0x01) != 0 {
-            error!(target: "PIF", "Joybus protocol TODO!");
-            self.ram[0x0F] &= !0xFF;
-        } else if (value & 0x07) != 0 {
-            panic!("PIF: not implemented PIF command ${:08X}", value);
+        if (value & 0x01) != 0 {
+            self.do_joybus();
+        } else if (value & 0xFE) != 0 {
+            if (value & 0x10) != 0 {
+                debug!(target: "PIF", "disable PIF-ROM access");
+            } else if (value & 0x20) != 0 {
+                debug!(target: "PIF", "CPU checksum ready");
+                self.command_finished = true;
+            } else if (value & 0x40) != 0 {
+                debug!(target: "PIF", "run checksum");
+            } else if (value & 0x08) != 0 {
+                info!(target: "PIF", "IPL1 finished");
+            } else if (value & 0x07) != 0 {
+                panic!("PIF: not implemented PIF command ${:08X}", value);
+            }
         }
+    }
+
+    fn do_joybus(&mut self) {
+        trace!(target: "PIF", "running joybus protocol");
+
+        let channel = 0;
+
+        let i = 0;
+        'cmd_loop: loop {
+            let cmd_start = 0x7C0 + i;
+            i += 1;
+
+            let cmd_length = self.read_u8(cmd_start + 0).unwrap() & 0x3F;
+            match cmd_length {
+                0 => { // no command for current channel, so move on to next
+                    channel += 1;
+                    continue 'cmd_loop;
+                },
+
+                0x3D => { // reset current channel
+                    todo!("reset channel");
+                },
+
+                0x3E => { // end of commands
+                    break 'cmd_loop;
+                },
+
+                0x3F => {}, // NOP/reserved space for response
+
+                _ => {
+                    let res_length = self.read_u8(0x7C0 + i).unwrap();                    
+                    if next_cmd == 0xFE { // end of commands
+                        break 'cmd_loop;
+                    }
+                }
+            }
+        }
+
+        self.ram[0x0F] &= !0xFF;
     }
 }
 
@@ -149,6 +189,12 @@ impl Addressable for PifRom {
         self.update_control_write();
 
         Ok(WriteReturnSignal::None)
+    }
+
+    fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        if offset != 0x7C0 || length != 64 { todo!(); }
+
+        Ok(self.ram.to_owned())
     }
 }
 

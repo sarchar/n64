@@ -1284,8 +1284,14 @@ impl RspCpuCore {
                         }
                     },
 
+                    Cop0_CmdStatus => {
+                        warn!(target: "RSP", "RSP read from RDP status register");
+                        0
+                    },
+
                     _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
                 };
+
                 Ok(())
             },
 

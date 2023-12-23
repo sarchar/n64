@@ -29,6 +29,7 @@ pub enum WriteReturnSignal {
     None
 }
 
+#[derive(Debug)]
 pub enum ReadWriteFault {
     Invalid,
     Break

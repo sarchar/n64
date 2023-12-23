@@ -70,6 +70,28 @@ impl SerialInterface {
                 self.dram_address = value & 0x00FF_FFFF;
             },
 
+            // SI_PIF_AD_RD64B - DMA 64 bytes from PIF-RAM to RDRAM
+            0x0_0004 => {
+                // Sanity check for now
+                if (value & 0xFFF) != 0x7C0 {
+                    todo!("code starts PIF-RAM dma at an address not 0x7C0 in PIF-RAM");
+                }
+
+                let dma_info = DmaInfo {
+                    initiator     : "PI-RD64B",
+                    source_address: 0x1FC0_07C0, // start of PIF-RAM
+                    dest_address  : self.dram_address & !0x07,
+                    count         : 1,  // one loop
+                    length        : 64, // 64 bytes
+                    source_stride : 0,  // no strides
+                    dest_stride   : 0,
+                    completed     : Some(self.dma_completed_tx.clone()),
+                };
+
+                // start DMA
+                self.start_dma_tx.send(dma_info).unwrap();
+            },
+
             // SI_PIF_AD_WR64B - DMA 64 bytes from RDRAM to PIF-RAM
             0x0_0010 => {
                 // Sanity check for now
@@ -159,6 +181,15 @@ impl Addressable for SerialInterface {
         match address & 0x7FE0_0000 {
             0x1FC0_0000 => {
                 self.pif.write_block(address & 0x001F_FFFF, block)
+            },
+            _ => todo!(),
+        }
+    }
+
+    fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        match offset & 0x7FE0_0000 {
+            0x1FC0_0000 => {
+                self.pif.read_block(offset & 0x001F_FFFF, length)
             },
             _ => todo!(),
         }
