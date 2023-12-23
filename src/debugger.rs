@@ -12,6 +12,7 @@ use rustyline::Result as RustylineResult;
 use tracing_core::Level;
 
 use crate::*;
+use mips::{InterruptUpdate, InterruptUpdateMode};
 
 //use crate::cpu::Cpu;
 
@@ -224,6 +225,7 @@ impl Debugger {
                  | "dbrea" | "dbreak"       => { self.delete_breakpoint(&parts) },
                 "log"                       => { self.logging(&parts) },
                 "l" | "li" | "lis" | "list" => { self.listing(&parts) },
+                "int"                       => { self.interrupt(&parts) },
 
                 _ => {
                     Err(format!("unsupported debugger command \"{}\"", parts[0]))
@@ -257,7 +259,7 @@ impl Debugger {
             //let inst = cpu::Cpu::disassemble(address, *self.system.cpu.next_instruction(), true);
             //println!("${:08X}: {}", address, inst);
 
-            // Break loop on any instruction error
+            // Break loop on any instruction error or memory access
             if let Err(_) = self.system.step(1) {
                 break;
             }
@@ -469,6 +471,27 @@ impl Debugger {
             println!("");
         }
 
+        Ok(())
+    }
+
+    fn interrupt(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+        if parts.len() != 2 {
+            return Err(format!("usage: int [sp|si|vi|dp|ai|pi]"));
+        }
+
+        let signal = match parts[1].to_lowercase().as_str() {
+            "sp" => mips::IMask_SP,
+            "si" => mips::IMask_SI,
+            "ai" => mips::IMask_AI,
+            "vi" => mips::IMask_VI,
+            "dp" => mips::IMask_DP,
+            "pi" => mips::IMask_PI,
+            _ => { return Err(format!("invalid mips interrupt \"{}\"", parts[1])); }
+        };
+
+        let mut rcp = self.system.rcp.borrow_mut();
+        let chan = rcp.mi.get_update_channel();
+        chan.send(InterruptUpdate(signal, InterruptUpdateMode::SetInterrupt)).unwrap();
         Ok(())
     }
 }
