@@ -1,15 +1,18 @@
-use tracing::debug;
+#[allow(unused_imports)]
+use tracing::{trace, debug, error, warn, info};
 
 use crate::*;
 
 pub struct RdramInterface {
     ram: Vec<u32>,
+    repeat_count: Option<u32>
 }
 
 impl RdramInterface {
     pub fn new() -> RdramInterface {
         RdramInterface { 
             ram: vec![0u32; 2*1024*1024], // 8MiB => 8*1024*1024/4 = 2MiB
+            repeat_count: None,
         }
     }
 
@@ -21,17 +24,24 @@ impl RdramInterface {
     fn write_register(&mut self, value: u32, offset: usize, broadcast: bool) -> &mut Self {
         debug!(target: "RDRAM", "write_register value=${:08X} offset=${:08X} broadcast={}", value, offset, broadcast);
 
+        // TODO when writing the Delay register and repeat_count is set, refer to the note here:
+        // https://n64brew.dev/wiki/RDRAM#0x02_-_Delay
+
         self
     }
 
     pub fn rdram(&self) -> &Vec<u32> {
         &self.ram
     }
+
+    pub fn set_repeat_count(&mut self, repeat_count: Option<u32>) {
+        self.repeat_count = repeat_count;
+    }
 }
 
 impl Addressable for RdramInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        debug!(target: "RDRAM", "read32 offset=${:08X}", offset);
+        trace!(target: "RDRAM", "read32 offset=${:08X}", offset);
 
         match offset {
             // RDRAM memory space
@@ -65,7 +75,14 @@ impl Addressable for RdramInterface {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        debug!(target: "RDRAM", "write32 value=${:08X} offset=${:08X}", value, offset);
+        trace!(target: "RDRAM", "write32 value=${:08X} offset=${:08X}", value, offset);
+
+        if let Some(_rc) = self.repeat_count {
+            if offset != 0x03F8_0008 { // TODO right now we ignore this repeat_count write. See write_register
+                todo!("repeat count write to ${:08X} value=${:08X}", offset, value);
+            }
+            self.repeat_count = None;
+        }
 
         match offset {
             // RDRAM memory space
@@ -76,7 +93,7 @@ impl Addressable for RdramInterface {
 
             // "broken" RDRAM memory access
             0x0080_0000..=0x03EF_FFFF => {
-                panic!("RDRAM: write32 to broken RDRAM memory access");
+                panic!("RDRAM: write32 to broken RDRAM memory access offset=${:08X}", offset);
             },
 
             // RDRAM registers

@@ -39,5 +39,8 @@ optional = true
 [dependencies.num-traits]
 version = "0.2"
 
+[dependencies.encoding_rs]
+version = "0.8"
+
 [build-dependencies.cc]
 version = "1.0"

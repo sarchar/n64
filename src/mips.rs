@@ -1,46 +1,108 @@
 #![allow(non_upper_case_globals)]
 use std::mem;
+use std::sync::mpsc;
 
 use tracing::{debug, error, info};
 
 use crate::*;
 
-const IMask_SP: u32 = 0;
-const IMask_SI: u32 = 1;
-const IMask_AI: u32 = 2;
-const IMask_VI: u32 = 3;
-const IMask_PI: u32 = 4;
-const IMask_DP: u32 = 5;
+pub const IMask_SP: u32 = 0;
+pub const IMask_SI: u32 = 1;
+pub const IMask_AI: u32 = 2;
+pub const IMask_VI: u32 = 3;
+pub const IMask_PI: u32 = 4;
+pub const IMask_DP: u32 = 5;
+
+#[derive(Debug)]
+pub enum InterruptUpdateMode {
+    EnableInterrupt,  // Set/clear the interrupt enable flag
+    DisableInterrupt,
+    SetInterrupt,     // Trigger/ack an previous interrupt
+    ClearInterrupt,
+    TriggerOnce,
+}
+
+#[derive(Debug)]
+pub struct InterruptUpdate(pub u32, pub InterruptUpdateMode);
 
 pub struct MipsInterface {
-    interrupt_mask: u32,
-    interrupt     : u32,
+    interrupt_mask: u32, // enabled interrupts
+    interrupt     : u32, // current interrupt signals (does not require enabled interrupts)
+    trigger_int   : u32, // interrupt signals that actually generate an external int (requires interrupt enable)
+
+    repeat_count  : Option<u32>,
+
+    interrupt_update_rx: mpsc::Receiver<InterruptUpdate>,
+    interrupt_update_tx: mpsc::Sender<InterruptUpdate>,
 }
 
 impl MipsInterface {
     pub fn new() -> MipsInterface {
+        let (tx, rx) = mpsc::channel();
+
         MipsInterface { 
             interrupt_mask: 0,
             interrupt     : 0,
+            trigger_int   : 0,
+
+            repeat_count  : None,
+
+            interrupt_update_rx: rx,
+            interrupt_update_tx: tx,
         }
     }
+
+    pub fn get_update_channel(&mut self) -> mpsc::Sender<InterruptUpdate> {
+        self.interrupt_update_tx.clone()
+    }
     
-    pub fn step(&mut self, rsp_interrupt: bool, pi_interrupt: bool, vi_interrupt: bool) {
-        if rsp_interrupt && (self.interrupt_mask & IMask_SP) != 0 {
-            self.interrupt |= 1 << IMask_SP;
-        }
-
-        if pi_interrupt && (self.interrupt_mask & IMask_PI) != 0 {
-            self.interrupt |= 1 << IMask_PI;
-        }
-
-        if vi_interrupt && (self.interrupt_mask & IMask_VI) != 0 {
-            self.interrupt |= 1 << IMask_VI;
-        }
+    pub fn step(&mut self) {
+        self.update_interrupts();
     }
 
     pub fn should_interrupt(&mut self) -> u32 {
-        mem::replace(&mut self.interrupt, 0)
+        mem::replace(&mut self.trigger_int, 0)
+    }
+
+    fn update_interrupts(&mut self) {
+        loop {
+            if let Ok(update) = self.interrupt_update_rx.try_recv() {
+                let bit = 1 << update.0;
+                match update.1 {
+                    InterruptUpdateMode::EnableInterrupt => {
+                        self.interrupt_mask |= bit;
+                    },
+
+                    InterruptUpdateMode::DisableInterrupt => {
+                        self.interrupt_mask &= !bit;
+                    },
+
+                    InterruptUpdateMode::SetInterrupt => {
+                        // if interrupt is enabled and not currently set, cause interrupt to trigger
+                        if (self.interrupt_mask & bit) != 0 && (self.interrupt & bit) == 0 {
+                            self.trigger_int |= bit;
+                        }
+                        self.interrupt |= bit;
+                    },
+
+                    InterruptUpdateMode::ClearInterrupt => {
+                        // ack the interrupt
+                        self.interrupt &= !bit;
+                    },
+
+                    InterruptUpdateMode::TriggerOnce => {
+                        // force trigger interrupt (used for debugging)
+                        self.trigger_int |= bit;
+                    },
+                }
+                continue;
+            }
+            break;
+        }
+    }
+
+    pub fn get_repeat_count(&mut self) -> Option<u32> {
+        mem::replace(&mut self.repeat_count, None)
     }
 }
 
@@ -59,12 +121,14 @@ impl Addressable for MipsInterface {
             // MI_INTERRUPT
             0x0_0008 => {
                 debug!(target: "MI", "interrupt cause read");
+                self.update_interrupts();
                 self.interrupt
             },
 
             // MI_MASK
             0x0_000C => {
                 debug!(target: "MI", "MI_MASK read");
+                self.update_interrupts();
                 self.interrupt_mask
             }
 
@@ -83,6 +147,19 @@ impl Addressable for MipsInterface {
         match offset {
             0x0_0000 => { 
                 info!(target: "MI", "write MI_MODE value=${:08X}", value);
+
+                if (value & 0x800) != 0 {
+                    self.interrupt &= !(1 << IMask_DP);
+                }
+
+                if (value & 0x100) != 0 {
+                    self.repeat_count = Some((value & 0x7F) + 1);
+                }
+
+                if (value & 0x200) != 0 {
+                    self.repeat_count = None;
+                }
+
             },
 
             0x0_000C => {

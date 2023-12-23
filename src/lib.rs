@@ -14,6 +14,7 @@ pub mod rcp;
 pub mod rdp;
 pub mod rdram;
 pub mod rsp;
+pub mod serial;
 pub mod video;
 
 pub enum MemorySegment {
@@ -119,14 +120,14 @@ impl System {
             i += 1;
         }
 
-        let interrupt_mask = { // scope rcp borrow_mut()
+        let trigger_int = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
             rcp.step(cpu_cycles);
             rcp.should_interrupt()
         };
 
-        if interrupt_mask != 0 {
-            let _ = self.cpu.rpc_interrupt();
+        if trigger_int != 0 {
+            let _ = self.cpu.rcp_interrupt();
         }
 
         Ok(())

@@ -12,6 +12,7 @@ use tracing::{trace, debug, error, info, warn};
 
 use crate::*;
 use cpu::{InstructionDecode, InstructionFault};
+use mips::{InterruptUpdate, InterruptUpdateMode, IMask_SP};
 
 use rcp::DmaInfo;
 
@@ -40,7 +41,7 @@ const Cop2_VCE: usize = 2;
 /// N64 Reality Signal Processor
 /// Resides on the die of the RCP.
 pub struct Rsp {
-    should_interrupt: bool,
+    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     core: Arc<Mutex<RspCpuCore>>,
     shared_state: Arc<RwLock<RspSharedState>>,
@@ -141,7 +142,7 @@ struct RspCpuCore {
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>) -> Rsp {
+    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -152,7 +153,7 @@ impl Rsp {
         let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), start_dma_tx.clone(), dma_completed_tx.clone())));
 
         Rsp {
-            should_interrupt: false,
+            mi_interrupts_tx: mi_interrupts_tx,
 
             core: core,
 
@@ -224,6 +225,8 @@ impl Rsp {
     }
 
     pub fn step(&mut self) {
+        let _ = self.is_broke(); // update interrupts
+
         if let Ok(_) = self.dma_completed_rx.try_recv() {
             // we got a completed DMA, so if one is pending start it immediately
             let mut shared_state = self.shared_state.write().unwrap();
@@ -249,7 +252,7 @@ impl Rsp {
                     self.halted = true;
                     let shared_state = self.shared_state.read().unwrap();
                     if shared_state.intbreak {
-                        self.should_interrupt = true;
+                        self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
                     }
                 }
             }
@@ -257,13 +260,6 @@ impl Rsp {
         self.broke
     }
 
-    pub fn should_interrupt(&mut self) -> bool {
-        let _ = self.is_broke();
-        let r = self.should_interrupt;
-        self.should_interrupt = false;
-        r
-    }
-    
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         //info!(target: "RSP", "read32 register offset=${:08X}", offset);
 
@@ -353,21 +349,21 @@ impl Rsp {
         match offset {
             // SP_DMA_CACHE
             0x4_0000 => {
-                info!(target: "RSP", "DMA RSP address set to ${:04X} via CPU", value & 0x1FFF);
+                //debug!(target: "RSP", "DMA RSP address set to ${:04X} via CPU", value & 0x1FFF);
                 let mut shared_state = self.shared_state.write().unwrap();
                 shared_state.dma_cache = value & 0x1FFF;
             },
 
             // SP_DMA_DRAM
             0x4_0004 => {
-                info!(target: "RSP", "DMA DRAM address set to ${:04X} via CPU", value & 0x00FF_FFFF);
+                //debug!(target: "RSP", "DMA DRAM address set to ${:04X} via CPU", value & 0x00FF_FFFF);
                 let mut shared_state = self.shared_state.write().unwrap();
                 shared_state.dma_dram = value & 0x00FF_FFFF;
             },
 
             // SP_DMA_READ_LENGTH
             0x4_0008 => {
-                info!(target: "RSP", "DMA read length set to ${:04X} via CPU", value);
+                //debug!(target: "RSP", "DMA read length set to ${:04X} via CPU", value);
                 let mut shared_state = self.shared_state.write().unwrap();
                 shared_state.dma_read_length = value;
 
@@ -477,6 +473,21 @@ impl Rsp {
                     shared_state.intbreak = false;
                 }
 
+                // If both SET and CLR_INTR are set, do nothing
+                if (value & 0x18) == 0x18 {
+                    value &= !0x18;
+                }
+
+                // SET_INTR: manually trigger SP interrupt
+                if (value & 0x10) != 0 {
+                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                }
+
+                // CLR_INTR: ack SP interrupt
+                if (value & 0x08) != 0 {
+                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                }
+
                 // loop over the signals
                 value >>= 9; // signals start at bit 9
                 if value != 0 {
@@ -550,21 +561,21 @@ impl Addressable for Rsp {
             0x0000_0000..=0x0003_FFFF => {
                 let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
                 if mem_offset < (0x1000>>2) {
-                    //.const TASK_TYPE: usize = 0xFC0 >> 2;
-                    //.const DL_START: usize = 0xFF0 >> 2;
-                    //.const DL_LEN: usize = 0xFF4 >> 2;
-                    //.match mem_offset {
-                    //.    DL_START => {
-                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
-                    //.    },
-                    //.    DL_LEN => {
-                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
-                    //.    },
-                    //.    TASK_TYPE => {
-                    //.        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
-                    //.    },
-                    //.    _ => {},
-                    //.}
+                    const TASK_TYPE: usize = 0xFC0 >> 2;
+                    const DL_START: usize = 0xFF0 >> 2;
+                    const DL_LEN: usize = 0xFF4 >> 2;
+                    match mem_offset {
+                        DL_START => {
+                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
+                        },
+                        DL_LEN => {
+                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
+                        },
+                        TASK_TYPE => {
+                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
+                        },
+                        _ => {},
+                    }
                 } else {
                     //info!(target: "RSPMEM", "write value=${:08X} offset=${:08X}", value, offset);
                 }
@@ -908,7 +919,7 @@ impl RspCpuCore {
     }
 
     fn inst_reserved(&mut self) -> Result<(), InstructionFault> {
-        warn!(target: "RSP", "reserved instruction ${:03b}_{:03b} at pc=${:08X}", self.inst.op >> 3, self.inst.op & 0x07, self.current_instruction_pc);
+        error!(target: "RSP", "reserved instruction ${:03b}_{:03b} at pc=${:08X}", self.inst.op >> 3, self.inst.op & 0x07, self.current_instruction_pc);
         panic!("reserved instruction");
     }
 
@@ -1285,21 +1296,21 @@ impl RspCpuCore {
                 // NOTE: if you change these, you should change write_register as well
                 match self.inst.rd {
                     Cop0_DmaCache => {
-                        info!(target: "RSP", "DMA RSP address set to ${:04X}", val & 0x1FFF);
+                        //debug!(target: "RSP", "DMA RSP address set to ${:04X}", val & 0x1FFF);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_cache = val & 0x1FFF;
                         Ok(())
                     },
 
                     Cop0_DmaDram => {
-                        info!(target: "RSP", "DMA DRAM address set to ${:04X}", val & 0x00FF_FFFF);
+                        //debug!(target: "RSP", "DMA DRAM address set to ${:04X}", val & 0x00FF_FFFF);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_dram = val & 0x00FF_FFFF;
                         Ok(())
                     },
 
                     Cop0_DmaReadLength => { // RDRAM -> I/DRAM
-                        info!(target: "RSP", "DMA read length set to ${:04X}", val);
+                        //debug!(target: "RSP", "DMA read length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_read_length = val;
 
@@ -1337,7 +1348,7 @@ impl RspCpuCore {
                     },
 
                     Cop0_DmaWriteLength => {
-                        info!(target: "RSP", "DMA write length set to ${:04X}", val);
+                        //debug!(target: "RSP", "DMA write length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_write_length = val;
 
@@ -1399,6 +1410,11 @@ impl RspCpuCore {
                             todo!("wrote status bits ${val:08X}");
                         }
 
+                        // CLR_INTR: ack SP interrupt
+                        if (val & 0x08) != 0 {
+                            todo!();
+                        }
+
                         // loop over the signals
                         val >>= 9; // signals start at bit 9
                         if val != 0 {
@@ -1434,7 +1450,7 @@ impl RspCpuCore {
                     },
 
                     Cop0_CmdStatus => {
-                        warn!(target: "RSP", "RSP write to RDP command register = ${:08X}", val);
+                        warn!(target: "RSP", "RSP write to RDP status register = ${:08X}", val);
                         Ok(())
                     },
 

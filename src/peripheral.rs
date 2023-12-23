@@ -1,5 +1,4 @@
 use std::cmp;
-use std::mem;
 use std::str;
 use std::sync::mpsc;
 
@@ -9,6 +8,7 @@ use tracing::{trace,debug,info,warn,error};
 use crate::*;
 
 use rcp::DmaInfo;
+use mips::{InterruptUpdate, InterruptUpdateMode, IMask_PI};
 
 /// N64 Peripheral Interface
 /// Connects EEPROM, cartridge, controllers, and more
@@ -21,19 +21,23 @@ pub struct PeripheralInterface {
     cartridge_rom: Vec<u32>,
     cartridge_rom_write: Option<u32>,
 
-    debug_buffer: Vec<u8>,
-    debug_string: String,
-
     start_dma_tx: mpsc::Sender<DmaInfo>,
 
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
 
-    interrupt_flag: bool,
+    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
+
+    // ISViewer 
+    debug_buffer: Vec<u8>,
+    debug_string: String,
+    is_write_pos: usize,
+    //is_read_pos: usize,
+    is_magic: u32,
 }
 
 impl PeripheralInterface {
-    pub fn new(cartridge_rom: Vec<u8>, start_dma_tx: mpsc::Sender<DmaInfo>) -> PeripheralInterface {
+    pub fn new(cartridge_rom: Vec<u8>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> PeripheralInterface {
         // convert cartridge_rom to u32
         let mut word_rom = vec![];
         for i in (0..cartridge_rom.len()).step_by(4) {
@@ -52,15 +56,19 @@ impl PeripheralInterface {
             cartridge_rom: word_rom,
             cartridge_rom_write: None,
 
-            debug_buffer: vec![0; 0x200],
-            debug_string: String::new(),
-
             start_dma_tx: start_dma_tx,
 
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
 
-            interrupt_flag: false,
+            mi_interrupts_tx: mi_interrupts_tx,
+
+            // ISViewer
+            debug_buffer: vec![0; 0xFFE0], // ISViewer buffer starts at 0x......20, so buf size is 0x10000-0x20
+            debug_string: String::new(),
+            is_magic: 0,
+            //is_read_pos: 0,
+            is_write_pos: 0,
         }
     }
 
@@ -69,13 +77,9 @@ impl PeripheralInterface {
         if let Ok(_) = self.dma_completed_rx.try_recv() {
             if (self.dma_status & 0x01) != 0 {
                 self.dma_status = 0x08;
-                self.interrupt_flag = true;
+                self.mi_interrupts_tx.send(InterruptUpdate(IMask_PI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
         }
-    }
-
-    pub fn should_interrupt(&mut self) -> bool {
-        mem::replace(&mut self.interrupt_flag, false)
     }
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
@@ -215,6 +219,7 @@ impl PeripheralInterface {
                 }
 
                 if (value & 0x02) != 0 { // clear INT flag 
+                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_PI, InterruptUpdateMode::ClearInterrupt)).unwrap();
                     self.dma_status &= !0x08;
                 }
 
@@ -267,9 +272,22 @@ impl Addressable for PeripheralInterface {
         } else if offset < 0x1000_0000 {
             error!(target: "PI", "unimplemented Cartridge SRAM/FlashRAM read");
             Ok(0)
-        } else if offset < 0x1FC0_0000 {
+        } else if offset == 0x13FF_0000 { // ISViewer magic
+            Ok(self.is_magic) // usually 'IS64'
+        } else if offset == 0x13FF_0004 { // ISViewer get - get read position
+            Ok(0) //self.is_read_pos as u32) 
+        } else if offset == 0x13FF_0014 { // ISViewer write - get write position
+            Ok(self.is_write_pos as u32) 
+        } else if offset >= 0x13FF_0020 && offset < 0x13FF_FFE0 { // ISViewer data
+            let buffer_offset = offset - 0x13FF_0020;
+            let v = ((self.debug_buffer[buffer_offset+0] as u32) << 24)
+                      | ((self.debug_buffer[buffer_offset+1] as u32) << 16)
+                      | ((self.debug_buffer[buffer_offset+2] as u32) <<  8)
+                      | ((self.debug_buffer[buffer_offset+3] as u32) <<  0);
+            Ok(v)
+        } else if offset < 0x1FC0_0000 { // 
             let cartridge_rom_offset = offset & 0x0FFF_FFFF;
-            debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);
+            //debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);
 
             if let Some(value) = self.cartridge_rom_write {
                 self.cartridge_rom_write = None;
@@ -310,21 +328,58 @@ impl Addressable for PeripheralInterface {
 
         if offset < 0x0500_0000 {
             self.write_register(value, offset)
-        } else if offset == 0x13FF_0014 {
-            let slice = &self.debug_buffer[0..(value as usize)];
-            let msg = str::from_utf8(slice).unwrap();
+        } else if offset == 0x13FF_0000 { // ISViewer magic
+            self.is_magic = value;
+            Ok(WriteReturnSignal::None)
+        } else if offset == 0x13FF_0014 { // ISViewer put - set write position
+            let end = value as usize;
+
+            let slice = if end < self.is_write_pos { 
+                todo!();
+                //// need to concatenate two slices, is_write_pos..END and START..end
+                //let slice_a = &self.debug_buffer[self.is_write_pos..];
+                //let slice_b = &self.debug_buffer[..end];
+                //[slice_a, slice_b].concat()
+            } else {
+                (&self.debug_buffer[self.is_write_pos..end]).to_vec()
+            };
+
+            let (res, _enc, errors) = encoding_rs::EUC_JP.decode(&slice);
+            let msg = match str::from_utf8(&slice) {
+                Err(_) => {
+                    // try japanese!
+                    if errors {
+                        println!("couldn't convert {:?} using EUC-JP", slice);
+                        ""
+                    } else {
+                    //    let new_slice = &self.debug_buffer[self.is_write_pos..(self.is_write_pos + valid)];
+                    //    self.is_read_pos = (self.is_write_pos + valid) % self.debug_buffer.len();
+                    //    str::from_utf8(new_slice).unwrap()
+                        &*res
+                    }
+                },
+
+                Ok(msg) => {
+                    //self.is_read_pos = end;
+                    msg
+                }
+            };
 
             for c in msg.chars() {
                 if c == '\n' {
                     info!(target: "PI", "message: {}", self.debug_string);
                     self.debug_string = String::new();
                 } else {
-                    self.debug_string.push(c);
+                    if self.debug_string.len() < 0x10000 {
+                        self.debug_string.push(c);
+                    }
                 }
             }
 
+            self.is_write_pos = 0;//end % self.debug_buffer.len();
+
             Ok(WriteReturnSignal::None)
-        } else if offset >= 0x13FF_0020 && offset <= 0x13FF_0220 {
+        } else if offset >= 0x13FF_0020 && offset < 0x13FF_FFE0 { // ISViewer data
             let buffer_offset = offset - 0x13FF_0020;
             self.debug_buffer[buffer_offset+0] = ((value >> 24) & 0xFF) as u8;
             self.debug_buffer[buffer_offset+1] = ((value >> 16) & 0xFF) as u8;

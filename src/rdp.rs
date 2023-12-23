@@ -1,6 +1,7 @@
 use crate::*;
 
-use tracing::{debug, error};
+#[allow(unused_imports)]
+use tracing::{debug, error, info, trace, warn};
 
 pub struct Rdp {
 }
@@ -13,7 +14,7 @@ impl Rdp {
 
 impl Addressable for Rdp {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        debug!(target: "RDP", "read32 offset=${:08X}", offset);
+        trace!(target: "RDP", "read32 offset=${:08X}", offset);
 
         match offset {
             // DP_STATUS 
@@ -26,7 +27,7 @@ impl Addressable for Rdp {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        debug!(target: "RDP", "write32 value=${:08X} offset=${:08X}", value, offset);
+        trace!(target: "RDP", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         Ok(WriteReturnSignal::None)
     }

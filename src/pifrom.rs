@@ -48,6 +48,27 @@ impl PifRom {
             command_finished: false,
         }
     }
+
+    fn update_control_write(&mut self) {
+        let value = self.ram[0x0F];
+
+        //panic!("PIF: write command port");
+        if (value & 0x10) != 0 {
+            debug!(target: "PIF", "disable PIF-ROM access");
+        } else if (value & 0x20) != 0 {
+            debug!(target: "PIF", "CPU checksum ready");
+            self.command_finished = true;
+        } else if (value & 0x40) != 0 {
+            debug!(target: "PIF", "run checksum");
+        } else if (value & 0x08) != 0 {
+            info!(target: "PIF", "IPL1 finished");
+        } else if (value & 0x01) != 0 {
+            error!(target: "PIF", "Joybus protocol TODO!");
+            self.ram[0x0F] &= !0xFF;
+        } else if (value & 0x07) != 0 {
+            panic!("PIF: not implemented PIF command ${:08X}", value);
+        }
+    }
 }
 
 impl Addressable for PifRom {
@@ -70,6 +91,7 @@ impl Addressable for PifRom {
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
+                info!(target: "PIF-RAM", "read offset=${:08X}", offset);
                 Ok(self.ram[ram_offset as usize])
             } else {
                 panic!("unhandled PIF read offset=${:08X}", offset)
@@ -78,27 +100,15 @@ impl Addressable for PifRom {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        if offset < 0x7C0 {
-            error!(target: "PIF", "invalid write value=${:08X} offset=${:08X}", value, offset);
-        } else if offset == 0x7FC {
-            //panic!("PIF: write command port");
-            if (value & 0x10) != 0 {
-                debug!(target: "PIF", "disable PIF-ROM access");
-            } else if (value & 0x20) != 0 {
-                debug!(target: "PIF", "CPU checksum ready");
-                self.command_finished = true;
-            } else if (value & 0x40) != 0 {
-                debug!(target: "PIF", "run checksum");
-            } else if (value & 0x08) != 0 {
-                debug!(target: "PIF", "Yay! BOOT IS DONE!");
-            } else if (value & 0x07) != 0 {
-                panic!("PIF: not implemented PIF command ${:08X}", value);
-            }
-        } else {
+        if offset >= 0x7C0 { // ignore writes to ROM
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
                 //info!(target: "PIF-RAM", "write value=${:08X} offset=${:08X}", value, offset);
                 self.ram[ram_offset as usize] = value;
+
+                if ram_offset == 0x0F {
+                    self.update_control_write();
+                }
             } else {
                 panic!("PIF: invalid write value=${:08X} offset=${:08X}", value, offset);
             }
@@ -118,6 +128,27 @@ impl Addressable for PifRom {
         // SB incorrectly overwrites lower bytes with zeroes
         let shift = 24 - ((offset & 0x03) << 3);
         self.write_u32(value << shift, offset & !0x03)
+    }
+
+    fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if address != 0x7C0 || block.len() != 16 { todo!(); } // non-standard DMA
+
+        println!("DMA into PIF-RAM:");
+        for j in 0..4 {
+            print!("  ${:02X}: ", j*16);
+            for i in 0..16 {
+                let index = ((j * 16) + i) as usize;
+                let w = block[index >> 2];
+                let shift = 24 - ((index & 0x03) << 3);
+                print!("{:02X} ", (w >> shift) & 0xFF);
+            }
+            println!();
+        }
+
+        self.ram.copy_from_slice(block);
+        self.update_control_write();
+
+        Ok(WriteReturnSignal::None)
     }
 }
 

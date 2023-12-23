@@ -13,6 +13,7 @@ use crate::pifrom::PifRom;
 use crate::rdp::Rdp;
 use crate::rdram::RdramInterface;
 use crate::rsp::Rsp;
+use crate::serial::SerialInterface;
 use crate::video::VideoInterface;
 
 #[derive(Default)]
@@ -40,12 +41,12 @@ impl fmt::Debug for DmaInfo {
 /// Contains the on-board RSP, RDP and manages the system bus
 pub struct Rcp {
     // bus objects
-    mi: MipsInterface,
+    pub mi: MipsInterface,
     pi: PeripheralInterface,
-    pif: PifRom,
     rdp: Rdp,
     pub ri: RdramInterface,
     rsp: Rsp,
+    si: SerialInterface,
     pub vi: VideoInterface,
 
     // state
@@ -59,22 +60,25 @@ impl Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
 
+        // create MI first so we can create the interrupt interconnect
+        let mut mi = MipsInterface::new();
+
         // create the PI first
-        let mut pi = peripheral::PeripheralInterface::new(cartridge_rom, start_dma_tx.clone());
+        let mut pi = PeripheralInterface::new(cartridge_rom, start_dma_tx.clone(), mi.get_update_channel());
 
         // the PIF-ROM needs to know what CIC chip the cartridge is using, so we pass it along
-        let pif = pifrom::PifRom::new(boot_rom, &mut pi);
+        let pif = PifRom::new(boot_rom, &mut pi);
 
         Rcp {
-            mi : MipsInterface::new(),
             pi : pi,
-            pif: pif,
             rdp: Rdp::new(),
             ri : RdramInterface::new(),
-            rsp: Rsp::new(start_dma_tx.clone()),
-            vi : VideoInterface::new(),
+            rsp: Rsp::new(start_dma_tx.clone(), mi.get_update_channel()),
+            si : SerialInterface::new(pif, start_dma_tx.clone(), mi.get_update_channel()),
+            vi : VideoInterface::new(mi.get_update_channel()),
 
             start_dma_rx: start_dma_rx,
+            mi : mi,
         }
     }
 
@@ -85,14 +89,11 @@ impl Rcp {
     pub fn step(&mut self, cpu_cycles_elapsed: u64) {
         self.rsp.step();
         self.pi.step();
+        self.si.step();
         self.vi.step(cpu_cycles_elapsed);
 
-        // TODO move interrupts to mpsc?
-        self.mi.step(
-            self.rsp.should_interrupt(),
-            self.pi.should_interrupt(),
-            self.vi.should_interrupt(),
-        );
+        // MI should be last to process any incoming interrupts
+        self.mi.step();
 
         // run all the DMAs for the cycle
         loop {
@@ -168,20 +169,11 @@ impl Rcp {
     fn rcp_write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         trace!(target: "RCP", "write32 value=${:08X} offset=${:08X}", value, offset);
 
-        let ret = if let (Some(addressable), offset) = self.match_addressable(offset, "write32") {
+        if let (Some(addressable), offset) = self.match_addressable(offset, "write32") {
             addressable.write_u32(value, offset)
         } else {
             Ok(WriteReturnSignal::None)
-        };
-
-        // DMA can only trigger on write32s
-        //.if let Ok(ref v) = ret {
-        //.    if let WriteReturnSignal::StartDMA(dma_info) = v {
-        //.        self.do_dma(dma_info)
-        //.    }
-        //.}
-
-        ret
+        }
     }
 
     fn rcp_write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
@@ -241,13 +233,14 @@ impl Rcp {
 
             // RDRAM 0x0470_0000-0x047F_FFFF
             // we pass bit 26 along to indicate the RdramInterface vs RDRAM access
-            7 => (Some(&mut self.ri), 0x0400_0000 | (offset & 0x000F_FFFF)),
+            7 => {
+                let repeat_count = self.mi.get_repeat_count();
+                self.ri.set_repeat_count(repeat_count);
+                (Some(&mut self.ri), 0x0400_0000 | (offset & 0x000F_FFFF))
+            },
 
             // SI 0x0480_0000-0x048F_FFFF
-            8 => {
-                error!(target: "RCP", "unimplemented SI {mode} offset=${offset:08X}");
-                (None, 0)
-            },
+            8 => (Some(&mut self.si), offset & 0x000F_FFFF),
 
             // 0x0409_0000-0x04FF_FFFF unmapped
             _ => panic!("invalid RCP write"),
@@ -327,8 +320,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7C00_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.read_u32(physical_address & 0x000FFFFF)
+                    self.si.read_u32(physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.read_u32(physical_address & 0x7FFF_FFFF)
@@ -355,8 +347,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7C00_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.read_u16(physical_address & 0x000FFFFF)
+                    self.si.read_u16(physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.read_u16(physical_address & 0x7FFF_FFFF)
@@ -384,7 +375,7 @@ impl Addressable for Rcp {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
                     // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.read_u8(physical_address & 0x000FFFFF)
+                    self.si.read_u8(physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.read_u8(physical_address & 0x7FFF_FFFF)
@@ -403,7 +394,11 @@ impl Addressable for Rcp {
 
         match physical_address & 0xFFF0_0000 {
             // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => self.ri.write_u32(value, physical_address & 0x03FF_FFFF),
+            0x0000_0000..=0x03F0_0000 => {
+                let repeat_count = self.mi.get_repeat_count();
+                self.ri.set_repeat_count(repeat_count);
+                self.ri.write_u32(value, physical_address & 0x03FF_FFFF)
+            },
 
             // RCP 0x04000000-0x04FFFFFF
             0x0400_0000..=0x04F0_0000 => self.rcp_write_u32(value, physical_address & 0x00FF_FFFF),
@@ -412,8 +407,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.write_u32(value, physical_address & 0x000FFFFF)
+                    self.si.write_u32(value, physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.write_u32(value, physical_address & 0x7FFF_FFFF)
@@ -440,8 +434,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.write_u16(value, physical_address & 0x000FFFFF)
+                    self.si.write_u16(value, physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.write_u16(value, physical_address & 0x7FFF_FFFF)
@@ -469,7 +462,7 @@ impl Addressable for Rcp {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
                     // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.write_u8(value, physical_address & 0x000FFFFF)
+                    self.si.write_u8(value, physical_address & 0x7FFF_FFFF)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.write_u8(value, physical_address & 0x7FFF_FFFF)
@@ -496,8 +489,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.read_block(physical_address & 0x000FFFFF, length)
+                    self.si.read_block(physical_address & 0x7FFF_FFFF, length)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.read_block(physical_address & 0x7FFF_FFFF, length)
@@ -524,8 +516,7 @@ impl Addressable for Rcp {
             0x0500_0000..=0x7FF0_0000 => {
                 if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
                     // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.pif.write_block(physical_address & 0x000FFFFF, block)
+                    self.si.write_block(physical_address & 0x7FFF_FFFF, block)
                 } else {
                     // PI external bus 0x05000000-0x7FFFFFFF
                     self.pi.write_block(physical_address & 0x7FFF_FFFF, block)

@@ -1,16 +1,18 @@
-use std::mem;
+use std::sync::mpsc;
 
+#[allow(unused_imports)]
 use tracing::{debug,error,trace,warn,info};
 
 use crate::*;
+use mips::{InterruptUpdate, InterruptUpdateMode, IMask_VI};
 
 const PAL_BURST: u32 = 0x0404233A;
 const NTSC_BURST: u32 = 0x03E52239;
 
 pub struct VideoInterface {
-    should_interrupt_flag: bool,
     resolution_changed: u32,
     cycle_count: u64,
+    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     // VI_CTRL control flags
     dedither_filter_enable: u8,
@@ -72,11 +74,11 @@ pub struct VideoInterface {
 }
 
 impl VideoInterface {
-    pub fn new() -> VideoInterface {
+    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> VideoInterface {
         VideoInterface {
-            should_interrupt_flag: false,
             resolution_changed: 0,
             cycle_count: 0,
+            mi_interrupts_tx: mi_interrupts_tx,
 
             // VI_CTRL
             dedither_filter_enable: 0,
@@ -158,7 +160,7 @@ impl VideoInterface {
             let width  = ((self.h_end - self.h_start) as f32 * (self.y_scale as f32 / 1024.0)) as u32;
             let height = ((((self.v_end - self.v_start) as f32) / 2.0) * (self.x_scale as f32 / 1024.0)) as u32;
             let depth  = if self.pixel_type == 3 { 32 } else if self.pixel_type == 2 { 16 } else { 0 };
-            info!(target: "VI", "resolution changed to {width}x{height}x{depth}");
+            debug!(target: "VI", "resolution changed to {width}x{height}x{depth}");
         }
 
         // CPU runs at 93.75MHz, so we should render a frame every 1,562,500 cpu cycles
@@ -171,13 +173,10 @@ impl VideoInterface {
             self.current_line = (self.current_line + 1) % NUM_LINES;
 
             if self.current_line == self.interrupt_line {
-                self.should_interrupt_flag = true;
+                //TODO enabling the interrupt causes LoZ to stop working?
+                self.mi_interrupts_tx.send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
         }
-    }
-
-    pub fn should_interrupt(&mut self) -> bool {
-        mem::replace(&mut self.should_interrupt_flag, false)
     }
 }
 
@@ -300,8 +299,9 @@ impl Addressable for VideoInterface {
 
             // VI_V_CURRENT
             0x0_0010 => {
-                self.current_line = value & 0x3FF;
-                debug!(target: "VI", "setting current line to {}", self.current_line);
+                //self.current_line = value & 0x3FF;
+                self.mi_interrupts_tx.send(InterruptUpdate(IMask_VI, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                debug!(target: "VI", "setting current line to {} (int line={})", self.current_line, self.interrupt_line);
                 Ok(WriteReturnSignal::None)
             },
 
