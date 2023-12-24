@@ -4,7 +4,7 @@ use std::mem;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 
-#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[cfg(all(target_arch="x86_64", target_feature="sse2"))]
 use core::arch::x86_64::*;
 
 #[allow(unused_imports)]
@@ -2385,19 +2385,8 @@ impl RspCpuCore {
         }
     }
 
-    #[inline(always)]
-    #[allow(dead_code)]
-    fn v_set_accumulator_midlow(&mut self, v: &__m256i) {
-        unsafe {
-            let mask  = _mm512_set1_epi64(0xFFFF_FFFF_0000_0000u64 as i64);    // mask to clear mid and low lanes of vacc
-            let v     = _mm512_cvtepu32_epi64(*v);                             // zero extend 32-bit v to 64-bits
-            self.vacc = _mm512_or_si512(_mm512_and_si512(self.vacc, mask), v); // clear and OR in v
-        }
-    }
-
     // Set a 32-bit value into the high and mid values of the accumulator
     #[inline(always)]
-    #[allow(dead_code)]
     fn v_set_accumulator_highmid(&mut self, v: &__m256i) {
         unsafe {
             let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
@@ -2441,9 +2430,6 @@ impl RspCpuCore {
     #[inline(always)]
     fn v_accumulator_saturate_low(&mut self) -> __m128i {
         // _mm512_cvtsepi64_epi16 doesn't do what we want
-        //.unsafe {
-        //.    _mm512_cvtsepi64_epi16(_mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16))
-        //.}
         let highmid = self.v_get_accumulator_highmid();
         let low     = self.v_get_accumulator_low();
 

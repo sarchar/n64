@@ -100,7 +100,7 @@ impl PifRom {
 
                 _ => {
                     let res_length = self.read_u8(0x7C0 + i).unwrap();                    
-                    if next_cmd == 0xFE { // end of commands
+                    if res_length == 0xFE { // end of commands
                         break 'cmd_loop;
                     }
                 }
