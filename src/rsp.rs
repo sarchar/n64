@@ -6,6 +6,7 @@ use std::thread;
 
 #[cfg(all(target_arch="x86_64", target_feature="sse2"))]
 use core::arch::x86_64::*;
+use avx512f_wrapper::*;
 
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
@@ -101,8 +102,8 @@ struct RspCpuCore {
     ccr: [u32; 4],
 
     v: [__m128i; 32],            // 32 128-bit VU registers
-    vacc: __m512i,               // 8x48bit (in 64-bit lanes) accumulators
-    vacc_mask: __m512i,          // always 0xFFFF_FFFF_FFFF_FFFF
+    vacc: __wm512i,              // 8x48bit (in 64-bit lanes) accumulators
+    vacc_mask: __wm512i,         // always 0xFFFF_FFFF_FFFF_FFFF
     v256_ones: __m256i,          // 8x32bit 0x0000_0001
     rotate_base: __m128i,
 
@@ -561,21 +562,21 @@ impl Addressable for Rsp {
             0x0000_0000..=0x0003_FFFF => {
                 let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
                 if mem_offset < (0x1000>>2) {
-                    const TASK_TYPE: usize = 0xFC0 >> 2;
-                    const DL_START: usize = 0xFF0 >> 2;
-                    const DL_LEN: usize = 0xFF4 >> 2;
-                    match mem_offset {
-                        DL_START => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
-                        },
-                        DL_LEN => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
-                        },
-                        TASK_TYPE => {
-                            info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
-                        },
-                        _ => {},
-                    }
+                    //const TASK_TYPE: usize = 0xFC0 >> 2;
+                    //const DL_START: usize = 0xFF0 >> 2;
+                    //const DL_LEN: usize = 0xFF4 >> 2;
+                    //match mem_offset {
+                    //    DL_START => {
+                    //        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL start)", value, offset);
+                    //    },
+                    //    DL_LEN => {
+                    //        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (DL length)", value, offset);
+                    //    },
+                    //    TASK_TYPE => {
+                    //        info!(target: "RSPMEM", "wrote value=${:08X} to offset ${:08X} (TaskType)", value, offset);
+                    //    },
+                    //    _ => {},
+                    //}
                 } else {
                     //info!(target: "RSPMEM", "write value=${:08X} offset=${:08X}", value, offset);
                 }
@@ -2413,17 +2414,13 @@ impl RspCpuCore {
     #[inline(always)]
     #[allow(dead_code)]
     fn v_get_accumulator_midlow(&mut self) -> __m256i {
-        unsafe {
-            _mm512_cvtepi64_epi32(self.vacc)
-        }
+        _wmm512_cvtepi64_epi32(self.vacc)
     }
 
     // truncate vacc to __m128 8x16-bit
     #[inline(always)]
     fn v_get_accumulator_low(&mut self) -> __m128i {
-        unsafe {
-            _mm512_cvtepi64_epi16(self.vacc)
-        }
+        _wmm512_cvtepi64_epi16(self.vacc)
     }
 
     // saturate 48-bit accumulator down to 16-bits using the low short as a result when truncating

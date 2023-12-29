@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 
+pub mod avx512f_wrapper;
 pub mod cop1;
 pub mod cpu;
 pub mod debugger;
