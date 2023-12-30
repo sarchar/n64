@@ -1,4 +1,5 @@
 #![feature(stdsimd)]
+#![feature(portable_simd)]
 
 use std::cell::RefCell;
 use std::fs;

@@ -711,8 +711,8 @@ impl RspCpuCore {
             div_result: 0u32,
 
             v: [unsafe { _mm_setzero_si128() }; 32],
-            vacc: unsafe { _mm512_setzero_si512() },
-            vacc_mask: unsafe { _mm512_set1_epi64(0xFFFF_FFFF_FFFF_FFFFu64 as i64) }, 
+            vacc: _wmm512_setzero_si512(),
+            vacc_mask: _wmm512_set1_epi64(0xFFFF_FFFF_FFFF_FFFFu64 as i64), 
             v256_ones: unsafe { _mm256_set1_epi32(1) },
             rotate_base: unsafe { _mm_set_epi8(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16) },
 
@@ -1621,8 +1621,8 @@ impl RspCpuCore {
     #[allow(dead_code)]
     fn v_print_vacc(&self) {
         unsafe {
-            let v128 = _mm512_cvtepi64_epi16(_mm512_srli_epi64(self.vacc, 32));
-            let v256 = _mm512_cvtepi64_epi32(self.vacc);
+            let v128 = _wmm512_cvtepi64_epi16(_wmm512_srli_epi64(self.vacc, 32));
+            let v256 = _wmm512_cvtepi64_epi32(self.vacc);
 
             let v = (((_mm_extract_epi16(v128, 7) as u16) as u64) << 32) | ((_mm256_extract_epi32(v256, 7) as u32) as u64);
             println!("vacc[{}]=${:04X}_${:04X}_${:04X}", 0, (v >> 32) as u16, (v >> 16) as u16, v as u16);
@@ -2366,48 +2366,75 @@ impl RspCpuCore {
     #[inline(always)]
     fn v_splat_vco256(&self) -> __m256i {
         let zeroes = unsafe { _mm256_setzero_si256() };
-        unsafe { 
-            // create 8x32-bit value where carry bit in VCC selects a 1 in the output lane
-            _mm256_mask_blend_epi32(self.ccr[Cop2_VCO] as __mmask8, zeroes, self.v256_ones)
-        }
+
+        // create 8x32-bit value where carry bit in VCC selects a 1 in the output lane
+        _wmm256_mask_blend_epi32(self.ccr[Cop2_VCO] as __mmask8, zeroes, self.v256_ones)
     }
 
     #[inline(always)]
     fn v_set_accumulator_lo(&mut self, v: &__m128i) {
-        unsafe {
-            asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
-                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
-                 "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepi16_epi64: zero extend epi16 to epi64 
-                 "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
-                 mask = in(zmm_reg) self.vacc_mask,
-                 acc = inout(zmm_reg) self.vacc,
-                 epi16 = in(xmm_reg) *v, 
-                 tmp512 = out(zmm_reg) _);
-        }
+        self.vacc = {
+            // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+            let shifted_mask = _wmm512_slli_epi64(self.vacc_mask, 16);
+
+            // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+            let cleared_vacc = _wmm512_and_epi64(self.vacc, shifted_mask);
+
+            // _mm512_cvtepi16_epi64: zero extend epi16 to epi64 
+            let v            = _wmm512_cvtepu16_epi64(*v);
+
+            // _mm512_or_epi64: OR in lower 16 bits into accumulataor
+            _wmm512_or_epi64(cleared_vacc, v)
+
+            //asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+            //     "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepu16_epi64: zero extend epi16 to epi64 
+            //     "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
+            //     mask = in(zmm_reg) self.vacc_mask,
+            //     acc = inout(zmm_reg) self.vacc,
+            //     epi16 = in(xmm_reg) *v, 
+            //     tmp512 = out(zmm_reg) _);
+        };
+        #[cfg(target_feature="avx512f")]
+        todo!("validate the above");
     }
 
     // Set a 32-bit value into the high and mid values of the accumulator
     #[inline(always)]
     fn v_set_accumulator_highmid(&mut self, v: &__m256i) {
-        unsafe {
-            let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
-            asm!("vpsrlq {tmp512}, {mask}, 48",   // _mm512_srli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
-                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
-                 "vpsllq {v512}, {v512}, 16",     // _mm512_slli_epi64: shift input left 16 bits
-                 "vporq {acc}, {acc}, {v512}",    // _mm512_or_epi64: OR in 32 bits into accumulataor
-                 mask = in(zmm_reg) self.vacc_mask,
-                 acc = inout(zmm_reg) self.vacc,
-                 v512 = in(zmm_reg) v512, 
-                 tmp512 = out(zmm_reg) _);
-        }
+        self.vacc = {
+            // _mm512_srli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
+            let shifted_mask = _wmm512_srli_epi64(self.vacc_mask, 48);
+
+            // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
+            let cleared_vacc = _wmm512_and_epi64(self.vacc, shifted_mask);
+
+            // _mm512_cvtepu32_epi64: zero-extend epi32 to epi64
+            // _mm512_slli_epi64: shift input left 16 bits to have 0xSSSS_XXXX_XXXX_0000, where S is the sign bit
+            let v = _wmm512_slli_epi64(_wmm512_cvtepu32_epi64(*v), 16);
+
+            // _mm512_or_epi64: OR in high mid bits into accumulator
+            _wmm512_or_epi64(cleared_vacc, v)
+
+            //let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
+            //asm!("vpsrlq {tmp512}, {mask}, 48",   // _mm512_srli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
+            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
+            //     "vpsllq {v512}, {v512}, 16",     // _mm512_slli_epi64: shift input left 16 bits
+            //     "vporq {acc}, {acc}, {v512}",    // _mm512_or_epi64: OR in 32 bits into accumulataor
+            //     mask = in(zmm_reg) self.vacc_mask,
+            //     acc = inout(zmm_reg) self.vacc,
+            //     v512 = in(zmm_reg) v512, 
+            //     tmp512 = out(zmm_reg) _);
+        };
+
+        #[cfg(target_feature="avx512f")]
+        todo!("validate the above");
     }
 
     // shift vacc right 16 (placing high/mid in the lower 32-bits), and then truncate to __m256i 8x32-bit
     #[inline(always)]
     fn v_get_accumulator_highmid(&mut self) -> __m256i {
-        unsafe {
-            _mm512_cvtepi64_epi32(_mm512_srli_epi64(self.vacc, 16))
-        }
+        _wmm512_cvtepi64_epi32(_wmm512_srli_epi64(self.vacc, 16))
     }
 
     // truncate vacc to __m256i 8x32-bit
@@ -2432,24 +2459,24 @@ impl RspCpuCore {
 
         // saturate the low 16-bit value of the accumulator, but we need to use the sign of the high lane
         unsafe { 
-            let high      = _mm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16)); // extract high lane
-            let high_neg  = _mm_cmplt_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is negative
-            let high_neg1 = _mm_cmpeq_epi16_mask(high, _mm_set1_epi16(-1i16)); // set to 1 if vacc high is 0xFFFF
-            let high_zero = _mm_cmpeq_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is 0
+            let high      = _wmm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16)); // extract high lane
+            let high_neg  = _wmm_cmplt_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is negative
+            let high_neg1 = _wmm_cmpeq_epi16_mask(high, _mm_set1_epi16(-1i16)); // set to 1 if vacc high is 0xFFFF
+            let high_zero = _wmm_cmpeq_epi16_mask(high, _mm_setzero_si128());   // set to 1 if vacc high is 0
 
-            let mid       = _mm256_cvtepi32_epi16(highmid); // extract mid lane
-            let mid_neg   = _mm_cmplt_epi16_mask(mid, _mm_setzero_si128()); // set to 1 if mid is negative
+            let mid       = _wmm256_cvtepi32_epi16(highmid); // extract mid lane
+            let mid_neg   = _wmm_cmplt_epi16_mask(mid, _mm_setzero_si128()); // set to 1 if mid is negative
             
             // if high is negative but highmid is 0xFFFF8000 the result is saturated to zero, otherwise truncate
             let hm_neg = (!high_neg1) | (!mid_neg);
-            let hm_neg_result = _mm_mask_blend_epi16(!hm_neg, _mm_setzero_si128(), low);
+            let hm_neg_result = _wmm_mask_blend_epi16(!hm_neg, _mm_setzero_si128(), low);
             
             // if highmid is less than 0x00008000 saturate to -1
             let hm_small = (!high_zero) | mid_neg;
-            let hm_small_result = _mm_mask_blend_epi16(!hm_small, _mm_set1_epi16(-1i16), low);
+            let hm_small_result = _wmm_mask_blend_epi16(!hm_small, _mm_set1_epi16(-1i16), low);
 
             // pick hm_neg or hm_small, otherwise truncate
-            _mm_mask_blend_epi16(!high_neg, hm_neg_result, hm_small_result)
+            _wmm_mask_blend_epi16(!high_neg, hm_neg_result, hm_small_result)
         }
     }
 
@@ -2470,39 +2497,43 @@ impl RspCpuCore {
 
     fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vsar v{}[0b{:04b}]", self.inst_vd, self.inst_e);
-        match self.inst_e {
-             8 => {
-                // move mid 16 bits of vacc to 
-                unsafe {
-                    asm!("vpsrlq {tmp}, {acc}, 32", // _mm512_srli_epi64: shift acc values right 32 bits
-                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         tmp = out(zmm_reg) _,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
+        self.v[self.inst_vd] = match self.inst_e {
+             8 => { // move high 16 bits of vacc to vd
+                // _mm512_srli_epi64: shift acc to the right 32 bits
+                // _mm512_cvtepi64_epi16: truncate epi64 to epi16
+                _wmm512_cvtepi64_epi16(_wmm512_srli_epi64(self.vacc, 32))
+                
+                //asm!("vpsrlq {tmp}, {acc}, 32", // _mm512_srli_epi64: shift acc values right 32 bits
+                //     "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                //     acc = in(zmm_reg) self.vacc,
+                //     tmp = out(zmm_reg) _,
+                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
-             9 => {
-                // move mid 16 bits of vacc to 
-                unsafe {
-                    asm!("vpsrlq {tmp}, {acc}, 16", // _mm512_srli_epi64: shift acc values right 16 bits
-                         "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         tmp = out(zmm_reg) _,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
+             9 => { // move mid 16 bits of vacc to 
+                // _mm512_srli_epi64: shift acc to the right 16 bits
+                // _mm512_cvtepi64_epi16: truncate epi64 to epi16
+                _wmm512_cvtepi64_epi16(_wmm512_srli_epi64(self.vacc, 16))
+
+                //asm!("vpsrlq {tmp}, {acc}, 16", // _mm512_srli_epi64: shift acc values right 16 bits
+                //     "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                //     acc = in(zmm_reg) self.vacc,
+                //     tmp = out(zmm_reg) _,
+                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
-            10 => {
-                // move low 16 bits of vacc to 
-                unsafe {
-                    asm!("vpmovqw {out}, {acc}", // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                         acc = in(zmm_reg) self.vacc,
-                         out = out(xmm_reg) self.v[self.inst_vd]);
-                }
+            10 => { // move low 16 bits of vacc to 
+                // _mm512_cvtepi64_epi16: truncate epi64 to epi16
+                _wmm512_cvtepi64_epi16(self.vacc)
+                //asm!("vpmovqw {out}, {acc}", // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
+                //     acc = in(zmm_reg) self.vacc,
+                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
-            _ => {
-                self.v[self.inst_vd] = unsafe { _mm_setzero_si128() };
-            },
+
+            // all others set vd to 0
+            _ => unsafe { _mm_setzero_si128() },
         };
+
+        #[cfg(target_feature="avx512f")]
+        todo!("validate the above!");
         Ok(())
     }
 
@@ -2522,21 +2553,35 @@ impl RspCpuCore {
             let right256 = _mm256_cvtepi16_epi32(right);
             let result256 = _mm256_add_epi32(left256, right256); // the actual op: rs + rt(e)
 
-            // for the accumulator, truncate to 16-bits and then covert to __m512i
-            // truncates 8 32-bit ints for storage in the accumulator
-            asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
-                 "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+            // for the accumulator, truncate to 16-bits and then covert to __m512i and store it into acc low
 
-                 "vpmovdw {epi16}, {src}",        // _mm256_cvtepi32_epi16: truncate down to epi16
-                 "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepi16_epi64: zero extend epi16 to epi64 
-                 "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
-                 src = in(ymm_reg) result256,
-                 mask = in(zmm_reg) self.vacc_mask,
-                 acc = inout(zmm_reg) self.vacc,
-                 epi16 = out(xmm_reg) _, 
-                 tmp512 = out(zmm_reg) _);
+            // truncate result256 to 16bit and zero-extend to 64-bit
+            let result512 = _wmm512_cvtepu16_epi64(_wmm256_cvtepi32_epi16(result256));
+
+            // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+            let shifted_mask = _wmm512_slli_epi64(self.vacc_mask, 16);
+
+            // _mm512_and_epi64: clear lower 16 bits of acc
+            let cleared_vacc = _wmm512_and_epi64(self.vacc, shifted_mask);
+
+            // _mm512_or_epi64: OR in lower 16 bits into acc
+            self.vacc = _wmm512_or_epi64(cleared_vacc, result512);
+
+            //asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
+            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
+
+            //     "vpmovdw {epi16}, {src}",        // _mm256_cvtepi32_epi16: truncate down to epi16
+            //     "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepu16_epi64: zero extend epi16 to epi64 
+            //     "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
+            //     src = in(ymm_reg) result256,
+            //     mask = in(zmm_reg) self.vacc_mask,
+            //     acc = inout(zmm_reg) self.vacc,
+            //     epi16 = out(xmm_reg) _, 
+            //     tmp512 = out(zmm_reg) _);
         };
 
+        #[cfg(target_feature="avx512f")]
+        todo!("validate the above! .. actually, convert to use v_set_accumulator_lo and validate tests");
         Ok(())
     }
 
@@ -2556,12 +2601,13 @@ impl RspCpuCore {
 
             // saturate 8 32-bit ints using _mm256_cvtsepi32_epi16 (nightly api, not yet available) into 8 16-bit ints
             // uses vpmovsdw until _mm256_cvtsepi32_epi16 makes it out of nightly
-            asm!("vpmovsdw {dst}, {src}", // _mm256_cvtsepi32_epi16: saturate down to epi16
-                 src = in(ymm_reg) result256,
-                 dst = out(xmm_reg) *dst);
+            *dst = _wmm256_cvtsepi32_epi16(result256); // _mm256_cvtsepi32_epi16: saturate down to epi16
+            //asm!("vpmovsdw {dst}, {src}", // _mm256_cvtsepi32_epi16: saturate down to epi16
+            //     src = in(ymm_reg) result256,
+            //     dst = out(xmm_reg) *dst);
 
             // for the accumulator, truncate result to 16-bits and store in low 16-bits of acc
-            _mm256_cvtepi32_epi16(result256)
+            _wmm256_cvtepi32_epi16(result256)
         };
 
         self.v_set_accumulator_lo(&result128);
@@ -2586,7 +2632,7 @@ impl RspCpuCore {
 
             // the result and accumulator are the same result with VADDC
             // truncate to 16bit
-            let result128 = _mm256_cvtepi32_epi16(result256);
+            let result128 = _wmm256_cvtepi32_epi16(result256);
 
             // To compute VCO we need bit 16 after the add, so we want bit 0x00010000 of each lane into VCO
             let result256 = _mm256_srli_epi32(_mm256_and_si256(result256, _mm256_set1_epi32(0x0001_0000i32)), 1);
@@ -2621,10 +2667,10 @@ impl RspCpuCore {
             let result256 = _mm256_sub_epi32(_mm256_sub_epi32(left256, right256), carry_in); // the actual op: rs - rt(e) - vcc
 
             // saturate 8 32-bit ints using _mm256_cvtsepi32_epi16 into 8 16-bit ints
-            *dst = _mm256_cvtsepi32_epi16(result256);
+            *dst = _wmm256_cvtsepi32_epi16(result256);
 
             // truncate the result for the accumulator
-            _mm256_cvtepi32_epi16(result256)
+            _wmm256_cvtepi32_epi16(result256)
         };
 
         // the accumulator low lane gets the truncated result
@@ -2651,7 +2697,7 @@ impl RspCpuCore {
             let result256 = _mm256_sub_epi32(left256, right256); // the actual op: rs - rt(e)
 
             // truncate for the result
-            *dst = _mm256_cvtepi32_epi16(result256);
+            *dst = _wmm256_cvtepi32_epi16(result256);
 
             // VCO low bit depends on if the result is negative (bit 0x8000_0000 set)
             // we can use a movemask and just take that bit into carry low
@@ -2754,12 +2800,12 @@ impl RspCpuCore {
             let use_eq = vco_high & vco_low;
             let result_mask: u8;
 
-            let result = unsafe { 
+            let result = { 
                 // compare less than on all fields, and leq on only the fields that have both VCO bits set
-                let lt_mask = _mm_cmplt_epi16_mask(left, right);
-                let eq_mask = _mm_cmpeq_epi16_mask(left, right);
+                let lt_mask = _wmm_cmplt_epi16_mask(left, right);
+                let eq_mask = _wmm_cmpeq_epi16_mask(left, right);
                 result_mask = lt_mask | (eq_mask & use_eq);
-                _mm_mask_blend_epi16(result_mask, right, left)
+                _wmm_mask_blend_epi16(result_mask, right, left)
             };
 
             (result, result_mask)
@@ -2770,8 +2816,8 @@ impl RspCpuCore {
         //info!(target: "RSP", "veq v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
         self.v_compare(|left, right, vco_high, _| {
             let result_mask: u8;
-            let result = unsafe { 
-                let eq_mask = _mm_cmpeq_epi16_mask(left, right);
+            let result = { 
+                let eq_mask = _wmm_cmpeq_epi16_mask(left, right);
                 result_mask = eq_mask & !vco_high;
                 right
             };
@@ -2783,8 +2829,8 @@ impl RspCpuCore {
         //info!(target: "RSP", "vne v{}, v{}, v{}[0b{:04b}] // VCO=${:04X}", self.inst_vd, self.inst_vs, self.inst_vt, self.inst_e, self.ccr[Cop2_VCO]);
         self.v_compare(|left, right, vco_high, _| {
             let result_mask: u8;
-            let result = unsafe { 
-                let eq_mask = _mm_cmpneq_epi16_mask(left, right);
+            let result = { 
+                let eq_mask = _wmm_cmpneq_epi16_mask(left, right);
                 result_mask = eq_mask | vco_high;
                 left
             };
@@ -2797,11 +2843,11 @@ impl RspCpuCore {
         self.v_compare(|left, right, vco_high, vco_low| {
             let use_eq = !(vco_high & vco_low);
             let result_mask: u8;
-            let result = unsafe { 
-                let gt_mask = _mm_cmpgt_epi16_mask(left, right);
-                let eq_mask = _mm_cmpeq_epi16_mask(left, right);
+            let result = { 
+                let gt_mask = _wmm_cmpgt_epi16_mask(left, right);
+                let eq_mask = _wmm_cmpeq_epi16_mask(left, right);
                 result_mask = gt_mask | (eq_mask & use_eq);
-                _mm_mask_blend_epi16(result_mask, right, left)
+                _wmm_mask_blend_epi16(result_mask, right, left)
             };
             (result, result_mask)
         })
@@ -2816,9 +2862,7 @@ impl RspCpuCore {
 
         // bits in merge_mask need to be reversed and inverted, but we swap right/left in the blend
         let merge_mask = (self.ccr[Cop2_VCC] as u8).reverse_bits();
-        let result = unsafe {
-            _mm_mask_blend_epi16(merge_mask, right, left)
-        };
+        let result = _wmm_mask_blend_epi16(merge_mask, right, left);
 
         // store the result
         self.v[self.inst_vd] = result;
@@ -2878,9 +2922,9 @@ impl RspCpuCore {
             let left256   = _mm256_cvtepu16_epi32(left); //zero-extend to 32-bits and add (all values are positive now)
             let right256  = _mm256_cvtepu16_epi32(right);
             let result256 = _mm256_add_epi32(left256, right256); // the actual op: rs + rt(e)
-            let sum       = _mm256_cvtepi32_epi16(result256); // truncate to 16-bit for the sum
-            let zero_sum  = (_mm_cmpeq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits(); // compare sum to zero, create a mask
-            let carry     = (_mm256_cmpge_epi32_mask(result256, _mm256_set1_epi32(0x10000u32 as i32)) as u8).reverse_bits(); // bitmask where 1 indicates carry occurred
+            let sum       = _wmm256_cvtepi32_epi16(result256); // truncate to 16-bit for the sum
+            let zero_sum  = (_wmm_cmpeq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits(); // compare sum to zero, create a mask
+            let carry     = (_wmm256_cmpge_epi32_mask(result256, _mm256_set1_epi32(0x10000u32 as i32)) as u8).reverse_bits(); // bitmask where 1 indicates carry occurred
             //println!("sum=${:032X} zero_sum=0b{:08b} carry=0b{:08b}", Self::v_as_u128(&sum), zero_sum, carry);
 
             // new vcc low contains the equal/less-equal sign
@@ -2890,20 +2934,20 @@ impl RspCpuCore {
             new_vcc_low = (new_vcc_low & !vco_high) | (vcc_low & vco_high);
 
             // the output of when original vco_low is set (sign bit set) yields either -vt or vs depending on the result of le (new_vcc_low)
-            let vco_low_set_result = _mm_mask_blend_epi16(new_vcc_low.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
+            let vco_low_set_result = _wmm_mask_blend_epi16(new_vcc_low.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
 
             //...if a vco_low bit is clear...
 
             // new vcc high contains the greater-than-or-equal result between vs and vt
-            let mut new_vcc_high = (_mm_cmpge_epu16_mask(left, right) as u8).reverse_bits();
+            let mut new_vcc_high = (_wmm_cmpge_epu16_mask(left, right) as u8).reverse_bits();
             // but only gets compared when vco_high is clear, so mask out those bits and keep the old vcc_high bits
             new_vcc_high = (new_vcc_high & !vco_high) | (vcc_high & vco_high);
 
             // the output of when original vco_low is clear (sign bit clear) yields either vs or vt depending on the ge flag (new_vcc_high)
-            let vco_low_clear_result = _mm_mask_blend_epi16(new_vcc_high.reverse_bits(), left, right);
+            let vco_low_clear_result = _wmm_mask_blend_epi16(new_vcc_high.reverse_bits(), left, right);
 
             // the final result is picking the elements based on vco_low (sign bit)
-            let result = _mm_mask_blend_epi16(vco_low, vco_low_clear_result, vco_low_set_result);
+            let result = _wmm_mask_blend_epi16(vco_low, vco_low_clear_result, vco_low_set_result);
             new_vcc_low  = (new_vcc_low  &  vco_low) | (vcc_low  & !vco_low);   // select new_vcc_low when vco_low is set, otherwise keep old vcc_low
             new_vcc_high = (new_vcc_high & !vco_low) | (vcc_high &  vco_low);   // select new_vcc_high when vco_low is clear, otherwise keep old vcc_high
 
@@ -2935,32 +2979,32 @@ impl RspCpuCore {
 
         let result = unsafe {
             // first compare vs^vt < 0
-            new_vco_low = (_mm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
+            new_vco_low = (_wmm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
 
             // comparisons between vs and vt
-            vt_lt_zero = (_mm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
-            vt_ne_not_vs = (_mm_cmpneq_epi16_mask(right, _mm_xor_si128(left, _mm_set1_epi8(0xFFu8 as i8))) as u8).reverse_bits();
+            vt_lt_zero = (_wmm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
+            vt_ne_not_vs = (_wmm_cmpneq_epi16_mask(right, _mm_xor_si128(left, _mm_set1_epi8(0xFFu8 as i8))) as u8).reverse_bits();
 
             // calculate sum and diff
             let sum  = _mm_add_epi16(left, right);
             let diff = _mm_sub_epi16(left, right);
 
             // sum and diff comparisons
-            sum_le_zero  = (_mm_cmple_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
-            diff_ge_zero = (_mm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
-            sum_ne_zero  = (_mm_cmpneq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
-            diff_ne_zero = (_mm_cmpneq_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
-            sum_eq_neg1  = (_mm_cmpeq_epi16_mask(sum, _mm_set1_epi16(-1i16)) as u8).reverse_bits();
+            sum_le_zero  = (_wmm_cmple_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ge_zero = (_wmm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+            sum_ne_zero  = (_wmm_cmpneq_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ne_zero = (_wmm_cmpneq_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+            sum_eq_neg1  = (_wmm_cmpeq_epi16_mask(sum, _mm_set1_epi16(-1i16)) as u8).reverse_bits();
 
             // results...
             // if vco_low bit is set, we select either vs or -vt based on whether the sum of the two is negative
-            let vco_low_set_result = _mm_mask_blend_epi16(sum_le_zero.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
+            let vco_low_set_result = _wmm_mask_blend_epi16(sum_le_zero.reverse_bits(), left, _mm_sub_epi16(_mm_setzero_si128(), right));
 
             // if vco_low bit is clear, we select either vs or vt based on whether the diff is >=0 or not
-            let vco_low_clear_result = _mm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
+            let vco_low_clear_result = _wmm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
 
             // pick which result based on new vco_low
-            _mm_mask_blend_epi16(new_vco_low.reverse_bits(), vco_low_clear_result, vco_low_set_result)
+            _wmm_mask_blend_epi16(new_vco_low.reverse_bits(), vco_low_clear_result, vco_low_set_result)
         };
 
         // low bits of accumulator get a copy of the result
@@ -2997,28 +3041,28 @@ impl RspCpuCore {
 
         let result = unsafe {
             // first compare vs^vt < 0, gives us whether the high bit after an op is set (number is negative)
-            high_bit = (_mm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
+            high_bit = (_wmm_cmplt_epi16_mask(_mm_xor_si128(left, right), _mm_setzero_si128()) as u8).reverse_bits();
 
             // calculate sum and diff
             let sum  = _mm_add_epi16(left, right);
             let diff = _mm_sub_epi16(left, right);
 
             // comparisons between vs and vt
-            vt_lt_zero = (_mm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
+            vt_lt_zero = (_wmm_cmplt_epi16_mask(right, _mm_setzero_si128()) as u8).reverse_bits();
 
             // sum and diff comparisons
-            sum_lt_zero  = (_mm_cmplt_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
-            diff_ge_zero = (_mm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
+            sum_lt_zero  = (_wmm_cmplt_epi16_mask(sum, _mm_setzero_si128()) as u8).reverse_bits();
+            diff_ge_zero = (_wmm_cmpge_epi16_mask(diff, _mm_setzero_si128()) as u8).reverse_bits();
 
             // results...
             // if high_bit bit is set, we select either vs or !vt based on whether the sum of the two is negative
-            let high_bit_set_result = _mm_mask_blend_epi16(sum_lt_zero.reverse_bits(), left, _mm_xor_si128(right, _mm_set1_epi8(0xFFu8 as i8)));
+            let high_bit_set_result = _wmm_mask_blend_epi16(sum_lt_zero.reverse_bits(), left, _mm_xor_si128(right, _mm_set1_epi8(0xFFu8 as i8)));
 
             // if high_bit bit is clear, we select either vs or vt based on whether the diff is >=0 or not
-            let high_bit_clear_result = _mm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
+            let high_bit_clear_result = _wmm_mask_blend_epi16(diff_ge_zero.reverse_bits(), left, right);
 
             // pick which result based on new vco_low
-            _mm_mask_blend_epi16(high_bit.reverse_bits(), high_bit_clear_result, high_bit_set_result)
+            _wmm_mask_blend_epi16(high_bit.reverse_bits(), high_bit_clear_result, high_bit_set_result)
         };
 
         // low bits of accumulator get a copy of the result
@@ -3060,11 +3104,11 @@ impl RspCpuCore {
             result256 = _mm256_srli_epi32(_mm256_mullo_epi32(left256, right256), 16);
 
             // set vacc low only
-            _mm512_cvtepu32_epi64(result256)
+            _wmm512_cvtepu32_epi64(result256)
         };
 
         // truncate to epi16
-        self.v[self.inst_vd] = unsafe { _mm256_cvtepi32_epi16(result256) };
+        self.v[self.inst_vd] = _wmm256_cvtepi32_epi16(result256);
 
         Ok(())
     }
@@ -3089,7 +3133,7 @@ impl RspCpuCore {
             result256 = _mm256_srli_epi32(_mm256_mullo_epi32(left256, right256), 16);
 
             // add result to the accumulator
-            _mm512_add_epi64(self.vacc, _mm512_cvtepu32_epi64(result256))
+            _wmm512_add_epi64(self.vacc, _wmm512_cvtepu32_epi64(result256))
         };
 
         // saturate the accumulator to epi16 using the low lane for truncation
@@ -3117,11 +3161,11 @@ impl RspCpuCore {
             result256 = _mm256_mullo_epi32(left256, right256);
 
             // set vacc mid and low only with sign extension
-            _mm512_cvtepi32_epi64(result256)
+            _wmm512_cvtepi32_epi64(result256)
         };
 
         // set the result to the mid lane of the accumulator result
-        self.v[self.inst_vd] = unsafe { _mm256_cvtepi32_epi16(_mm256_srli_epi32(result256, 16)) };
+        self.v[self.inst_vd] = unsafe { _wmm256_cvtepi32_epi16(_mm256_srli_epi32(result256, 16)) };
 
         Ok(())
     }
@@ -3145,12 +3189,12 @@ impl RspCpuCore {
             result256 = _mm256_mullo_epi32(left256, right256);
 
             // add result to vacc
-            _mm512_add_epi64(self.vacc, _mm512_cvtepi32_epi64(result256))
+            _wmm512_add_epi64(self.vacc, _wmm512_cvtepi32_epi64(result256))
         };
 
         // saturate the highmid value of the accumulator
         let highmid = self.v_get_accumulator_highmid();
-        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(highmid) };
+        self.v[self.inst_vd] = _wmm256_cvtsepi32_epi16(highmid);
 
         Ok(())
     }
@@ -3175,11 +3219,11 @@ impl RspCpuCore {
             result256 = _mm256_mullo_epi32(left256, right256);
 
             // set vacc mid and low, with sign extension
-            _mm512_cvtepi32_epi64(result256)
+            _wmm512_cvtepi32_epi64(result256)
         };
 
         // set vd to truncated low 16 bits
-        self.v[self.inst_vd] = unsafe { _mm256_cvtepi32_epi16(result256) };
+        self.v[self.inst_vd] = _wmm256_cvtepi32_epi16(result256);
 
         Ok(())
     }
@@ -3203,8 +3247,8 @@ impl RspCpuCore {
             result256 = _mm256_mullo_epi32(left256, right256);
 
             // set vacc mid and low, with sign extension
-            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFFu64 as i64);
-            _mm512_add_epi64(_mm512_and_si512(self.vacc, mask), _mm512_and_si512(_mm512_cvtepi32_epi64(result256), mask))
+            let mask = _wmm512_set1_epi64(0x0000_FFFF_FFFF_FFFFu64 as i64);
+            _wmm512_add_epi64(_wmm512_and_epi64(self.vacc, mask), _wmm512_and_epi64(_wmm512_cvtepi32_epi64(result256), mask))
         };
 
         // saturate the low 16-bit value of the accumulator
@@ -3237,11 +3281,11 @@ impl RspCpuCore {
 
             // setting result256 into VACC high and mid, while clearing the low lane
             // convert to 512-bit and left shift 16
-            _mm512_slli_epi64(_mm512_cvtepu32_epi64(result256), 16)
+            _wmm512_slli_epi64(_wmm512_cvtepu32_epi64(result256), 16)
         };
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(result256) };
+        self.v[self.inst_vd] = _wmm256_cvtsepi32_epi16(result256);
 
         Ok(())
     }
@@ -3272,7 +3316,7 @@ impl RspCpuCore {
         self.v_set_accumulator_highmid(&result256);
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe { _mm256_cvtsepi32_epi16(result256) };
+        self.v[self.inst_vd] = _wmm256_cvtsepi32_epi16(result256);
 
         Ok(())
     }
@@ -3294,16 +3338,16 @@ impl RspCpuCore {
             let result256 = _mm256_mullo_epi32(left256, right256);
 
             // shift the 64-bit result left 1 bit (multiply of fractions) and add 0x8000
-            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
-            _mm512_add_epi64(_mm512_slli_epi64(result512, 1), _mm512_set1_epi64(0x8000u64 as i64))
+            let result512 = _wmm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+            _wmm512_add_epi64(_wmm512_slli_epi64(result512, 1), _wmm512_set1_epi64(0x8000u64 as i64))
         };
 
         //self.v_print_vacc();
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe {
+        self.v[self.inst_vd] = {
             let highmid = self.v_get_accumulator_highmid();
-            _mm256_cvtsepi32_epi16(highmid)
+            _wmm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())
@@ -3326,26 +3370,26 @@ impl RspCpuCore {
             let result256 = _mm256_mullo_epi32(left256, right256);
 
             // shift the 64-bit result left 1 bit (multiply of fractions) and add 0x8000
-            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
-            _mm512_add_epi64(_mm512_slli_epi64(result512, 1), _mm512_set1_epi64(0x8000u64 as i64))
+            let result512 = _wmm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+            _wmm512_add_epi64(_wmm512_slli_epi64(result512, 1), _wmm512_set1_epi64(0x8000u64 as i64))
         };
 
         // unsigned saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
         self.v[self.inst_vd] = unsafe {
             let highmid = self.v_get_accumulator_highmid();
-            let high = _mm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16));
-            let mid  = _mm256_cvtepi32_epi16(highmid);
+            let high = _wmm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16));
+            let mid  = _wmm256_cvtepi32_epi16(highmid);
 
             // _mm_packus_epi32 and _mm256_cvtusepi32_epi16 don't work the way we want -- it won't saturate 0x0000_8000 to 0x0000_FFFF (and why should it?)
             // so we do it ourselves!
-            let uppermask = _mm_cmplt_epi16_mask(high, _mm_setzero_si128()); // bit 0x8000_0000 is set - 32-bit number is negative, goes to 0
-            let halfmask  = _mm_cmplt_epi16_mask(_mm_xor_si128(high, mid), _mm_setzero_si128()); // when high bit is clear but bit 0x0000_8000 is set, saturate to 0xFFFF
+            let uppermask = _wmm_cmplt_epi16_mask(high, _mm_setzero_si128()); // bit 0x8000_0000 is set - 32-bit number is negative, goes to 0
+            let halfmask  = _wmm_cmplt_epi16_mask(_mm_xor_si128(high, mid), _mm_setzero_si128()); // when high bit is clear but bit 0x0000_8000 is set, saturate to 0xFFFF
             // if uppermask is set, return 0
-            _mm_mask_blend_epi16(!uppermask, _mm_setzero_si128(),
-                                             // if halfmask is set, return 0xFFFF
-                                             _mm_mask_blend_epi16(!halfmask, _mm_set1_epi16(0xFFFFu16 as i16),
-                                                                             // otherwise, ACC mid is used directly
-                                                                             mid))
+            _wmm_mask_blend_epi16(!uppermask, _mm_setzero_si128(),
+                                              // if halfmask is set, return 0xFFFF
+                                              _wmm_mask_blend_epi16(!halfmask, _mm_set1_epi16(0xFFFFu16 as i16),
+                                                                               // otherwise, ACC mid is used directly
+                                                                               mid))
         };
 
         Ok(())
@@ -3371,24 +3415,24 @@ impl RspCpuCore {
             
             // add 31 to all lanes that have a negative result
             let rplus31 = _mm256_add_epi32(result256, _mm256_set1_epi32(31));
-            let rneg    = _mm256_cmplt_epi32_mask(result256, _mm256_setzero_si256());
-            result256   = _mm256_mask_blend_epi32(rneg, result256, rplus31);
+            let rneg    = _wmm256_cmplt_epi32_mask(result256, _mm256_setzero_si256());
+            result256   = _wmm256_mask_blend_epi32(rneg, result256, rplus31);
 
             // set vacc mid and low only with sign extension
-            _mm512_slli_epi64(_mm512_cvtepi32_epi64(result256), 16)
+            _wmm512_slli_epi64(_wmm512_cvtepi32_epi64(result256), 16)
         };
 
         // shift right 1, clamp down to 16 bits, then mask out lower 4 bits
         self.v[self.inst_vd] = unsafe { 
             // _mm256_cvtsepi32_epi16 seems to work like the below ops
-            _mm_and_si128(_mm256_cvtsepi32_epi16(_mm256_srai_epi32(result256, 1)), _mm_set1_epi16(0xFFF0u16 as i16)) 
+            _mm_and_si128(_wmm256_cvtsepi32_epi16(_mm256_srai_epi32(result256, 1)), _mm_set1_epi16(0xFFF0u16 as i16)) 
 
             //let shifted = _mm256_srai_epi32(result256, 1);
             //let neg = _mm256_cmplt_epi32_mask(shifted, _mm256_set1_epi32(0xFFFF8000u32 as i32));
             //let result = _mm256_mask_blend_epi32(!neg, _mm256_set1_epi32(0x8000i32), shifted);
             //let pos = _mm256_cmpge_epi32_mask(shifted, _mm256_set1_epi32(0x8000i32));
             //let result = _mm256_mask_blend_epi32(!pos, _mm256_set1_epi32(0x7FFFi32), result);
-            //_mm_and_si128(_mm256_cvtepi32_epi16(result), _mm_set1_epi16(0xFFF0u16 as i16)) 
+            //_mm_and_si128(_wmm256_cvtepi32_epi16(result), _mm_set1_epi16(0xFFF0u16 as i16)) 
         };
 
         Ok(())
@@ -3410,30 +3454,30 @@ impl RspCpuCore {
 
             // multiply and sign extend to 64 bits
             let result256 = _mm256_mullo_epi32(left256, right256);
-            let result512 = _mm512_cvtepi32_epi64(result256);
+            let result512 = _wmm512_cvtepi32_epi64(result256);
 
             // shift the result left 1 bit (multiply of fractions) and add to the accumulator
-            _mm512_add_epi64(self.vacc, _mm512_slli_epi64(result512, 1))
+            _wmm512_add_epi64(self.vacc, _wmm512_slli_epi64(result512, 1))
         };
 
         // unsigned saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
         self.v[self.inst_vd] = unsafe {
             let highmid = self.v_get_accumulator_highmid();
-            let high = _mm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16));
-            let mid  = _mm256_cvtepi32_epi16(highmid);
+            let high = _wmm256_cvtepi32_epi16(_mm256_srli_epi32(highmid, 16));
+            let mid  = _wmm256_cvtepi32_epi16(highmid);
 
             // _mm_packus_epi32 and _mm256_cvtusepi32_epi16 don't work the way we want -- it won't saturate 0x0000_8000 to 0x0000_FFFF (and why should it?)
             // so we do it ourselves!
-            let uppermask = _mm_cmplt_epi16_mask(high, _mm_setzero_si128());  // bit 0x8000_0000 is set - 32-bit number is negative, goes to 0
-            let high_nz   = _mm_cmpneq_epi16_mask(high, _mm_setzero_si128()); // compare high != 0
-            let mid_neg   = _mm_cmplt_epi16_mask(mid, _mm_setzero_si128());   // compare mid < 0 (bit 0x0000_8000 set)
+            let uppermask = _wmm_cmplt_epi16_mask(high, _mm_setzero_si128());  // bit 0x8000_0000 is set - 32-bit number is negative, goes to 0
+            let high_nz   = _wmm_cmpneq_epi16_mask(high, _mm_setzero_si128()); // compare high != 0
+            let mid_neg   = _wmm_cmplt_epi16_mask(mid, _mm_setzero_si128());   // compare mid < 0 (bit 0x0000_8000 set)
 
             // if uppermask is set, return 0
-            _mm_mask_blend_epi16(!uppermask, _mm_setzero_si128(),
-                                             // if (high_nz && mid_neg), return 0xFFFF
-                                             _mm_mask_blend_epi16(!(high_nz | mid_neg), _mm_set1_epi16(0xFFFFu16 as i16),
-                                                                             // otherwise, ACC mid is used directly
-                                                                             mid))
+            _wmm_mask_blend_epi16(!uppermask, _mm_setzero_si128(),
+                                              // if (high_nz && mid_neg), return 0xFFFF
+                                              _wmm_mask_blend_epi16(!(high_nz | mid_neg), _mm_set1_epi16(0xFFFFu16 as i16),
+                                                                                          // otherwise, ACC mid is used directly
+                                                                                          mid))
         };
 
 
@@ -3455,16 +3499,16 @@ impl RspCpuCore {
             let right256 = _mm256_cvtepi16_epi32(right);
             // multiply and zero extend to 64 bits
             let result256 = _mm256_mullo_epi32(left256, right256); // the actual op: rs * rt(e)
-            let result512 = _mm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
+            let result512 = _wmm512_cvtepi32_epi64(result256); // sign-extend to 64-bit
 
             // shift the result left 1 bit (multiply of fractions) and add to the accumulator
-            _mm512_add_epi64(self.vacc, _mm512_slli_epi64(result512, 1))
+            _wmm512_add_epi64(self.vacc, _wmm512_slli_epi64(result512, 1))
         };
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe {
+        self.v[self.inst_vd] = {
             let highmid = self.v_get_accumulator_highmid();
-            _mm256_cvtsepi32_epi16(highmid)
+            _wmm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())
@@ -3483,20 +3527,20 @@ impl RspCpuCore {
         // otherwise subtract 0x20<<16 if highmid is positive
         let highmid = unsafe {
             // get a bitmask for all the lanes with bit 0x20_0000 clear
-            let zero_bits = _mm256_cmpeq_epi32_mask(_mm256_and_si256(highmid, _mm256_set1_epi32(0x20u32 as i32)), _mm256_setzero_si256());
+            let zero_bits = _wmm256_cmpeq_epi32_mask(_mm256_and_si256(highmid, _mm256_set1_epi32(0x20u32 as i32)), _mm256_setzero_si256());
             // mask for all lanes that are <-0x20 or >0x20
             // using the inverse mask for code readability
-            let gen20 = _mm256_cmpge_epi32_mask(highmid, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32)); // want <-0x20 but comparing >=-0x20
-            let lep20 = _mm256_cmple_epi32_mask(highmid, _mm256_set1_epi32(0x0000_0020u32 as i32)); // want > 0x20 but comparing <= 0x20
+            let gen20 = _wmm256_cmpge_epi32_mask(highmid, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32)); // want <-0x20 but comparing >=-0x20
+            let lep20 = _wmm256_cmple_epi32_mask(highmid, _mm256_set1_epi32(0x0000_0020u32 as i32)); // want > 0x20 but comparing <= 0x20
 
             // if bit 21 is set, add 0. if bit 21 is clear, add either -0x20 or +0x20 depending on if the lane is <-0x20 or >0x20
-            let addend = _mm256_mask_blend_epi32(zero_bits, _mm256_setzero_si256(), 
-                                                 // if result <-0x20 add 0x20, otherwise check lep20
-                                                 _mm256_mask_blend_epi32(gen20, _mm256_set1_epi32(0x0000_0020u32 as i32),
-                                                                                // if result <= 0x20, add 0
-                                                                                // otherwise subtract 0x20
-                                                                                _mm256_mask_blend_epi32(lep20, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32),
-                                                                                                               _mm256_setzero_si256())));
+            let addend = _wmm256_mask_blend_epi32(zero_bits, _mm256_setzero_si256(), 
+                                                  // if result <-0x20 add 0x20, otherwise check lep20
+                                                  _wmm256_mask_blend_epi32(gen20, _mm256_set1_epi32(0x0000_0020u32 as i32),
+                                                                                  // if result <= 0x20, add 0
+                                                                                  // otherwise subtract 0x20
+                                                                                  _wmm256_mask_blend_epi32(lep20, _mm256_set1_epi32(0xFFFF_FFE0u32 as i32),
+                                                                                                                  _mm256_setzero_si256())));
             _mm256_add_epi32(highmid, addend)
         };
 
@@ -3506,7 +3550,7 @@ impl RspCpuCore {
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
         self.v[self.inst_vd] = unsafe {
             // right shift with sign
-            _mm_and_si128(_mm256_cvtsepi32_epi16(_mm256_srai_epi32(highmid, 1)), _mm_set1_epi16(0xFFF0u16 as i16))
+            _mm_and_si128(_wmm256_cvtsepi32_epi16(_mm256_srai_epi32(highmid, 1)), _mm_set1_epi16(0xFFF0u16 as i16))
         };
 
         Ok(())
@@ -3721,20 +3765,21 @@ impl RspCpuCore {
             };
 
             // check if ACC < 0
-            let vacc    = _mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16);
-            let acc_neg = _mm512_cmplt_epi64_mask(vacc, _mm512_setzero_si512());
+            let vacc    = _wmm512_srai_epi64(_wmm512_slli_epi64(self.vacc, 16), 16);
+            let acc_neg = _wmm512_cmplt_epi64_mask(vacc, _wmm512_setzero_si512());
 
             // if ACC < 0, add sign-extended (to 48 bit) product
-            let acc_sum = _mm512_add_epi64(vacc, _mm512_cvtepi32_epi64(product));
+            let acc_sum = _wmm512_add_epi64(vacc, _wmm512_cvtepi32_epi64(product));
 
-            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFF);
-            _mm512_and_si512(_mm512_mask_blend_epi64(acc_neg, vacc, acc_sum), mask)
+            // clear high 16 bits of epi64
+            let shifted_mask = _wmm512_srli_epi64(self.vacc_mask, 16);
+            _wmm512_and_epi64(_wmm512_mask_blend_epi64(acc_neg, vacc, acc_sum), shifted_mask)
         };
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe {
+        self.v[self.inst_vd] = {
             let highmid = self.v_get_accumulator_highmid();
-            _mm256_cvtsepi32_epi16(highmid)
+            _wmm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())
@@ -3752,20 +3797,21 @@ impl RspCpuCore {
             };
 
             // check if bit 0x0000_8000_0000_0000 is clear (checking ACC >= 0)
-            let vacc    = _mm512_srai_epi64(_mm512_slli_epi64(self.vacc, 16), 16);
-            let acc_pos = _mm512_cmpge_epi64_mask(vacc, _mm512_setzero_si512());
+            let vacc    = _wmm512_srai_epi64(_wmm512_slli_epi64(self.vacc, 16), 16);
+            let acc_pos = _wmm512_cmpge_epi64_mask(vacc, _wmm512_setzero_si512());
 
             // if ACC >= 0, add sign-extended (to 48 bit) product
-            let acc_sum = _mm512_add_epi64(vacc, _mm512_cvtepi32_epi64(product));
+            let acc_sum = _wmm512_add_epi64(vacc, _wmm512_cvtepi32_epi64(product));
 
-            let mask = _mm512_set1_epi64(0x0000_FFFF_FFFF_FFFF);
-            _mm512_and_si512(_mm512_mask_blend_epi64(acc_pos, vacc, acc_sum), mask)
+            // clear high 16 bits of epi64
+            let shifted_mask = _wmm512_srli_epi64(self.vacc_mask, 16);
+            _wmm512_and_epi64(_wmm512_mask_blend_epi64(acc_pos, vacc, acc_sum), shifted_mask)
         };
 
         // saturate the high-mid 32-bit value of the accumulator to 16-bit for the result
-        self.v[self.inst_vd] = unsafe {
+        self.v[self.inst_vd] = {
             let highmid = self.v_get_accumulator_highmid();
-            _mm256_cvtsepi32_epi16(highmid)
+            _wmm256_cvtsepi32_epi16(highmid)
         };
 
         Ok(())

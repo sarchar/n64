@@ -74,9 +74,9 @@ impl PifRom {
     fn do_joybus(&mut self) {
         trace!(target: "PIF", "running joybus protocol");
 
-        let channel = 0;
+        let mut channel = 0;
 
-        let i = 0;
+        let mut i = 0;
         'cmd_loop: loop {
             let cmd_start = 0x7C0 + i;
             i += 1;
