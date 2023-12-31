@@ -3,6 +3,7 @@ use cfg_if::cfg_if;
 #[cfg(target_arch="x86_64")]
 use core::arch::x86_64::*;
 
+#[cfg(not(target_feature="avx512f"))]
 use core::simd::Simd;
 
 #[cfg(target_feature="avx512f")]
@@ -95,14 +96,14 @@ pub fn _wmm512_set1_epi64(a: i64) -> __wm512i {
 }
 
 #[inline(always)]
-pub fn _wmm512_srai_epi64(a: __wm512i, imm8: u32) -> __wm512i {
+pub fn _wmm512_srai_epi64<const IMM8: u32>(a: __wm512i) -> __wm512i {
     cfg_if! {
         if #[cfg(target_feature="avx512f")] {
-            unsafe { _mm512_srai_epi64(a, imm8) }
+            unsafe { _mm512_srai_epi64::<IMM8>(a) }
         } else {
             let mut r = _wmm512_setzero_si512();
             for i in 0..8 { 
-                r.0[i] = a.0[i] >> imm8; 
+                r.0[i] = a.0[i] >> IMM8; 
             }
             r
         }
@@ -110,14 +111,14 @@ pub fn _wmm512_srai_epi64(a: __wm512i, imm8: u32) -> __wm512i {
 }
 
 #[inline(always)]
-pub fn _wmm512_srli_epi64(a: __wm512i, imm8: u32) -> __wm512i {
+pub fn _wmm512_srli_epi64<const IMM8: u32>(a: __wm512i) -> __wm512i {
     cfg_if! {
         if #[cfg(target_feature="avx512f")] {
-            unsafe { _mm512_srli_epi64(a, imm8) }
+            unsafe { _mm512_srli_epi64::<IMM8>(a) }
         } else {
             let mut r = _wmm512_setzero_si512();
             for i in 0..8 { 
-                r.0[i] = ((a.0[i] as u64) >> imm8) as i64; 
+                r.0[i] = ((a.0[i] as u64) >> IMM8) as i64; 
             }
             r
         }
@@ -125,14 +126,14 @@ pub fn _wmm512_srli_epi64(a: __wm512i, imm8: u32) -> __wm512i {
 }
 
 #[inline(always)]
-pub fn _wmm512_slli_epi64(a: __wm512i, imm8: u32) -> __wm512i {
+pub fn _wmm512_slli_epi64<const IMM8: u32>(a: __wm512i) -> __wm512i {
     cfg_if! {
         if #[cfg(target_feature="avx512f")] {
-            unsafe { _mm512_slli_epi64(a, imm8) }
+            unsafe { _mm512_slli_epi64::<IMM8>(a) }
         } else {
             let mut r = _wmm512_setzero_si512();
             for i in 0..8 { 
-                r.0[i] = a.0[i] << imm8; 
+                r.0[i] = a.0[i] << IMM8; 
             }
             r
         }
@@ -495,6 +496,7 @@ pub fn _wmm512_mask_blend_epi64(mask: __mmask8, a: __wm512i, b: __wm512i) -> __w
 // this version not exactly listed at
 // https://stackoverflow.com/questions/72898737/intrinsic-inverse-to-mm-movemask-epi8
 // but has been converted to take 32-bit mask and make a __m256i mask usable in _mm256_blendv_epi8
+#[cfg(not(target_feature="avx512f"))]
 #[inline(always)]
 unsafe fn mask8_to_m256i(mask: __mmask8) -> __m256i {
     // _mm256_shuffle_epi8 shuffles each 128-bit half separately, so we need the mask in epi32 lane 0 and 2
@@ -536,6 +538,7 @@ pub fn _wmm256_mask_blend_epi32(mask: __mmask8, a: __m256i, b: __m256i) -> __m25
 }
 
 // https://stackoverflow.com/questions/72898737/intrinsic-inverse-to-mm-movemask-epi8
+#[cfg(not(target_feature="avx512f"))]
 #[inline(always)]
 unsafe fn mask8_to_m128i(mask: __mmask8) -> __m128i {
     let sel = _mm_set1_epi64x(0x80402010_08040201u64 as i64);
@@ -662,6 +665,7 @@ pub fn _wmm256_cvtepi32_epi16(v: __m256i) -> __m128i {
     }
 }
 
+#[cfg(not(target_feature="avx512f"))]
 #[inline(always)]
 fn saturate16_i32(v: i32) -> i16 {
     if v < -32768 { 0x8000u16 as i16 } else if v > 32767 { 0x7FFFi16 } else { v as i16 }
