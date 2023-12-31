@@ -243,7 +243,7 @@ impl Rcp {
             8 => (Some(&mut self.si), offset & 0x000F_FFFF),
 
             // 0x0409_0000-0x04FF_FFFF unmapped
-            _ => panic!("invalid RCP write"),
+            _ => panic!("invalid RCP {mode}"),
         }
     }
 
