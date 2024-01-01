@@ -131,7 +131,7 @@ impl Addressable for PifRom {
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
-                info!(target: "PIF-RAM", "read offset=${:08X}", offset);
+                //info!(target: "PIF-RAM", "read offset=${:08X}", offset);
                 Ok(self.ram[ram_offset as usize])
             } else {
                 panic!("unhandled PIF read offset=${:08X}", offset)

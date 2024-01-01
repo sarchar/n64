@@ -55,8 +55,9 @@ fn main() {
     // the starting filter disables all of rustyline and the rest of the program to INFO
     let default_filter = filter::Targets::new()
                             .with_target("rustyline", tracing_core::Level::ERROR)
-                            .with_target("RCP", tracing_core::Level::DEBUG)
+                            //.with_target("RCP", tracing_core::Level::DEBUG)
                             //.with_target("RDP", tracing_core::Level::DEBUG)
+                            //.with_target("VI", tracing_core::Level::DEBUG)
                             //.with_target("RSP", tracing_core::Level::DEBUG)
                             .with_default(Level::INFO);
 
@@ -166,8 +167,8 @@ fn run_gui(system: System) {
                 // run system for 93.75MHz/30fps = 3.125M cycles/frame
                 // in reality, the video interface is rendering from the frame buffer
                 // at a fixed clock rate not caring what the cpu is doing
-                for _ in 0..CYCLES_PER_FRAME {
-                    let _ = system.step();
+                for _ in 0..(CYCLES_PER_FRAME/1000) {
+                    let _ = system.step(1000);
                 }
 
                 // render from the frame buffer. the n64-systemtests rom sets the frame buffer to
