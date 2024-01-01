@@ -1,5 +1,4 @@
 #![allow(non_upper_case_globals)]
-use std::arch::asm;
 use std::mem;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
@@ -2385,15 +2384,6 @@ impl RspCpuCore {
 
             // _mm512_or_epi64: OR in lower 16 bits into accumulataor
             _wmm512_or_epi64(cleared_vacc, v)
-
-            //asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
-            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
-            //     "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepu16_epi64: zero extend epi16 to epi64 
-            //     "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
-            //     mask = in(zmm_reg) self.vacc_mask,
-            //     acc = inout(zmm_reg) self.vacc,
-            //     epi16 = in(xmm_reg) *v, 
-            //     tmp512 = out(zmm_reg) _);
         };
     }
 
@@ -2413,16 +2403,6 @@ impl RspCpuCore {
 
             // _mm512_or_epi64: OR in high mid bits into accumulator
             _wmm512_or_epi64(cleared_vacc, v)
-
-            //let v512 = _mm512_cvtepu32_epi64(*v); // zero-extend 32-bit numbers to 64-bits
-            //asm!("vpsrlq {tmp512}, {mask}, 48",   // _mm512_srli_epi64: shift bitmask right 48 to get 0x0000_0000_0000_FFFF
-            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear upper high and mid (upper 48, actually) bits of acc and store result in acc
-            //     "vpsllq {v512}, {v512}, 16",     // _mm512_slli_epi64: shift input left 16 bits
-            //     "vporq {acc}, {acc}, {v512}",    // _mm512_or_epi64: OR in 32 bits into accumulataor
-            //     mask = in(zmm_reg) self.vacc_mask,
-            //     acc = inout(zmm_reg) self.vacc,
-            //     v512 = in(zmm_reg) v512, 
-            //     tmp512 = out(zmm_reg) _);
         };
     }
 
@@ -2493,34 +2473,21 @@ impl RspCpuCore {
     fn cop2_vsar(&mut self) -> Result<(), InstructionFault> {
         //info!(target: "RSP", "vsar v{}[0b{:04b}]", self.inst_vd, self.inst_e);
         self.v[self.inst_vd] = match self.inst_e {
-             8 => { // move high 16 bits of vacc to vd
+            8 => { // move high 16 bits of vacc to vd
                 // _mm512_srli_epi64: shift acc to the right 32 bits
                 // _mm512_cvtepi64_epi16: truncate epi64 to epi16
                 _wmm512_cvtepi64_epi16(_wmm512_srli_epi64::<32>(self.vacc))
-                
-                //asm!("vpsrlq {tmp}, {acc}, 32", // _mm512_srli_epi64: shift acc values right 32 bits
-                //     "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                //     acc = in(zmm_reg) self.vacc,
-                //     tmp = out(zmm_reg) _,
-                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
-             9 => { // move mid 16 bits of vacc to 
+
+            9 => { // move mid 16 bits of vacc to 
                 // _mm512_srli_epi64: shift acc to the right 16 bits
                 // _mm512_cvtepi64_epi16: truncate epi64 to epi16
                 _wmm512_cvtepi64_epi16(_wmm512_srli_epi64::<16>(self.vacc))
-
-                //asm!("vpsrlq {tmp}, {acc}, 16", // _mm512_srli_epi64: shift acc values right 16 bits
-                //     "vpmovqw {out}, {tmp}",    // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                //     acc = in(zmm_reg) self.vacc,
-                //     tmp = out(zmm_reg) _,
-                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
+
             10 => { // move low 16 bits of vacc to 
                 // _mm512_cvtepi64_epi16: truncate epi64 to epi16
                 _wmm512_cvtepi64_epi16(self.vacc)
-                //asm!("vpmovqw {out}, {acc}", // _mm512_cvtepi64_epi16: truncate 64-bit ints to 16-bit
-                //     acc = in(zmm_reg) self.vacc,
-                //     out = out(xmm_reg) self.v[self.inst_vd]);
             },
 
             // all others set vd to 0
@@ -2558,18 +2525,6 @@ impl RspCpuCore {
 
             // _mm512_or_epi64: OR in lower 16 bits into acc
             self.vacc = _wmm512_or_epi64(cleared_vacc, result512);
-
-            //asm!("vpsllq {tmp512}, {mask}, 16",   // _mm512_slli_epi64: shift bitmask left 16 to get 0xFFFF_FFFF_FFFF_0000 in each channel
-            //     "vpandq {acc}, {tmp512}, {acc}", // _mm512_and_epi64: clear lower 16 bits of acc and store result in acc
-
-            //     "vpmovdw {epi16}, {src}",        // _mm256_cvtepi32_epi16: truncate down to epi16
-            //     "vpmovzxwq {tmp512}, {epi16}",   // _mm512_cvtepu16_epi64: zero extend epi16 to epi64 
-            //     "vporq {acc}, {acc}, {tmp512}",  // _mm512_or_epi64: OR in lower 16 bits into accumulataor
-            //     src = in(ymm_reg) result256,
-            //     mask = in(zmm_reg) self.vacc_mask,
-            //     acc = inout(zmm_reg) self.vacc,
-            //     epi16 = out(xmm_reg) _, 
-            //     tmp512 = out(zmm_reg) _);
         };
         Ok(())
     }
@@ -2591,9 +2546,6 @@ impl RspCpuCore {
             // saturate 8 32-bit ints using _mm256_cvtsepi32_epi16 (nightly api, not yet available) into 8 16-bit ints
             // uses vpmovsdw until _mm256_cvtsepi32_epi16 makes it out of nightly
             *dst = _wmm256_cvtsepi32_epi16(result256); // _mm256_cvtsepi32_epi16: saturate down to epi16
-            //asm!("vpmovsdw {dst}, {src}", // _mm256_cvtsepi32_epi16: saturate down to epi16
-            //     src = in(ymm_reg) result256,
-            //     dst = out(xmm_reg) *dst);
 
             // for the accumulator, truncate result to 16-bits and store in low 16-bits of acc
             _wmm256_cvtepi32_epi16(result256)
@@ -2611,7 +2563,7 @@ impl RspCpuCore {
         let left  = self.v[self.inst_vs];
         let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
         //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
-        let mut carry_bits: u32;
+        let carry_bits: u32;
 
         self.v[self.inst_vd] = unsafe { 
             // zero-extend to eight 32-bits ints and perform add
@@ -2625,10 +2577,8 @@ impl RspCpuCore {
 
             // To compute VCO we need bit 16 after the add, so we want bit 0x00010000 of each lane into VCO
             let result256 = _mm256_srli_epi32(_mm256_and_si256(result256, _mm256_set1_epi32(0x0001_0000i32)), 1);
-            asm!("vpmovmskb {dst:e}, {src}",  // dst = _mm256_movemask_epi8(src) (:e is specified for a 32-bit register)
-                 src = in(ymm_reg) result256, dst = out(reg) carry_bits);
 
-            carry_bits = _pext_u32(carry_bits, 0x2222_2222) & 0xFF; // extract carry bits into lower concatenated bits
+            carry_bits = _pext_u32(_mm256_movemask_epi8(result256) as u32, 0x2222_2222) & 0xFF; // extract carry bits into lower concatenated bits
 
             result128
         };
@@ -2676,8 +2626,8 @@ impl RspCpuCore {
         let right = Self::v_math_elements(&self.v[self.inst_vt], self.inst_e);
         //println!("left=${:032X} right=${:032X}", Self::v_as_u128(&left), Self::v_as_u128(&right));
         let dst = &mut self.v[self.inst_vd];
-        let mut carry_bits: u32;
-        let mut zero_bits: u32;
+        let carry_bits: u32;
+        let zero_bits: u32;
 
         unsafe { 
             // zero-extend to eight 32-bits ints and perform add
@@ -2690,16 +2640,13 @@ impl RspCpuCore {
 
             // VCO low bit depends on if the result is negative (bit 0x8000_0000 set)
             // we can use a movemask and just take that bit into carry low
-            asm!("vpmovmskb {dst:e}, {src}",  // dst = _mm256_movemask_epi8(src) (:e is specified for a 32-bit register)
-                 src = in(ymm_reg) result256, dst = out(reg) carry_bits);
-            carry_bits = _pext_u32(carry_bits, 0x8888_8888) & 0xFF; // extract carry bits into lower concatenated bits
+            carry_bits = _pext_u32(_mm256_movemask_epi8(result256) as u32, 0x8888_8888) & 0xFF; // extract carry bits into lower concatenated bits
 
             // VCO high on the other hand depends on the 32-bit result being nonzero
             let zero_cmp = _mm256_cmpeq_epi32(result256, _mm256_setzero_si256()); // -1 if 0, 0 if not 0
-            asm!("vpmovmskb {dst:e}, {src}",  // dst = _mm256_movemask_epi8(src) (:e is specified for a 32-bit register)
-                 src = in(ymm_reg) zero_cmp, dst = out(reg) zero_bits);
+
             // if high bit is set in zero_cmp, then value is zero and vco high should be clear
-            zero_bits = _pext_u32(!zero_bits, 0x8888_8888) & 0xFF; // extract zero bits into lower concatenated bits
+            zero_bits = _pext_u32(!(_mm256_movemask_epi8(zero_cmp) as u32), 0x8888_8888) & 0xFF; // extract zero bits into lower concatenated bits
         };
 
         // the accumulator low gets a copy of result

@@ -288,17 +288,6 @@ impl Rcp {
         }
 
         Ok(())
-
-        //for i in 0..(dma_info.count / 4) {
-        //    let j = i as usize;
-        //    let source_data = self.pi.get_dma_info(&dma_info);
-        //    let word = ((source_data[j*4 + 0] as u32) << 24)
-        //                | ((source_data[j*4 + 1] as u32) << 16)
-        //                | ((source_data[j*4 + 2] as u32) << 8)
-        //                | ((source_data[j*4 + 3] as u32));
-
-        //    let _ = self.write_u32(word, (dma_info.dest_address + i * 4) as usize);
-        //}
     }
 }
 
