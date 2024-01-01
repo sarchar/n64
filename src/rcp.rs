@@ -98,7 +98,9 @@ impl Rcp {
         // run all the DMAs for the cycle
         loop {
             if let Some(mut dma_info) = self.should_dma() {
-                info!(target: "RCP", "starting dma, DmaInfo = {:?}", dma_info);
+                if !dma_info.initiator.starts_with("PI-") { // don't display PI-RD64B and PI-WR64B
+                    info!(target: "RCP", "starting dma, DmaInfo = {:?}", dma_info);
+                }
 
                 if let Err(_) = self.do_dma(&dma_info) {
                     todo!("handle dma error");

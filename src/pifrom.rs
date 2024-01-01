@@ -75,15 +75,28 @@ impl PifRom {
         trace!(target: "PIF", "running joybus protocol");
 
         let mut channel = 0;
-
         let mut i = 0;
-        'cmd_loop: loop {
+        let mut cmd_count = 0;
+
+        const CMDLEN_OFFSET: usize = 0;
+        const RESLEN_OFFSET: usize = 1;
+        const COMMAND_OFFSET: usize = 2;
+
+        const JOYBUS_COMMAND_ID: u8 = 0x00;
+        const JOYBUS_COMMAND_READ: u8 = 0x01;
+        const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
+
+        'cmd_loop: while i < 64 {
             let cmd_start = 0x7C0 + i;
             i += 1;
 
-            let cmd_length = self.read_u8(cmd_start + 0).unwrap() & 0x3F;
+            let cmd_length = self.read_u8(cmd_start + CMDLEN_OFFSET).unwrap() & 0x3F;
+            debug!(target: "JOY", "Command index {} (at offset {}), channel {}, length {}", cmd_count, cmd_start, channel, cmd_length);
+            cmd_count += 1;
+
             match cmd_length {
                 0 => { // no command for current channel, so move on to next
+                    debug!(target: "JOY", "{}: no more commands on channel {}", cmd_count - 1, channel);
                     channel += 1;
                     continue 'cmd_loop;
                 },
@@ -93,21 +106,114 @@ impl PifRom {
                 },
 
                 0x3E => { // end of commands
+                    debug!(target: "JOY", "{}: end of commands", cmd_count - 1);
                     break 'cmd_loop;
                 },
 
-                0x3F => {}, // NOP/reserved space for response
+                0x3F => { // NOP/reserved space for response
+                    debug!(target: "JOY", "{}: reserved space", cmd_count - 1);
+                },
 
                 _ => {
-                    let res_length = self.read_u8(0x7C0 + i).unwrap();                    
+                    let mut res_length = self.read_u8(cmd_start + RESLEN_OFFSET).unwrap();                    
                     if res_length == 0xFE { // end of commands
                         break 'cmd_loop;
                     }
+
+                    let original_res_length = res_length;
+                    res_length &= 0x3F;
+                    let res_addr = cmd_start + COMMAND_OFFSET + cmd_length as usize;
+
+                    let cmd = self.read_u8(cmd_start + COMMAND_OFFSET).unwrap();
+                    match cmd {
+                        JOYBUS_COMMAND_ID => {
+                            debug!(target: "JOY", "{}: JOYBUS_COMMAND_ID channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            if cmd_length != 1 || res_length != 3 {
+                                error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
+                                break 'cmd_loop;
+                            }
+
+                            // Identify a standard controller on port 1, and nothing on all the other ports
+                            if channel == 0 {
+                                self.write_u8_correct(0x05, res_addr + 0).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
+                                self.write_u8_correct(0x02, res_addr + 2).unwrap(); // 2 indicates no pak installed, 1 otherwise
+                            } else {
+                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
+                                // setting bit 7 to the res length byte indicates device isn't present
+                                self.write_u8_correct((original_res_length | 0x80) as u32, cmd_start + RESLEN_OFFSET).unwrap();
+                            }
+
+                            channel += 1;
+                        },
+
+                        JOYBUS_COMMAND_READ => { // read button state
+                            debug!(target: "JOY", "{}: JOYBUS_COMMAND_READ channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            if cmd_length != 1 || res_length != 4 {
+                                error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
+                                break 'cmd_loop;
+                            }
+
+                            if channel == 0 {
+                                // four bytes indicate buttons and two axes
+                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 3).unwrap();
+                            } else {
+                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 3).unwrap();
+                                // setting bit 7 to the res length byte indicates device isn't present
+                                self.write_u8_correct((original_res_length | 0x80) as u32, cmd_start + RESLEN_OFFSET).unwrap();
+                            }
+
+                            channel += 1;
+                        },
+
+                        JOYBUS_COMMAND_WRITE_ACCESSORY => { // write to device accessory (pak)
+                            debug!(target: "JOY", "{}: JOYBUS_COMMAND_WRITE_ACCESSORY channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            if res_length != 1 {
+                                error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
+                                break 'cmd_loop;
+                            }
+                        }
+
+                        _ => {
+                            error!(target: "JOY", "unhandled joybus command ${:02X} on channel {}", cmd, channel);
+                            unimplemented!();
+                            //break 'cmd_loop;
+                        }
+                    }
+
+                    i += (1 + cmd_length + res_length) as usize;
                 }
             }
         }
 
         self.ram[0x0F] &= !0xFF;
+
+        //println!("Joybus Result:");
+        //for j in 0..4 {
+        //    print!("  ${:02X}: ", j*16);
+        //    for i in 0..16 {
+        //        let index = ((j * 16) + i) as usize;
+        //        let w = self.ram[index >> 2];
+        //        let shift = 24 - ((index & 0x03) << 3);
+        //        print!("{:02X} ", (w >> shift) & 0xFF);
+        //    }
+        //    println!();
+        //}
+    }
+
+    // because PIF doesn't implement write_u8 correctly, we have another copy here
+    fn write_u8_correct(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        let word = self.read_u32(offset & !0x03)?;
+        let shift = 24 - ((offset & 0x03) << 3);
+        self.write_u32(((value & 0xFF) << shift) | (word & !(0xFFu32 << shift)), offset & !0x03)
     }
 }
 
@@ -173,17 +279,17 @@ impl Addressable for PifRom {
     fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         if address != 0x7C0 || block.len() != 16 { todo!(); } // non-standard DMA
 
-        println!("DMA into PIF-RAM:");
-        for j in 0..4 {
-            print!("  ${:02X}: ", j*16);
-            for i in 0..16 {
-                let index = ((j * 16) + i) as usize;
-                let w = block[index >> 2];
-                let shift = 24 - ((index & 0x03) << 3);
-                print!("{:02X} ", (w >> shift) & 0xFF);
-            }
-            println!();
-        }
+        //println!("DMA into PIF-RAM:");
+        //for j in 0..4 {
+        //    print!("  ${:02X}: ", j*16);
+        //    for i in 0..16 {
+        //        let index = ((j * 16) + i) as usize;
+        //        let w = block[index >> 2];
+        //        let shift = 24 - ((index & 0x03) << 3);
+        //        print!("{:02X} ", (w >> shift) & 0xFF);
+        //    }
+        //    println!();
+        //}
 
         self.ram.copy_from_slice(block);
         self.update_control_write();
