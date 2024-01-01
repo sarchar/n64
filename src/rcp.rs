@@ -126,141 +126,73 @@ impl Rcp {
         self.mi.should_interrupt()
     }
 
-    fn rcp_read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        trace!(target: "RCP", "read32 offset=${:08X}", offset);
+    // given an RCP bus address, return an addressable object on the bus with the given offset
+    // adjusted relative to the addressable
+    fn match_addressable(&mut self, physical_address: usize, mode: &str) -> (Option<&mut dyn Addressable>, usize) {
+        let physical_address = physical_address & !0x8000_0000;
 
-        if let (Some(addressable), offset) = self.match_addressable(offset, "read32") {
-            addressable.read_u32(offset)
-        } else {
-            Ok(0)
-        }
-    }
-
-    fn rcp_read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
-        trace!(target: "RCP", "read16 offset=${:08X}", offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "read16") {
-            addressable.read_u16(offset)
-        } else {
-            Ok(0)
-        }
-    }
-
-    fn rcp_read_u8(&mut self, offset: usize) -> Result<u8, ReadWriteFault> {
-        trace!(target: "RCP", "read8 offset=${:08X}", offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "read8") {
-            addressable.read_u8(offset)
-        } else {
-            Ok(0)
-        }
-    }
-
-    fn rcp_read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
-        trace!(target: "RCP", "read_block offset=${:08X}", offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "read_block") {
-            addressable.read_block(offset, length)
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    fn rcp_write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        trace!(target: "RCP", "write32 value=${:08X} offset=${:08X}", value, offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "write32") {
-            addressable.write_u32(value, offset)
-        } else {
-            Ok(WriteReturnSignal::None)
-        }
-    }
-
-    fn rcp_write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        trace!(target: "RCP", "write16 value=${:08X} offset=${:08X}", value, offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "write16") {
-            addressable.write_u16(value, offset)
-        } else {
-            Ok(WriteReturnSignal::None)
-        }
-    }
-
-    fn rcp_write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        trace!(target: "RCP", "write8 value=${:08X} offset=${:08X}", value, offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "write8") {
-            addressable.write_u8(value, offset)
-        } else {
-            Ok(WriteReturnSignal::None)
-        }
-    }
-
-    fn rcp_write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
-        trace!(target: "RCP", "write_block offset=${:08X}", offset);
-
-        if let (Some(addressable), offset) = self.match_addressable(offset, "read_block") {
-            addressable.write_block(offset, block)
-        } else {
-            Ok(WriteReturnSignal::None)
-        }
-    }
-
-    // given an RCP bus address, return another addressable object on the bus with the given offset
-    // adjusted to the addressable
-    fn match_addressable(&mut self, offset: usize, mode: &str) -> (Option<&mut dyn Addressable>, usize) {
-        match (offset & 0x00F0_0000) >> 20 {
-            // RSP range 0x0400_0000-0x040F_FFFF 
-            0 => (Some(&mut self.rsp), offset & 0x000F_FFFF),
-
-            // RDP 0x0410_0000-0x041F_FFFF
-            1..=2 => (Some(&mut self.rdp), offset & 0x003F_FFFF),
-
-            // MI 0x0430_0000-0x043F_FFFF
-            3 => (Some(&mut self.mi), offset & 0x000F_FFFF),
-
-            // VI 0x0440_0000-0x044F_FFFF
-            4 => (Some(&mut self.vi), offset & 0x000F_FFFF),
-
-            // AI 0x0450_0000-0x045F_FFFF
-            5 => {
-                error!(target: "RCP", "unimplemented AI {mode}");
-                (None, 0)
-            },
-            
-            // PI 0x0460_0000-0x046F_FFFF
-            6 => (Some(&mut self.pi), offset & 0x7FFF_FFFF),
-
-            // RDRAM 0x0470_0000-0x047F_FFFF
-            // we pass bit 26 along to indicate the RdramInterface vs RDRAM access
-            7 => {
-                let repeat_count = self.mi.get_repeat_count();
+        match physical_address & 0xFC00_0000 {
+            // RDRAM 0x00000000-0x03FFFFFF
+            0x0000_0000 => {
+                let repeat_count = self.mi.get_repeat_count(); // set the repeat count on RDRAM writes
                 self.ri.set_repeat_count(repeat_count);
-                (Some(&mut self.ri), 0x0400_0000 | (offset & 0x000F_FFFF))
+                (Some(&mut self.ri), physical_address & 0x03FF_FFFF)
             },
 
-            // SI 0x0480_0000-0x048F_FFFF
-            8 => (Some(&mut self.si), offset & 0x000F_FFFF),
+            // RCP 0x04000000-0x04FFFFFF
+            0x0400_0000 => {
+                let offset = physical_address & 0x00FF_FFFF;
+                match (offset & 0x00F0_0000) >> 20 {
+                    // RSP range 0x0400_0000-0x040F_FFFF 
+                    0 => (Some(&mut self.rsp), offset & 0x000F_FFFF),
 
-            // 0x0409_0000-0x04FF_FFFF unmapped
-            _ => panic!("invalid RCP {mode}"),
-        }
-    }
+                    // RDP 0x0410_0000-0x041F_FFFF
+                    1..=2 => (Some(&mut self.rdp), offset & 0x003F_FFFF),
 
-    fn get_physical_address(&self, address: usize) -> (MemorySegment, usize) {
-        // N64 memory is split into segments that are either cached or uncached, 
-        // memory mapped or not, and user or kernel protected. 
-        if (address & 0x8000_0000) == 0 {
-            (MemorySegment::UserSpace, address & 0x7FFF_FFFF)
-        } else {
-            let s = match (address & 0x6000_0000) >> 29 {
-                0 => MemorySegment::KSeg0,
-                1 => MemorySegment::KSeg1,
-                2 => MemorySegment::KSSeg,
-                3 => MemorySegment::KSeg3,
-                _ => panic!("not valid")
-            };
-            (s, address & 0x1FFF_FFFF)
+                    // MI 0x0430_0000-0x043F_FFFF
+                    3 => (Some(&mut self.mi), offset & 0x000F_FFFF),
+
+                    // VI 0x0440_0000-0x044F_FFFF
+                    4 => (Some(&mut self.vi), offset & 0x000F_FFFF),
+
+                    // AI 0x0450_0000-0x045F_FFFF
+                    5 => {
+                        error!(target: "RCP", "unimplemented AI {mode}");
+                        (None, 0)
+                    },
+                    
+                    // PI 0x0460_0000-0x046F_FFFF
+                    6 => (Some(&mut self.pi), offset & 0x7FFF_FFFF),
+
+                    // RDRAM 0x0470_0000-0x047F_FFFF
+                    // we pass bit 26 along to indicate the RdramInterface vs RDRAM access
+                    7 => {
+                        let repeat_count = self.mi.get_repeat_count();
+                        self.ri.set_repeat_count(repeat_count);
+                        (Some(&mut self.ri), 0x0400_0000 | (offset & 0x000F_FFFF))
+                    },
+
+                    // SI 0x0480_0000-0x048F_FFFF
+                    8 => (Some(&mut self.si), offset & 0x000F_FFFF),
+
+                    // 0x0409_0000-0x04FF_FFFF unmapped
+                    _ => panic!("invalid RCP {mode}"),
+                }
+            },
+
+            // the SI external bus sits right in the middle of the PI external bus and needs further decode
+            0x0500_0000..=0x7C00_0000 => {
+                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
+                    // SI external bus 0x1FC00000-0x1FCFFFFF
+                    (Some(&mut self.si), physical_address & 0x7FFF_FFFF)
+                } else {
+                    // PI external bus 0x05000000-0x7FFFFFFF
+                    (Some(&mut self.pi), physical_address & 0x7FFF_FFFF)
+                }
+            },
+
+            // 0x8000_0000 and up not mapped
+            _ => panic!("can't happen")
         }
     }
 
@@ -292,228 +224,83 @@ impl Rcp {
 }
 
 impl Addressable for Rcp {
-    // The RCP handles all bus arbitration, so that's why the primary bus access is
-    // part of the Rcp module
     fn read_u32(&mut self, address: usize) -> Result<u32, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus read32 address=${:08X} physical=${:08X}", address, physical_address);
+        trace!(target: "RCP", "read32 address=${:08X}", address);
 
-        match physical_address & 0xFC00_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000 => self.ri.read_u32(physical_address & 0x03FF_FFFF),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000 => self.rcp_read_u32(physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7C00_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.read_u32(physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.read_u32(physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "read32") {
+            addressable.read_u32(offset)
+        } else {
+            Ok(0)
         }
     }
 
     fn read_u16(&mut self, address: usize) -> Result<u16, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus read16 address=${:08X} physical=${:08X}", address, physical_address);
+        trace!(target: "RCP", "read16 address=${:08X}", address);
 
-        match physical_address & 0xFC00_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000 => self.ri.read_u16(physical_address & 0x03FF_FFFF),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000 => self.rcp_read_u16(physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7C00_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.read_u16(physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.read_u16(physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "read16") {
+            addressable.read_u16(offset)
+        } else {
+            Ok(0)
         }
     }
 
     fn read_u8(&mut self, address: usize) -> Result<u8, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus read8 address=${:08X} physical=${:08X}", address, physical_address);
+        trace!(target: "RCP", "read8 address=${:08X}", address);
 
-        match physical_address & 0xFC00_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000 => self.ri.read_u8(physical_address & 0x03FF_FFFF),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000 => self.rcp_read_u8(physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7C00_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.si.read_u8(physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.read_u8(physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "read8") {
+            addressable.read_u8(offset)
+        } else {
+            Ok(0)
         }
     }
 
-
     fn write_u32(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus write32 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
+        trace!(target: "RCP", "write32 value=${:08X} address=${:08X}", value, address);
 
-        match physical_address & 0xFFF0_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => {
-                let repeat_count = self.mi.get_repeat_count();
-                self.ri.set_repeat_count(repeat_count);
-                self.ri.write_u32(value, physical_address & 0x03FF_FFFF)
-            },
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => self.rcp_write_u32(value, physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7FF0_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.write_u32(value, physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.write_u32(value, physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "write32") {
+            addressable.write_u32(value, offset)
+        } else {
+            Ok(WriteReturnSignal::None)
         }
     }
 
     fn write_u16(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus write16 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
+        trace!(target: "RCP", "write16 value=${:08X} address=${:08X}", value, address);
 
-        match physical_address & 0xFFF0_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => self.ri.write_u16(value, physical_address & 0x03FF_FFFF),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => self.rcp_write_u16(value, physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7FF0_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.write_u16(value, physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.write_u16(value, physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "write16") {
+            addressable.write_u16(value, offset)
+        } else {
+            Ok(WriteReturnSignal::None)
         }
     }
 
     fn write_u8(&mut self, value: u32, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus write16 value=${:08X} address=${:08X} physical=${:08X}", value, address, physical_address);
+        trace!(target: "RCP", "write8 value=${:08X} address=${:08X}", value, address);
 
-        match physical_address & 0xFFF0_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => self.ri.write_u8(value, physical_address & 0x03FF_FFFF),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => self.rcp_write_u8(value, physical_address & 0x00FF_FFFF),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7FF0_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    // the SI external bus only has the PIF, so forward all access to it
-                    self.si.write_u8(value, physical_address & 0x7FFF_FFFF)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.write_u8(value, physical_address & 0x7FFF_FFFF)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "write8") {
+            addressable.write_u8(value, offset)
+        } else {
+            Ok(WriteReturnSignal::None)
         }
     }
 
     fn read_block(&mut self, address: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus read_block length={} address=${:08X} physical=${:08X}", length, address, physical_address);
+        trace!(target: "RCP", "read_block length={} address=${:08X}", length, address);
 
-        match physical_address & 0xFFF0_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => self.ri.read_block(physical_address & 0x03FF_FFFF, length),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => self.rcp_read_block(physical_address & 0x00FF_FFFF, length),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7FF0_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.read_block(physical_address & 0x7FFF_FFFF, length)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.read_block(physical_address & 0x7FFF_FFFF, length)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "read_block") {
+            addressable.read_block(offset, length)
+        } else {
+            Err(ReadWriteFault::Invalid)
         }
     }
 
     fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
-        let (_segment, physical_address) = self.get_physical_address(address);
-        trace!(target: "RCP", "bus write_block length={} address=${:08X} physical=${:08X}", block.len(), address, physical_address);
+        trace!(target: "RCP", "write_block length={} address=${:08X}", block.len(), address);
 
-        match physical_address & 0xFFF0_0000 {
-            // RDRAM 0x00000000-0x03FFFFFF
-            0x0000_0000..=0x03F0_0000 => self.ri.write_block(physical_address & 0x03FF_FFFF, block),
-
-            // RCP 0x04000000-0x04FFFFFF
-            0x0400_0000..=0x04F0_0000 => self.rcp_write_block(physical_address & 0x00FF_FFFF, block),
-
-            // the SI external bus sits right in the middle of the PI external bus and needs further decode
-            0x0500_0000..=0x7FF0_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
-                    // SI external bus 0x1FC00000-0x1FCFFFFF
-                    self.si.write_block(physical_address & 0x7FFF_FFFF, block)
-                } else {
-                    // PI external bus 0x05000000-0x7FFFFFFF
-                    self.pi.write_block(physical_address & 0x7FFF_FFFF, block)
-                }
-            },
-
-            // 0x8000_0000 and up not mapped
-            _ => panic!("can't happen")
+        if let (Some(addressable), offset) = self.match_addressable(address, "write_block") {
+            addressable.write_block(offset, block)
+        } else {
+            Err(ReadWriteFault::Invalid)
         }
     }
 }

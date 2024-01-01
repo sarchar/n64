@@ -19,14 +19,6 @@ pub mod rsp;
 pub mod serial;
 pub mod video;
 
-pub enum MemorySegment {
-    UserSpace,
-    KSeg0,
-    KSeg1,
-    KSSeg,
-    KSeg3,
-}
-
 pub enum WriteReturnSignal {
     None
 }
