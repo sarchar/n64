@@ -1,6 +1,6 @@
 use std::fmt;
 use std::mem;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 
 #[allow(unused_imports)]
 use tracing::{debug, error, trace, info};
@@ -43,11 +43,14 @@ pub struct Rcp {
     // bus objects
     pub mi: MipsInterface,
     pi: PeripheralInterface,
-    rdp: Rdp,
     pub ri: RdramInterface,
     rsp: Rsp,
     si: SerialInterface,
     pub vi: VideoInterface,
+
+    // The RDP needs to be accessible from both the CPU and the RSP, so we use a 
+    // thread safe rwlock to access it
+    rdp: LockedAddressable<Rdp>,
 
     // state
 
@@ -69,11 +72,17 @@ impl Rcp {
         // the PIF-ROM needs to know what CIC chip the cartridge is using, so we pass it along
         let pif = PifRom::new(boot_rom, &mut pi);
 
+        // create the RDP
+        let rdp = Arc::new(Mutex::new(Rdp::new()));
+
+        // create the RSP
+        let rsp = Rsp::new(rdp.clone(), start_dma_tx.clone(), mi.get_update_channel());
+
         Rcp {
             pi : pi,
-            rdp: Rdp::new(),
+            rdp: LockedAddressable::new(rdp), // wrap rdp in a LockedAddressable so that match_addressable can return the rdp
             ri : RdramInterface::new(),
-            rsp: Rsp::new(start_dma_tx.clone(), mi.get_update_channel()),
+            rsp: rsp,
             si : SerialInterface::new(pif, start_dma_tx.clone(), mi.get_update_channel()),
             vi : VideoInterface::new(mi.get_update_channel()),
 

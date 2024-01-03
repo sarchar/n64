@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
+use std::sync::{Mutex, Arc};
 
 pub mod avx512f_wrapper;
 pub mod cop1;
@@ -71,6 +72,54 @@ pub trait Addressable {
     fn write_block(&mut self, offset: usize, _block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         todo!("write_block not implemented for address offset ${offset:08X}");
     }
+}
+
+pub struct LockedAddressable<T> {
+    addressable: Arc<Mutex<T>>,
+}
+
+impl<T> LockedAddressable<T> {
+    fn new(v: Arc<Mutex<T>>) -> Self {
+        Self {
+            addressable: v,
+        }
+    }
+}
+
+impl<T: Addressable> Addressable for LockedAddressable<T> {
+    fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
+        self.addressable.lock().unwrap().read_u32(offset)
+    }
+
+    /// not every device needs to implement these, so defaults are provided
+    fn read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
+        self.addressable.lock().unwrap().read_u16(offset)
+    }
+
+    fn read_u8(&mut self, offset: usize) -> Result<u8, ReadWriteFault> {
+        self.addressable.lock().unwrap().read_u8(offset)
+    }
+
+    fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_u32(value, offset)
+    }
+
+    fn write_u16(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_u16(value, offset)
+    }
+
+    fn write_u8(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_u8(value, offset)
+    }
+
+    fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        self.addressable.lock().unwrap().read_block(offset, length)
+    }
+
+    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_block(offset, block)
+    }
+
 }
 
 pub struct System {

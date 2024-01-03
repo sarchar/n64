@@ -15,6 +15,7 @@ use cpu::{InstructionDecode, InstructionFault};
 use mips::{InterruptUpdate, InterruptUpdateMode, IMask_SP};
 
 use rcp::DmaInfo;
+use rdp::Rdp;
 
 /// COP0 "registers"
 const Cop0_DmaCache      : usize = 0; // IMEM or DMEM address for a DMA transfer
@@ -25,9 +26,9 @@ const Cop0_Status        : usize = 4;
 const Cop0_DmaFull       : usize = 5;
 const Cop0_DmaBusy       : usize = 6;
 const Cop0_Semaphore     : usize = 7;
-const _Cop0_CmdStart      : usize = 8;
-const _Cop0_CmdEnd        : usize = 9;
-const _Cop0_CmdCurrent    : usize = 10;
+const Cop0_CmdStart      : usize = 8;
+const Cop0_CmdEnd        : usize = 9;
+const Cop0_CmdCurrent    : usize = 10;
 const Cop0_CmdStatus     : usize = 11;
 const _Cop0_CmdClock      : usize = 12;
 const _Cop0_CmdBusy       : usize = 13;
@@ -137,12 +138,15 @@ struct RspCpuCore {
     halted: bool,
     halted_self: bool,
     broke: bool,
+
+    // access to the RDP
+    rdp: Arc<Mutex<Rdp>>,
 }
 
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Rsp {
+    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -150,7 +154,7 @@ impl Rsp {
         // dma_completed channel is created here and sent with every DmaInfo message
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
-        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), start_dma_tx.clone(), dma_completed_tx.clone())));
+        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), rdp, start_dma_tx.clone(), dma_completed_tx.clone())));
 
         Rsp {
             mi_interrupts_tx: mi_interrupts_tx,
@@ -209,6 +213,10 @@ impl Rsp {
                     c.num_steps = 0;
                     c.halted = false;
                     c.broke = false;
+
+                    // prefetch the next instruction, as the CPU may have (probably!) changed IMEM
+                    c.pc = c.next_instruction_pc;
+                    let _ = c.prefetch();
                 } else {
                     // run for some cycles or until break
                     for _ in 0..20 {
@@ -282,6 +290,12 @@ impl Rsp {
                 shared_state.dma_current_read_length
             },
 
+            // SP_DMA_WRITE_LENGTH
+            0x4_000C => {
+                let shared_state = self.shared_state.read().unwrap();
+                shared_state.dma_current_write_length
+            },
+
             // SP_STATUS
             0x4_0010 => {
                 //debug!(target: "RSP", "read SP_STATUS");
@@ -306,6 +320,14 @@ impl Rsp {
                     | ((shared_state.dma_full.is_some() as u32) << 3)
                     | ((shared_state.intbreak as u32) << 6)
                     | (shared_state.signals << 7)
+            },
+
+            // SP_DMA_FULL
+            0x4_0014 => {
+                //debug!(target: "RSP", "read SP_DMA_FULL");
+
+                let shared_state = self.shared_state.read().unwrap();
+                shared_state.dma_full.is_some() as u32
             },
 
             // SP_DMA_BUSY
@@ -640,6 +662,7 @@ impl Addressable for Rsp {
                 let (left, _) = which_mem.split_at_mut(leftover_words);
                 left.copy_from_slice(&block[(block.len()-leftover_words)..block.len()]);
             }
+
             Ok(WriteReturnSignal::None)
         } else {
             todo!("DMA into ${offset:8X}");
@@ -649,7 +672,7 @@ impl Addressable for Rsp {
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
-    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, start_dma_tx: mpsc::Sender<DmaInfo>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
+    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
         // initialize the reciprocal table.. the algorithm is widely available but I'll include the Ares license here as well, since it's used in n64-systemtest
         // The generation of the RCP and RSP tables was ported from Ares: https://github.com/ares-emulator/ares/blob/acd2130a4d4c9e7208f61e0ff762895f7c9b8dc6/ares/n64/rsp/rsp.cpp#L102
         // which uses the following license:
@@ -730,6 +753,8 @@ impl RspCpuCore {
             halted: false,
             halted_self: false,
             broke: false,
+
+            rdp: rdp,
 
             instruction_table: [
                 //  _000                _001                _010                _011                _100                _101                _110                _111
@@ -884,7 +909,7 @@ impl RspCpuCore {
         self.is_delay_slot = self.next_is_delay_slot;
         self.next_is_delay_slot = false;
 
-        //info!(target: "RSP", "${:08X}: inst ${:08X} (op=0b{:06b}", self.current_instruction_pc | 0x1000, inst, self.inst.op);
+        //info!(target: "RSP", "${:08X}: inst ${:08X} op=0b{:06b}", self.current_instruction_pc | 0x1000, inst, self.inst.op);
 
         let result = match self.instruction_table[self.inst.op as usize](self) {
             // faults like Break, Unimplemented actually stop processing
@@ -1049,6 +1074,7 @@ impl RspCpuCore {
 
     fn inst_lw(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
+        let rs = self.gpr[self.inst.rs];
         self.gpr[self.inst.rt] = self.read_u32_wrapped(address as usize & 0x0FFF)?;
         Ok(())
     }
@@ -1284,9 +1310,20 @@ impl RspCpuCore {
                         }
                     },
 
+                    Cop0_CmdStart => {
+                        self.rdp.lock().unwrap().read_u32(0x0010_0000)?
+                    },
+
+                    Cop0_CmdEnd => {
+                        self.rdp.lock().unwrap().read_u32(0x0010_0004)?
+                    },
+
+                    Cop0_CmdCurrent => {
+                        self.rdp.lock().unwrap().read_u32(0x0010_0008)?
+                    },
+
                     Cop0_CmdStatus => {
-                        warn!(target: "RSP", "RSP read from RDP status register");
-                        0
+                        self.rdp.lock().unwrap().read_u32(0x0010_000C)?
                     },
 
                     _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
@@ -1455,8 +1492,23 @@ impl RspCpuCore {
                         Ok(())
                     },
 
+                    Cop0_CmdStart => {
+                        self.rdp.lock().unwrap().write_u32(val, 0x0010_0000)?;
+                        Ok(())
+                    },
+
+                    Cop0_CmdEnd => {
+                        self.rdp.lock().unwrap().write_u32(val, 0x0010_0004)?;
+                        Ok(())
+                    },
+
+                    Cop0_CmdCurrent => {
+                        self.rdp.lock().unwrap().write_u32(val, 0x0010_0008)?;
+                        Ok(())
+                    },
+
                     Cop0_CmdStatus => {
-                        warn!(target: "RSP", "RSP write to RDP status register = ${:08X}", val);
+                        self.rdp.lock().unwrap().write_u32(val, 0x0010_000C)?;
                         Ok(())
                     },
 
