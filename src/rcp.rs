@@ -73,7 +73,7 @@ impl Rcp {
         let pif = PifRom::new(boot_rom, &mut pi);
 
         // create the RDP
-        let rdp = Arc::new(Mutex::new(Rdp::new()));
+        let rdp = Arc::new(Mutex::new(Rdp::new(mi.get_update_channel())));
 
         // create the RSP
         let rsp = Rsp::new(rdp.clone(), start_dma_tx.clone(), mi.get_update_channel());
@@ -100,6 +100,10 @@ impl Rcp {
         self.pi.step();
         self.si.step();
         self.vi.step(cpu_cycles_elapsed);
+        //{
+        //    let mut rdp = self.rdp.lock().unwrap();
+        //    rdp.step();
+        //}
 
         // MI should be last to process any incoming interrupts
         self.mi.step();

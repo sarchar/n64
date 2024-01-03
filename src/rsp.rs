@@ -141,6 +141,9 @@ struct RspCpuCore {
 
     // access to the RDP
     rdp: Arc<Mutex<Rdp>>,
+
+    // HLE
+    process_task: bool,
 }
 
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
@@ -648,19 +651,28 @@ impl Addressable for Rsp {
 
     fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x2000 { // I/DRAM
-            let mut mem = self.mem.write().unwrap();
-            let (dram, iram) = mem.split_at_mut(0x1000 >> 2);
-            let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
-            let offset = offset & 0x0FFC;
-            let (_, right) = which_mem.split_at_mut(offset >> 2);
-            if block.len() <= right.len() {
-                let (left, _) = right.split_at_mut(block.len());
-                left.copy_from_slice(block);
-            } else {
-                right.copy_from_slice(&block[0..right.len()]);
-                let leftover_words = block.len() - right.len();
-                let (left, _) = which_mem.split_at_mut(leftover_words);
-                left.copy_from_slice(&block[(block.len()-leftover_words)..block.len()]);
+            {
+                let mut mem = self.mem.write().unwrap();
+                let (dram, iram) = mem.split_at_mut(0x1000 >> 2);
+                let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
+                let offset = offset & 0x0FFC;
+                let (_, right) = which_mem.split_at_mut(offset >> 2);
+                if block.len() <= right.len() {
+                    let (left, _) = right.split_at_mut(block.len());
+                    left.copy_from_slice(block);
+                } else {
+                    right.copy_from_slice(&block[0..right.len()]);
+                    let leftover_words = block.len() - right.len();
+                    let (left, _) = which_mem.split_at_mut(leftover_words);
+                    left.copy_from_slice(&block[(block.len()-leftover_words)..block.len()]);
+                }
+            }
+
+            // if the TaskType (0x0FC0) value has changed, inform the core
+            // TODO: we should check what ucode is loaded before doing this
+            if 0x0FC0 >= offset && 0x0FC0 < (offset + block.len() << 2) {
+                let mut c = self.core.lock().unwrap();
+                c.process_task = true;
             }
 
             Ok(WriteReturnSignal::None)
@@ -755,6 +767,7 @@ impl RspCpuCore {
             broke: false,
 
             rdp: rdp,
+            process_task: false,
 
             instruction_table: [
                 //  _000                _001                _010                _011                _100                _101                _110                _111
@@ -881,6 +894,39 @@ impl RspCpuCore {
         if (self.pc & 0x03) != 0 {
             panic!("invalid!");
             //return self.address_exception(self.pc, false);
+        }
+
+        if self.process_task {
+            let task_type = self.read_u32(0x0FC0)?;
+            match task_type {
+                1 => { // M_GFXTASK
+                    let dl_start = self.read_u32(0x0FF0)?;
+                    if dl_start != 0 { // if for gfx tasks, wait for the DL pointer to be valid
+                        self.process_task = false;
+                        info!(target: "RSP", "TODO: process DL list at ${:08X}", self.read_u32(0x0FF0)?);
+
+                        // set SIG2 and halt
+                        {
+                            let mut shared_state = self.shared_state.write().unwrap();
+                            shared_state.signals |= 1 << 2;
+                        }
+                        self.special_break()?;
+
+                        {
+                            let mut rdp = self.rdp.lock().unwrap();
+                            rdp.write_u32(0x04, 0x0010_000C as usize)?; // write CLR_FREEZE bit
+                        }
+
+                        // no more RSP running
+                        return Ok(());
+                    }
+                },
+
+                _ => {
+                    error!(target: "RSP", "unhandled task type {}", task_type);
+                    self.process_task = false;
+                },
+            }
         }
 
         // current instruction
@@ -1074,7 +1120,6 @@ impl RspCpuCore {
 
     fn inst_lw(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm as u32);
-        let rs = self.gpr[self.inst.rs];
         self.gpr[self.inst.rt] = self.read_u32_wrapped(address as usize & 0x0FFF)?;
         Ok(())
     }

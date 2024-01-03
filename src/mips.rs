@@ -148,6 +148,7 @@ impl Addressable for MipsInterface {
             0x0_0000 => { 
                 info!(target: "MI", "write MI_MODE value=${:08X}", value);
 
+                // RDP interrupt is cleared by writing to MI
                 if (value & 0x800) != 0 {
                     self.interrupt &= !(1 << IMask_DP);
                 }

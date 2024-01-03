@@ -1,10 +1,15 @@
-use crate::*;
+use std::sync::mpsc;
 
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
+use crate::*;
+use mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
+
 #[derive(Debug)]
 pub struct Rdp {
+    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
+
     start: u32,
     start_latch: u32,
     end: u32,
@@ -12,8 +17,10 @@ pub struct Rdp {
 }
 
 impl Rdp {
-    pub fn new() -> Rdp {
+    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Rdp {
         Rdp {
+            mi_interrupts_tx: mi_interrupts_tx,
+
             start: 0,
             start_latch: 0,
             end: 0,
@@ -102,6 +109,14 @@ impl Addressable for Rdp {
                     } else if(value & 0x02) == 0x02 { 
                         self.status |= 0x01;  // use DBUS
                     }
+                }
+
+                // if CLR_FREEZE is set then we should have some code to run
+                if (value & 0x04) == 0x04 {
+                    // set freeze bit and trigger interrupt
+                    // note: RDP interrupt is cleared by writing to MI
+                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_DP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                    self.status |= 0x02;
                 }
             },
 
