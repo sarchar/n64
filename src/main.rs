@@ -1,7 +1,10 @@
 use std::env;
 use cfg_if::cfg_if;
 
-#[cfg(feature="gui")]
+#[cfg(all(feature="gui", feature="headless"))]
+compile_error!{"features \"gui\" and \"headless\" cannot be enabled together"}
+
+#[cfg(not(feature="headless"))]
 mod gui;
 
 #[allow(unused_imports)]
@@ -97,21 +100,22 @@ fn main() {
     //.     }
     //. }
 
-    // create the n64 system
-    #[allow(unused_mut)]
-    let mut system = System::new("bios/pifrom.v64", args[1].as_str());
+    let program_rom = String::from(args[1].as_str());
+    let make_system = move || {
+        System::new("bios/pifrom.v64", &program_rom)
+    };
 
     // either run or debug
     if args.len() == 3 && args[2] == "-D" {
-        let mut debugger = Debugger::new(system, change_logging);
+        let mut debugger = Debugger::new(make_system(), change_logging);
         println!("Entering debugger...");
         debugger.run().expect("Debugger failed");
     } else {
         cfg_if! {
-            if #[cfg(feature="gui")] {
-                pollster::block_on(gui::run(system));
+            if #[cfg(feature="headless")] {
+                make_system().run();
             } else {
-                system.run();
+                pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system)));
             }
         }
     }

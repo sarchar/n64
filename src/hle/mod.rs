@@ -352,7 +352,7 @@ impl Hle {
             0xDC => { // G_MOVEMEM
                 let index = (cmd >> 32) as u8;
                 if index == 8 {
-                    print!("gsSPViewpoert(...)");
+                    print!("gsSPViewport(...)");
                 } else {
                     print!("gsSPMoveMem?({}, ...)", index);
                 }

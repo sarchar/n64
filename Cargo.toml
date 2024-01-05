@@ -4,7 +4,9 @@ version = "0.0.1"
 edition = "2021"
 
 [features]
+default = ["gui"]
 gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster"]
+headless = []
 
 [dependencies.cfg-if]
 version = "1.0.0"

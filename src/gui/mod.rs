@@ -14,6 +14,8 @@ use imgui_wgpu::{Renderer, RendererConfig};
 
 use crate::*;
 
+pub mod game;
+
 struct WgpuInfo {
     //instance      : wgpu::Instance,
     surface       : wgpu::Surface,
@@ -24,7 +26,7 @@ struct WgpuInfo {
     needs_reconfigure: bool,
 }
 
-struct AppWindow {
+pub struct AppWindow {
     event_loop  : Option<EventLoop<()>>,
     size        : LogicalSize<u32>,
     window      : Window,
@@ -151,18 +153,18 @@ impl AppWindow {
         self.window.scale_factor()
     }
 
-    fn run<F>(mut app: AppWindow, mut user_update: F)
+    fn run<F>(mut appwnd: AppWindow, mut user_update: F)
     where 
         F: FnMut(&mut AppWindow, Event<()>) -> () + 'static
     {
         // take ownership of the event loop so that we can pass AppWindow around freely
-        let event_loop = std::mem::replace(&mut app.event_loop, None).unwrap();
+        let event_loop = std::mem::replace(&mut appwnd.event_loop, None).unwrap();
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Poll; // continously update
 
             // check for input events
-            if app.input_helper.update(&event) {
-                if app.input_helper.quit() {
+            if appwnd.input_helper.update(&event) {
+                if appwnd.input_helper.quit() {
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
@@ -173,17 +175,17 @@ impl AppWindow {
                     event: WindowEvent::Resized(size),
                     ..
                 } => {
-                    app.resize_surface(size);
+                    appwnd.resize_surface(size);
                 },
 
                 Event::MainEventsCleared => {
-                    app.window.request_redraw();
+                    appwnd.window.request_redraw();
                 },
 
                 Event::RedrawEventsCleared => {
-                    if app.wgpu.needs_reconfigure {
-                        app.wgpu.surface.configure(&app.wgpu.device, &app.wgpu.surface_config);
-                        app.wgpu.needs_reconfigure = false;
+                    if appwnd.wgpu.needs_reconfigure {
+                        appwnd.wgpu.surface.configure(&appwnd.wgpu.device, &appwnd.wgpu.surface_config);
+                        appwnd.wgpu.needs_reconfigure = false;
                     }
                 },
 
@@ -191,21 +193,38 @@ impl AppWindow {
                 _ => (),
             };
 
-            user_update(&mut app, event);
+            user_update(&mut appwnd, event);
         });
     }
 }
 
-pub async fn run(mut _system: System) {
-    let app = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, false).await;
+pub trait App {
+    /// Called to create the app
+    /// Create your pipeline here
+    fn create(appwnd: &AppWindow) -> Self;
+
+    /// Called once per frame to update the internal state of the app
+    /// Check key presses and controllers that may affect render() here
+    fn update(&mut self, appwnd: &AppWindow, delta_time: f32);
+
+    /// Called once per frame to render the app
+    fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView);
+
+    /// Called once per frame to render the UI
+    /// Check key presses that may affect UI events such as shortcuts like Ctrl+Q
+    fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
+}
+
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce() -> System) + Send>) {
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, false).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
-    platform.attach_window(imgui.io_mut(), app.window(), imgui_winit_support::HiDpiMode::Default);
+    platform.attach_window(imgui.io_mut(), appwnd.window(), imgui_winit_support::HiDpiMode::Default);
     imgui.set_ini_filename(std::path::PathBuf::from("gui.ini"));
 
     // create the imgui font atlas and default font
-    let scale_factor = app.window_scale_factor();
+    let scale_factor = appwnd.window_scale_factor();
     imgui.io_mut().font_global_scale = (1.0 / scale_factor) as f32;
 
     let font_size = (13.0 * scale_factor) as f32;
@@ -219,20 +238,25 @@ pub async fn run(mut _system: System) {
     }]);
 
     // configure imgui to use wgpu 
-    let clear_color = wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
     let renderer_config = RendererConfig {
-        texture_format: app.surface_config().format,
+        texture_format: appwnd.surface_config().format,
         ..Default::default()
     };
 
-    let mut renderer = Renderer::new(&mut imgui, app.device(), app.queue(), renderer_config);
+    let mut renderer = Renderer::new(&mut imgui, appwnd.device(), appwnd.queue(), renderer_config);
+    let mut app = T::create(&appwnd);
 
     let mut last_frame = Instant::now();
-    let mut demo_open = true;
+    let mut demo_open = false;
 
-    AppWindow::run(app, move |app: &mut AppWindow, event| {
-        if app.input().key_pressed(VirtualKeyCode::F12) {
-            println!("F12 pressed!");
+    std::thread::spawn(move || {
+        let mut system = create_system();
+        system.run();
+    });
+
+    AppWindow::run(appwnd, move |appwnd: &mut AppWindow, event| {
+        if appwnd.input().key_pressed(VirtualKeyCode::F12) {
+            demo_open = true;
         }
 
         match event {
@@ -241,7 +265,7 @@ pub async fn run(mut _system: System) {
                 imgui.io_mut().update_delta_time(now - last_frame);
                 last_frame = now;
 
-                let frame = match app.surface().get_current_texture() {
+                let frame = match appwnd.surface().get_current_texture() {
                     Ok(frame) => frame,
                     Err(e) => {
                         error!(target: "GUI", "dropped frame: {e:?}");
@@ -249,51 +273,54 @@ pub async fn run(mut _system: System) {
                     }
                 };
 
-                platform.prepare_frame(imgui.io_mut(), app.window()).expect("failed to prepare frame");
+                platform.prepare_frame(imgui.io_mut(), appwnd.window()).expect("failed to prepare frame");
 
                 let ui = imgui.frame();
-                {
-                    let window = ui.window("Hello, world!");
-                    window.size([300.0, 100.0], Condition::FirstUseEver)
-                          .build(|| {
-                              ui.text("Hello, world!");
-                          });
+                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+                // render bg
+                app.update(appwnd, ui.io().delta_time);
+                app.render(appwnd, &view);
+
+                // render ui
+                app.render_ui(appwnd, &ui);
+                if demo_open {
                     ui.show_demo_window(&mut demo_open);
                 }
 
-                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder: wgpu::CommandEncoder =
-                    app.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Main Encoder") });
+                // render imgui to wgpu
+                {
+                    let mut encoder: wgpu::CommandEncoder =
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Main Encoder") });
 
-                platform.prepare_render(ui, app.window());
+                    platform.prepare_render(ui, appwnd.window());
 
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Main Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear_color),
-                            store: true, //. wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    //.occlusion_query_set: None,
-                    //.timestamp_writes: None,
-                });
+                    {
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("imgui Render Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load, // Do not clear
+                                    store: true, //. wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            //.occlusion_query_set: None,
+                            //.timestamp_writes: None,
+                        });
 
-                renderer
-                    .render(imgui.render(), app.queue(), app.device(), &mut render_pass)
-                    .expect("rendering failed");
+                        renderer
+                            .render(imgui.render(), appwnd.queue(), appwnd.device(), &mut render_pass)
+                            .expect("rendering failed");
+                    }
 
-                // use render_pass
-                // ...
-                drop(render_pass);
+                    appwnd.queue().submit(std::iter::once(encoder.finish()));
+                    //appwnd.queue().submit(Some(encoder.finish()));
+                }
 
-                app.queue().submit(std::iter::once(encoder.finish()));
-                //app.queue().submit(Some(encoder.finish()));
-
+                // finish frame
                 frame.present();
             },
 
@@ -301,6 +328,6 @@ pub async fn run(mut _system: System) {
         };
 
         // pass event onto imgui
-        platform.handle_event(imgui.io_mut(), app.window(), &event);
+        platform.handle_event(imgui.io_mut(), appwnd.window(), &event);
     });
 }
