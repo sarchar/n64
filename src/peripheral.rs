@@ -195,9 +195,8 @@ impl PeripheralInterface {
                             dest_address  : self.dram_addr,
                             count         : 1,
                             length        : end - start,
-                            source_stride : 0,
-                            dest_stride   : 0,
                             completed     : Some(self.dma_completed_tx.clone()),
+                            ..Default::default()
                         };
 
                         self.dma_status |= 0x01;

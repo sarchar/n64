@@ -28,6 +28,9 @@ pub struct DmaInfo {
 
     // callback function to let the initiator know the DMA has completed
     pub completed     : Option<mpsc::Sender<DmaInfo>>,
+
+    // direct read or write to memory (when source or dest address == 0xFFFF_FFFF)
+    pub internal_buffer: Option<Vec<u32>>,
 }
 
 impl fmt::Debug for DmaInfo {
@@ -112,10 +115,10 @@ impl Rcp {
         loop {
             if let Some(mut dma_info) = self.should_dma() {
                 if !dma_info.initiator.starts_with("PI-") { // don't display PI-RD64B and PI-WR64B
-                    info!(target: "RCP", "starting dma, DmaInfo = {:?}", dma_info);
+                    trace!(target: "DMA", "performing dma: DmaInfo = {:?}", dma_info);
                 }
 
-                if let Err(_) = self.do_dma(&dma_info) {
+                if let Err(_) = self.do_dma(&mut dma_info) {
                     todo!("handle dma error");
                 }
 
@@ -212,27 +215,43 @@ impl Rcp {
     }
 
     // Slow, maybe at some point we can do more of a direct memory copy
-    fn do_dma(&mut self, dma_info: &DmaInfo) -> Result<(), ReadWriteFault> {
+    fn do_dma(&mut self, dma_info: &mut DmaInfo) -> Result<(), ReadWriteFault> {
         //debug!(target: "RCP", "performing DMA!");
 
         if (dma_info.length % 4) != 0 {
             return Err(ReadWriteFault::Invalid);
         } 
 
-        if (dma_info.count * dma_info.length) == 0 {
+        let transfer_size = dma_info.count * dma_info.length;
+        if transfer_size == 0 {
             return Ok(());
         }
 
         let mut source_address = dma_info.source_address & !0x07;
         let mut dest_address = dma_info.dest_address & !0x07;
 
+        let mut ret_buffer = if dma_info.dest_address == 0xFFFF_FFFF {
+            assert!(dma_info.dest_stride == 0); // internal buffer doesn't support stride
+            assert!(dma_info.count == 1);       // we could support count != 1, but hasn't been necessary yet
+            Some(Vec::with_capacity((transfer_size >> 2) as usize))
+        } else {
+            None
+        };
+
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {
             let block = self.read_block(source_address as usize, dma_info.length)?;
-            self.write_block(dest_address as usize, &block)?;
             source_address += dma_info.source_stride;
-            dest_address += dma_info.dest_stride;
+
+            if let Some(ref mut dest) = ret_buffer {
+                dest.extend_from_slice(&block);
+            } else {
+                self.write_block(dest_address as usize, &block)?;
+                dest_address += dma_info.dest_stride;
+            }
         }
+
+        dma_info.internal_buffer = ret_buffer;
 
         Ok(())
     }

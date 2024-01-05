@@ -12,6 +12,7 @@ use tracing::{trace, debug, error, info, warn};
 
 use crate::*;
 use cpu::{InstructionDecode, InstructionFault};
+use hle::Hle;
 use mips::{InterruptUpdate, InterruptUpdateMode, IMask_SP};
 
 use rcp::DmaInfo;
@@ -195,6 +196,8 @@ impl Rsp {
             c.broke_tx = Some(broke_tx);
         }
 
+        let mut hle = Hle::new(self.start_dma_tx.clone());
+
         thread::spawn(move || {
             let mut _started_time = std::time::Instant::now();
             loop {
@@ -220,6 +223,55 @@ impl Rsp {
                     // prefetch the next instruction, as the CPU may have (probably!) changed IMEM
                     c.pc = c.next_instruction_pc;
                     let _ = c.prefetch();
+
+                    // OSTasks are only set when the RSP is halted, so whenever we wake up we can check and perform tasks
+                    if c.process_task {
+                        let task_type = c.read_u32(0x0FC0).unwrap();
+                        match task_type {
+                            1 => { // M_GFXTASK
+                                let dl_start = c.read_u32(0x0FF0).unwrap(); // OSTask->data_ptr
+                                if dl_start != 0 { // for gfx tasks, wait for the DL pointer to be valid
+                                    c.process_task = false;
+                                    let dl_length = c.read_u32(0x0FF4).unwrap(); // OSTask->data_size
+
+                                    // free the lock on core while running the DL
+                                    drop(c);
+                                    hle.process_display_list(dl_start, dl_length);
+
+                                    // reclaim lock
+                                    let mut c = core.lock().unwrap();
+
+                                    // set SIG2 and halt
+                                    {
+                                        let mut shared_state = c.shared_state.write().unwrap();
+                                        shared_state.signals |= 1 << 2;
+                                    }
+                                    let _ = c.special_break().unwrap();
+
+                                    // RSP isn't running
+                                    c.halted = true;
+
+                                    {
+                                        let mut rdp = c.rdp.lock().unwrap();
+                                        rdp.write_u32(0x04, 0x0010_000C as usize).unwrap(); // write CLR_FREEZE bit
+                                    }
+                                }
+                            },
+
+                            //.2 => { // M_AUDTASK
+                            //.    // run on RSP for now
+                            //.    c.process_task = false;
+                            //.},
+
+                            // All other tasks types are LLE'd
+                            _ => {
+                                if task_type < 8 {
+                                    trace!(target: "RSP", "found task type {}", task_type);
+                                }
+                                c.process_task = false;
+                            },
+                        }
+                    }
                 } else {
                     // run for some cycles or until break
                     for _ in 0..20 {
@@ -404,8 +456,8 @@ impl Rsp {
                     count         : count,
                     length        : length,
                     source_stride : skip,
-                    dest_stride   : 0,
                     completed     : Some(self.dma_completed_tx.clone()),
+                    ..Default::default()
                 };
 
                 if shared_state.dma_busy {
@@ -670,6 +722,7 @@ impl Addressable for Rsp {
 
             // if the TaskType (0x0FC0) value has changed, inform the core
             // TODO: we should check what ucode is loaded before doing this
+            // TODO: if hle_enabled...
             if 0x0FC0 >= offset && 0x0FC0 < (offset + block.len() << 2) {
                 let mut c = self.core.lock().unwrap();
                 c.process_task = true;
@@ -894,39 +947,6 @@ impl RspCpuCore {
         if (self.pc & 0x03) != 0 {
             panic!("invalid!");
             //return self.address_exception(self.pc, false);
-        }
-
-        if self.process_task {
-            let task_type = self.read_u32(0x0FC0)?;
-            match task_type {
-                1 => { // M_GFXTASK
-                    let dl_start = self.read_u32(0x0FF0)?;
-                    if dl_start != 0 { // if for gfx tasks, wait for the DL pointer to be valid
-                        self.process_task = false;
-                        info!(target: "RSP", "TODO: process DL list at ${:08X}", self.read_u32(0x0FF0)?);
-
-                        // set SIG2 and halt
-                        {
-                            let mut shared_state = self.shared_state.write().unwrap();
-                            shared_state.signals |= 1 << 2;
-                        }
-                        self.special_break()?;
-
-                        {
-                            let mut rdp = self.rdp.lock().unwrap();
-                            rdp.write_u32(0x04, 0x0010_000C as usize)?; // write CLR_FREEZE bit
-                        }
-
-                        // no more RSP running
-                        return Ok(());
-                    }
-                },
-
-                _ => {
-                    error!(target: "RSP", "unhandled task type {}", task_type);
-                    self.process_task = false;
-                },
-            }
         }
 
         // current instruction
@@ -1414,8 +1434,8 @@ impl RspCpuCore {
                             count         : count,
                             length        : length,
                             source_stride : skip,
-                            dest_stride   : 0,
                             completed     : Some(self.dma_completed_tx.clone()),
+                            ..Default::default()
                         };
 
                         if shared_state.dma_busy {
@@ -1451,9 +1471,9 @@ impl RspCpuCore {
                             dest_address  : shared_state.dma_dram,
                             count         : count,
                             length        : length,
-                            source_stride : 0,
                             dest_stride   : skip,
                             completed     : Some(self.dma_completed_tx.clone()),
+                            ..Default::default()
                         };
 
                         if shared_state.dma_busy {

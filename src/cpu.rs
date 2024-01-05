@@ -148,6 +148,7 @@ pub struct Cpu {
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
 // InstructionFault is used for passing messages or interrupting cpu execution 
 // within the emulator
+#[derive(Debug)]
 pub enum InstructionFault {
     Invalid,
     Unimplemented,

@@ -83,9 +83,8 @@ impl SerialInterface {
                     dest_address  : self.dram_address & !0x07,
                     count         : 1,  // one loop
                     length        : 64, // 64 bytes
-                    source_stride : 0,  // no strides
-                    dest_stride   : 0,
                     completed     : Some(self.dma_completed_tx.clone()),
+                    ..Default::default()
                 };
 
                 // start DMA
@@ -105,9 +104,8 @@ impl SerialInterface {
                     dest_address  : 0x1FC0_07C0, // start of PIF-RAM
                     count         : 1,  // one loop
                     length        : 64, // 64 bytes
-                    source_stride : 0,  // no strides
-                    dest_stride   : 0,
                     completed     : Some(self.dma_completed_tx.clone()),
+                    ..Default::default()
                 };
 
                 // start DMA

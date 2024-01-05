@@ -85,6 +85,7 @@ impl PifRom {
         const JOYBUS_COMMAND_ID: u8 = 0x00;
         const JOYBUS_COMMAND_READ: u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
+        const JOYBUS_COMMAND_RESET: u8 = 0xFF;
 
         'cmd_loop: while i < 64 {
             let cmd_start = 0x7C0 + i;
@@ -126,7 +127,7 @@ impl PifRom {
 
                     let cmd = self.read_u8(cmd_start + COMMAND_OFFSET).unwrap();
                     match cmd {
-                        JOYBUS_COMMAND_ID => {
+                        JOYBUS_COMMAND_RESET | JOYBUS_COMMAND_ID => {
                             debug!(target: "JOY", "{}: JOYBUS_COMMAND_ID channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
                             if cmd_length != 1 || res_length != 3 {
                                 error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);

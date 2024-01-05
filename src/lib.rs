@@ -10,6 +10,7 @@ pub mod avx512f_wrapper;
 pub mod cop1;
 pub mod cpu;
 pub mod debugger;
+pub mod hle;
 pub mod mips;
 pub mod peripheral;
 pub mod pifrom;

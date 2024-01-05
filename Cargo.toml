@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2021"
 
 [features]
-gui = ["winit", "winit_input_helper", "pixels"]
+gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster"]
 
 [dependencies.cfg-if]
 version = "1.0.0"
@@ -24,23 +24,43 @@ version = "0.1"
 [dependencies.tracing-subscriber]
 version = "0.3"
 
-[dependencies.winit]
-version = "0.28"
-optional = true
-
-[dependencies.winit_input_helper]
-version = "0.14"
-optional = true
-
-[dependencies.pixels]
-version = "0.13"
-optional = true
-
 [dependencies.num-traits]
 version = "0.2"
 
 [dependencies.encoding_rs]
 version = "0.8"
 
+[dependencies.gilrs]
+version = "0.10"
+
+[dependencies.imgui-wgpu]
+version = "0.24"
+optional = true
+
+[dependencies.wgpu]
+version = "0.17"
+optional = true
+
+[dependencies.winit]
+version = "0.27"
+optional = true
+
+[dependencies.imgui]
+version = "0.11"
+optional = true
+
+[dependencies.imgui-winit-support]
+version = "0.11"
+optional = true
+
+[dependencies.winit_input_helper]
+version = "0.13"
+optional = true
+
+[dependencies.pollster]
+version = "0.3"
+optional = true
+
 [build-dependencies.cc]
 version = "1.0"
+
