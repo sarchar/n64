@@ -5,8 +5,20 @@ edition = "2021"
 
 [features]
 default = ["gui"]
-gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster"]
+gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image"]
 headless = []
+
+[dependencies.atomicring]
+version = "1.2.9"
+
+[dependencies.image]
+version = "0.24"
+optional = true
+features = ["png", "jpeg"]
+
+[dependencies.bytemuck]
+version = "1.12"
+features = ["derive"]
 
 [dependencies.cfg-if]
 version = "1.0.0"

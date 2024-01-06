@@ -7,6 +7,18 @@ use tracing::{trace, debug, error, info, warn};
 use crate::*;
 use rcp::DmaInfo;
 
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum HleRenderCommand {
+    Noop,
+    //Viewport { x: u32, y: u32, w: u32, h: u32 },
+    //ProjectionMatrix(u8),
+    //ModelViewMatrix(u8),
+    //Vertices(u32),
+    Sync,
+}
+
+pub type HleCommandBuffer = atomicring::AtomicRingBuffer<HleRenderCommand>;
+
 // An F3DZEX vertex has two forms, but only varies with the last color value
 // being either used for prelit color or the normal value
 #[repr(C)]
@@ -29,6 +41,8 @@ struct DLStackEntry {
 }
 
 pub struct Hle {
+    hle_command_buffer: Arc<HleCommandBuffer>,
+
     dl_stack: Vec<DLStackEntry>,
 
     segments: [u32; 16],
@@ -43,10 +57,12 @@ pub struct Hle {
 const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let's use it too?
 
 impl Hle {
-    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>) -> Self {
+    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
         Self {
+            hle_command_buffer: hle_command_buffer,
+
             dl_stack: vec![],
             segments: [0u32; 16],
             vertices: [F3DZEX2_Vertex::default(); 32],
@@ -182,7 +198,7 @@ impl Hle {
     fn process_display_list_command(&mut self, addr: u32, cmd: u64) {
         print!("${:08X}: ${:08X}_${:08X}: ", addr, cmd >> 32, cmd & 0xFFFF_FFFF);
         let depth = self.dl_stack.len() - 1;
-        for _ in 0..depth { print!("+"); }
+        for _ in 0..depth { print!("  "); }
 
         let mut size: u32 = 0;
         let op = (cmd >> 56) & 0xFF;
@@ -302,16 +318,17 @@ impl Hle {
                     // 00001111 22223333 44445555 66667777
                     // 88889999 aaaabbbb ccccdddd eeeeffff
                     for i in 0..4 {
-                        let idx   = (j*4+i) >> 1;
+                        let idx16 = i*4+j;
+                        let idx   = idx16 >> 1;
                         //let y     = idx >> 3;
                         //let x     = (idx >> 1) & 0x03;
-                        let shift = 16 - (idx & 1);
+                        let shift = 16 - ((idx16 & 1) << 4);
 
                         let intpart = (mtx_data[idx] >> shift) as i16;
                         let fracpart = (mtx_data[8 + idx] >> shift) as u16;
 
                         print!("{:04x}.{:04x} ", intpart, fracpart);
-                        mtx[j][i] = ((intpart as i32) << 16) | (fracpart as i32);
+                        mtx[i][j] = ((intpart as i32) << 16) | (fracpart as i32);
                     }
 
                     match j {
@@ -322,7 +339,7 @@ impl Hle {
                     }
 
                     for i in 0..4 {
-                        let e = mtx[j][i];
+                        let e = mtx[i][j];
                         let f = (e >> 16) as f32 + ((e as u16) as f32) / 65536.0;
                         print!("{:8.4}", f);
                     }
@@ -341,21 +358,41 @@ impl Hle {
                 let offset = ((cmd >> 32) & 0xFFFF) as u16;
                 let data   = cmd as u32;
 
-                if index == 6 { // G_MW_SEGMENT
-                    print!("gsSPSegment({}, 0x{:08X})", offset >> 2, data);
-                    self.segments[(offset >> 2) as usize] = data;
-                } else {
-                    print!("gsMoveWd({}, 0x{:04X}, 0x{:08X})", index, offset, data);
-                }
+                match index {
+                    6 => { // G_MW_SEGMENT
+                        print!("gsSPSegment({}, 0x{:08X})", offset >> 2, data);
+                        self.segments[(offset >> 2) as usize] = data;
+                    },
+
+                    _ => {
+                        print!("gsMoveWd({}, 0x{:04X}, 0x{:08X})", index, offset, data);
+                    },
+                };
             },
 
             0xDC => { // G_MOVEMEM
+                let size  = ((((cmd >> 48) & 0xFF) >> 3) + 1) << 3;
                 let index = (cmd >> 32) as u8;
-                if index == 8 {
-                    print!("gsSPViewport(...)");
-                } else {
-                    print!("gsSPMoveMem?({}, ...)", index);
-                }
+                let addr  = (cmd & 0xFFFF_FFFF) as u32;
+
+                match index {
+                    8 => { // G_VIEWPORT
+                        let segment = (addr >> 24) as u8;
+                        let translated_addr = if (addr & 0x8000_0000) != 0 { addr } else { 
+                            (addr & 0x00FF_FFFF) + self.segments[segment as usize] 
+                        };
+
+                        let vp = self.load_display_list(translated_addr, size as u32);
+                        let xs = (vp[0] >> 16) as i16;
+                        let ys = vp[0] as i16;
+
+                        print!("gsSPViewport(0x{:08X}) translated_addr=0x{:08X} size = {}", addr, translated_addr, size);
+                    },
+
+                    _ => {
+                        print!("gsSPMoveMem?({}, ...)", index);
+                    },
+                };
             },
 
             0xDE => { // G_DL
@@ -427,6 +464,7 @@ impl Hle {
 
             0xE9 => { // G_FULLSYNC
                 print!("gsDPFullSync()");
+                self.hle_command_buffer.try_push(HleRenderCommand::Sync).expect("HLE command buffer full");
             },
 
             0xED => { // G_SETSCISSOR

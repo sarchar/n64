@@ -58,6 +58,8 @@ pub struct Rsp {
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
 
+    hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>,
+
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
     broke: bool,
@@ -150,7 +152,7 @@ struct RspCpuCore {
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Rsp {
+    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -174,6 +176,8 @@ impl Rsp {
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
 
+            hle_command_buffer: hle_command_buffer,
+
             shared_state: shared_state,
 
             halted: true,
@@ -196,7 +200,12 @@ impl Rsp {
             c.broke_tx = Some(broke_tx);
         }
 
-        let mut hle = Hle::new(self.start_dma_tx.clone());
+        let hle_command_buffer = mem::replace(&mut self.hle_command_buffer, None);
+        let mut hle = if let Some(cbuf) = hle_command_buffer {
+            Some(Hle::new(self.start_dma_tx.clone(), cbuf))
+        } else {
+            None
+        };
 
         thread::spawn(move || {
             let mut _started_time = std::time::Instant::now();
@@ -236,7 +245,9 @@ impl Rsp {
 
                                     // free the lock on core while running the DL
                                     drop(c);
-                                    hle.process_display_list(dl_start, dl_length);
+                                    if let Some(ref mut h) = hle {
+                                        h.process_display_list(dl_start, dl_length);
+                                    }
 
                                     // reclaim lock
                                     let mut c = core.lock().unwrap();

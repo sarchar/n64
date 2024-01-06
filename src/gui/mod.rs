@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use winit::{
@@ -13,6 +14,7 @@ use imgui::*;
 use imgui_wgpu::{Renderer, RendererConfig};
 
 use crate::*;
+use n64::hle::HleCommandBuffer;
 
 pub mod game;
 
@@ -201,7 +203,7 @@ impl AppWindow {
 pub trait App {
     /// Called to create the app
     /// Create your pipeline here
-    fn create(appwnd: &AppWindow) -> Self;
+    fn create(appwnd: &AppWindow, hle_command_buffer: Arc<atomicring::AtomicRingBuffer<n64::hle::HleRenderCommand>>) -> Self;
 
     /// Called once per frame to update the internal state of the app
     /// Check key presses and controllers that may affect render() here
@@ -215,7 +217,7 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce() -> System) + Send>) {
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<Arc<HleCommandBuffer>>) -> System) + Send>) {
     let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, false).await;
 
     let mut imgui = imgui::Context::create();
@@ -244,13 +246,15 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce() -> System) +
     };
 
     let mut renderer = Renderer::new(&mut imgui, appwnd.device(), appwnd.queue(), renderer_config);
-    let mut app = T::create(&appwnd);
+
+    let hle_command_buffer = Arc::new(atomicring::AtomicRingBuffer::with_capacity(4096));
+    let mut app = T::create(&appwnd, hle_command_buffer.clone());
 
     let mut last_frame = Instant::now();
     let mut demo_open = false;
 
     std::thread::spawn(move || {
-        let mut system = create_system();
+        let mut system = create_system(Some(hle_command_buffer));
         system.run();
     });
 

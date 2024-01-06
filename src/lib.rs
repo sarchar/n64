@@ -129,7 +129,7 @@ pub struct System {
 }
 
 impl System {
-    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str) -> System {
+    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>) -> System {
         // load cartridge into memory
         let cartridge_rom = fs::read(cartridge_file_name).expect("Could not open cartridge ROM file");
 
@@ -137,7 +137,7 @@ impl System {
         let boot_rom = fs::read(boot_rom_file_name).expect("Boot rom not found");
 
         // create the RCP and start it
-        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom)));
+        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom, hle_command_buffer)));
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
@@ -178,4 +178,5 @@ impl System {
         Ok(())
     }
 }
+
 

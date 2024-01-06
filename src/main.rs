@@ -15,6 +15,7 @@ use tracing_subscriber::{filter, prelude::*};
 //.use gilrs::{Gilrs, Button};
 //.use gilrs::ev::filter::Filter;
 
+use n64::hle;
 use n64::System;
 use n64::debugger::Debugger;
 
@@ -101,19 +102,19 @@ fn main() {
     //. }
 
     let program_rom = String::from(args[1].as_str());
-    let make_system = move || {
-        System::new("bios/pifrom.v64", &program_rom)
+    let make_system = move |hle_command_buffer: Option<std::sync::Arc<hle::HleCommandBuffer>>| {
+        System::new("bios/pifrom.v64", &program_rom, hle_command_buffer)
     };
 
     // either run or debug
     if args.len() == 3 && args[2] == "-D" {
-        let mut debugger = Debugger::new(make_system(), change_logging);
+        let mut debugger = Debugger::new(make_system(None), change_logging);
         println!("Entering debugger...");
         debugger.run().expect("Debugger failed");
     } else {
         cfg_if! {
             if #[cfg(feature="headless")] {
-                make_system().run();
+                make_system(None).run();
             } else {
                 pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system)));
             }
