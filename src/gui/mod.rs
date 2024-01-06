@@ -320,8 +320,7 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<Arc<Hle
                             .expect("rendering failed");
                     }
 
-                    appwnd.queue().submit(std::iter::once(encoder.finish()));
-                    //appwnd.queue().submit(Some(encoder.finish()));
+                    appwnd.queue().submit(Some(encoder.finish()));
                 }
 
                 // finish frame

@@ -18,7 +18,20 @@ struct Vertex {
     tex_coords: [f32; 2],
 }
 
-const VERTICES: &[Vertex] = &[
+// Y texture coordinate is inverted to flip the resulting image
+const GAME_TEXTURE_VERTICES: &[Vertex] = &[
+    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], }, // BR
+];
+
+const GAME_TEXTURE_INDICES: &[u16] = &[
+    2, 1, 0,
+    1, 3, 2,
+];
+
+const GAME_VERTICES: &[Vertex] = &[
     Vertex { position: [-0.0868241, 0.49240386, 0.0], tex_coords: [0.4131759, 0.99240386], }, // A
     Vertex { position: [-0.49513406, 0.06958647, 0.0], tex_coords: [0.0048659444, 0.56958647], }, // B
     Vertex { position: [-0.21918549, -0.44939706, 0.0], tex_coords: [0.28081453, 0.05060294], }, // C
@@ -26,7 +39,7 @@ const VERTICES: &[Vertex] = &[
     Vertex { position: [0.44147372, 0.2347359, 0.0], tex_coords: [0.9414737, 0.7347359], }, // E
 ];
 
-const INDICES: &[u16] = &[
+const GAME_INDICES: &[u16] = &[
 	0, 1, 4,
 	1, 2, 4,
 	2, 3, 4,
@@ -154,7 +167,14 @@ impl CameraUniform {
 pub struct Game {
     hle_command_buffer: Arc<HleCommandBuffer>,
 
-    pipeline: wgpu::RenderPipeline,
+    game_render_texture: wgpu::Texture,
+    game_render_texture_pipeline: wgpu::RenderPipeline,
+    game_render_texture_vertex_buffer: wgpu::Buffer,
+    game_render_texture_index_buffer: wgpu::Buffer,
+    game_render_texture_bind_group: wgpu::BindGroup,
+
+    game_pipeline: wgpu::RenderPipeline,
+
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     diffuse_bind_group: wgpu::BindGroup,
@@ -173,14 +193,153 @@ pub struct Game {
     is_left_pressed: bool,
     is_right_pressed: bool,
 
-    frame_count: u64,
-    last_fps_time: Instant,
-    fps: f64,
+    do_render: bool,
+
+    ui_frame_count: u64,
+    ui_last_fps_time: Instant,
+    ui_fps: f64,
+
+    game_frame_count: u64,
+    game_last_fps_time: Instant,
+    game_fps: f64,
 }
 
 impl App for Game {
     fn create(appwnd: &AppWindow, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
         let device: &wgpu::Device = appwnd.device();
+
+        // create an offscreen render target for the actual game render
+        // TODO need to resize texture with the window resize
+        let game_render_texture = device.create_texture(
+            &wgpu::TextureDescriptor {
+                label: Some("Game Render Texture"),
+                size: wgpu::Extent3d {
+                    width: appwnd.surface_config().width,
+                    height: appwnd.surface_config().height,
+                    ..Default::default()
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: appwnd.surface_config().format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }
+        );
+
+        // create the main texture render
+        let game_render_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Game Render Texture Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gametexture.wgsl").into()),
+        });
+
+        // create the texture bind group for the game texture
+        let game_render_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Game Render Texture Bind Group"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let game_render_texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Game Render Texture Pipeline Layout"),
+            bind_group_layouts: &[&game_render_texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let game_render_texture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Game Render Texture Pipeline"),
+            layout: Some(&game_render_texture_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &game_render_texture_shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    Vertex::desc(),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &game_render_texture_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: appwnd.surface_config().format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        let game_render_texture_vertex_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Game Render Texture Vertex Buffer"),
+                contents: bytemuck::cast_slice(GAME_TEXTURE_VERTICES),
+                usage: wgpu::BufferUsages::VERTEX,
+            }
+        );
+
+        let game_render_texture_index_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Game Render Texture Index Buffer"),
+                contents: bytemuck::cast_slice(GAME_TEXTURE_INDICES),
+                usage: wgpu::BufferUsages::INDEX,
+            }
+        );
+
+        let game_render_texture_view = game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let game_render_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter    : wgpu::FilterMode::Linear,
+            min_filter    : wgpu::FilterMode::Nearest,
+            mipmap_filter : wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let game_render_texture_bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
+            label: Some("Game Render Texture Bind Group"),
+            layout: &game_render_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&game_render_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&game_render_texture_sampler),
+                },
+            ],
+        });
 
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
@@ -294,7 +453,7 @@ impl App for Game {
             ],
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let game_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Game Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("game.wgsl").into()),
         });
@@ -349,7 +508,7 @@ impl App for Game {
             ],
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let game_render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Game Pipeline Layout"),
             bind_group_layouts: &[
                 &texture_bind_group_layout,
@@ -358,11 +517,11 @@ impl App for Game {
             push_constant_ranges: &[],
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let game_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Game Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&game_render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &game_shader,
                 entry_point: "vs_main",
                 buffers: &[
                     Vertex::desc(),
@@ -370,7 +529,7 @@ impl App for Game {
                 ],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &game_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: appwnd.surface_config().format,
@@ -399,7 +558,7 @@ impl App for Game {
         let vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Game Vertex Buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
+                contents: bytemuck::cast_slice(GAME_VERTICES),
                 usage: wgpu::BufferUsages::VERTEX,
             }
         );
@@ -407,7 +566,7 @@ impl App for Game {
         let index_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Game Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
+                contents: bytemuck::cast_slice(GAME_INDICES),
                 usage: wgpu::BufferUsages::INDEX,
             }
         );
@@ -415,7 +574,14 @@ impl App for Game {
         Self {
             hle_command_buffer: hle_command_buffer,
 
-            pipeline: render_pipeline,
+            game_render_texture: game_render_texture,
+            game_render_texture_pipeline: game_render_texture_pipeline,
+            game_render_texture_vertex_buffer: game_render_texture_vertex_buffer,
+            game_render_texture_index_buffer: game_render_texture_index_buffer,
+            game_render_texture_bind_group: game_render_texture_bind_group,
+
+            game_pipeline: game_pipeline,
+
             vertex_buffer: vertex_buffer,
             index_buffer: index_buffer,
             diffuse_bind_group: diffuse_bind_group,
@@ -434,17 +600,22 @@ impl App for Game {
             is_left_pressed: false,
             is_right_pressed: false,
 
-            frame_count: 0,
-            last_fps_time: Instant::now(),
-            fps: 0.0,
+            do_render: false,
+
+            ui_frame_count: 0,
+            ui_last_fps_time: Instant::now(),
+            ui_fps: 0.0,
+            game_frame_count: 0,
+            game_last_fps_time: Instant::now(),
+            game_fps: 0.0,
         }
     }
 
     fn update(&mut self, appwnd: &AppWindow, delta_time: f32) {
-        self.frame_count += 1;
-        if (self.frame_count % 5) == 0 {
-            self.fps = 5.0 / self.last_fps_time.elapsed().as_secs_f64();
-            self.last_fps_time = Instant::now();
+        self.ui_frame_count += 1;
+        if (self.ui_frame_count % 10) == 0 {
+            self.ui_fps = 10.0 / self.ui_last_fps_time.elapsed().as_secs_f64();
+            self.ui_last_fps_time = Instant::now();
         }
 
         let input = appwnd.input();
@@ -485,20 +656,42 @@ impl App for Game {
 
         let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         appwnd.queue().write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+
+        'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
+            match cmd {
+                HleRenderCommand::Sync => {
+                    self.game_frame_count += 1;
+                    if (self.game_frame_count % 10) == 0 {
+                        self.game_fps = 10.0 / self.game_last_fps_time.elapsed().as_secs_f64();
+                        self.game_last_fps_time = Instant::now();
+                    }
+
+                    self.do_render = true;
+                    break 'cmd_loop;
+                },
+    
+                _ => (),
+            };
+        }
     }
 
     fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
+        if self.do_render { 
+            self.do_render = false;
+            let game_render_texture_view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.render_game(appwnd, &game_render_texture_view);
+        } 
+
         let mut encoder: wgpu::CommandEncoder =
-            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Encoder") });
+            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Render Texture Encoder") });
         {
-            let clear_color = wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 };
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Game Render Pass"),
+                label: Some("Game Render Texture Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
+                        load: wgpu::LoadOp::Load, // no clear since we do a fullscreen quad
                         store: true, //. wgpu::StoreOp::Store,
                     },
                 })],
@@ -507,20 +700,11 @@ impl App for Game {
                 //.timestamp_writes: None,
             });
 
-            //'cmd_loop: loop {
-            //    match self.hle_command_buffer.try_pop() {
-            //        Some(HleRenderCommand::Sync) => break 'cmd_loop,
-            //        _ => {}
-            //    };
-            //}
-
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..INDICES.len() as _, 0, 0..self.instances.len() as _);
+            render_pass.set_pipeline(&self.game_render_texture_pipeline);
+            render_pass.set_bind_group(0, &self.game_render_texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.game_render_texture_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.game_render_texture_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..GAME_TEXTURE_INDICES.len() as _, 0, 0..1);
         }
         appwnd.queue().submit(Some(encoder.finish()));
     }
@@ -530,7 +714,43 @@ impl App for Game {
         window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
               .position([0.0, 0.0], imgui::Condition::Once)
               .build(|| {
-                  ui.text(format!("FPS: {}", self.fps))
+                  ui.text(format!("UI   FPS: {}", self.ui_fps));
+                  ui.text(format!("GAME FPS: {}", self.game_fps));
               });
     }
 }
+
+impl Game {
+    fn render_game(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
+        const CLEAR_COLOR: wgpu::Color = wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 };
+
+        let mut encoder: wgpu::CommandEncoder =
+            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Encoder") });
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Game Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        store: true, //. wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                //.occlusion_query_set: None,
+                //.timestamp_writes: None,
+            });
+
+            render_pass.set_pipeline(&self.game_pipeline);
+            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..self.instances.len() as _);
+        }
+        appwnd.queue().submit(Some(encoder.finish()));
+    }
+}
+
