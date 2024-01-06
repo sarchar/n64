@@ -5,8 +5,12 @@ edition = "2021"
 
 [features]
 default = ["gui"]
-gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image"]
+gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image", "cgmath"]
 headless = []
+
+[dependencies.cgmath]
+version = "0.18"
+optional = true
 
 [dependencies.atomicring]
 version = "1.2.9"
