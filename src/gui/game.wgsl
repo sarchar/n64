@@ -36,7 +36,7 @@ fn vs_main(
 
     var out: VertexOutput;
     out.tex_coords = vec2<f32>(model.tex_coords.x, 1.0-model.tex_coords.y);
-    out.clip_position = camera.view_proj * model_matrix * vec4<f32>(model.position, 1.0);
+    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
     return out;
 }
 

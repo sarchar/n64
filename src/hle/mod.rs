@@ -10,9 +10,9 @@ use rcp::DmaInfo;
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum HleRenderCommand {
     Noop,
-    //Viewport { x: u32, y: u32, w: u32, h: u32 },
-    //ProjectionMatrix(u8),
-    //ModelViewMatrix(u8),
+    Viewport { x: f32, y: f32, w: f32, h: f32 },
+    SetProjectionMatrix([[f32; 4]; 4]),
+    SetModelViewMatrix([[f32; 4]; 4]),
     //Vertices(u32),
     Sync,
 }
@@ -306,9 +306,10 @@ impl Hle {
 
                 let mtx_data = self.load_display_list(translated_addr, 64);
                 let mut mtx: F3DZEX2_Matrix = [[0i32; 4]; 4];
+                let mut fmtx = [[0f32; 4]; 4];
 
-                for j in 0..4 {
-                    match j {
+                for row in 0..4 {
+                    match row {
                         0   => print!(" / "),
                         1|2 => print!("|  "),
                         3   => print!(" \\ "),
@@ -317,8 +318,14 @@ impl Hle {
 
                     // 00001111 22223333 44445555 66667777
                     // 88889999 aaaabbbb ccccdddd eeeeffff
-                    for i in 0..4 {
-                        let idx16 = i*4+j;
+                    // gggghhhh iiiijjjj kkkkllll mmmmnnnn
+                    // oooopppp qqqqrrrr sssstttt uuuuvvvv
+                    // becomes
+                    // 0000.gggg 1111.hhhh 2222.iiii 3333.jjjj
+                    // ..
+                    // cccc.kkkk dddd.tttt eeee.uuuu ffff.vvvv
+                    for col in 0..4 {
+                        let idx16 = row*4+col;
                         let idx   = idx16 >> 1;
                         //let y     = idx >> 3;
                         //let x     = (idx >> 1) & 0x03;
@@ -328,29 +335,37 @@ impl Hle {
                         let fracpart = (mtx_data[8 + idx] >> shift) as u16;
 
                         print!("{:04x}.{:04x} ", intpart, fracpart);
-                        mtx[i][j] = ((intpart as i32) << 16) | (fracpart as i32);
+                        mtx[row][col] = ((intpart as i32) << 16) | (fracpart as i32);
                     }
 
-                    match j {
+                    match row {
                         0   => print!("\\   /"),
                         1|2 => print!(" | | "),
                         3   => print!("/   \\"),
                         _   => {},
                     }
 
-                    for i in 0..4 {
-                        let e = mtx[i][j];
+                    for col in 0..4 {
+                        let e = mtx[row][col];
                         let f = (e >> 16) as f32 + ((e as u16) as f32) / 65536.0;
+                        fmtx[row][col] = f;
                         print!("{:8.4}", f);
                     }
 
-                    match j {
+                    match row {
                         0   => println!(" \\"),
                         1|2 => println!("  |"),
                         3   => print!(" /   "),
                         _   => {},
                     }
+
                 }
+
+                if proj {
+                    self.hle_command_buffer.try_push(HleRenderCommand::SetProjectionMatrix(fmtx))
+                } else {
+                    self.hle_command_buffer.try_push(HleRenderCommand::SetModelViewMatrix(fmtx))
+                }.expect("HLE command buffer full");
             },
 
             0xDB => { // G_MOVEWORD
@@ -383,10 +398,29 @@ impl Hle {
                         };
 
                         let vp = self.load_display_list(translated_addr, size as u32);
+                        let frac: [f32; 4] = [0.00, 0.25, 0.5, 0.75];
                         let xs = (vp[0] >> 16) as i16;
                         let ys = vp[0] as i16;
+                        let zs = (vp[1] >> 16) as i16;
+                        let x_scale = (xs >> 2) as f32 + frac[(xs & 3) as usize];
+                        let y_scale = (ys >> 2) as f32 + frac[(ys & 3) as usize];
+                        let z_scale = (zs >> 2) as f32 + frac[(zs & 3) as usize];
+                        let xt = (vp[2] >> 16) as i16;
+                        let yt = vp[2] as i16;
+                        let zt = (vp[3] >> 16) as i16;
+                        let x_translate = (xt >> 2) as f32 + frac[(xt & 3) as usize];
+                        let y_translate = (yt >> 2) as f32 + frac[(yt & 3) as usize];
+                        let z_translate = (zt >> 2) as f32 + frac[(zt & 3) as usize];
 
-                        print!("gsSPViewport(0x{:08X}) translated_addr=0x{:08X} size = {}", addr, translated_addr, size);
+                        println!("gsSPViewport(0x{:08X} [0x{:08X}])", addr, translated_addr);
+                        print!("Viewport {{ vscale: [ {}, {}, {}, 0.0 ], vtrans: [ {}, {}, {}, 0.0 ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
+
+                        self.hle_command_buffer.try_push(HleRenderCommand::Viewport {
+                            x: -1.0 * x_scale + x_translate,
+                            y: -1.0 * y_scale + y_translate,
+                            w:  2.0 * x_scale,
+                            h:  2.0 * y_scale,
+                        }).expect("HLE command buffer full");
                     },
 
                     _ => {
