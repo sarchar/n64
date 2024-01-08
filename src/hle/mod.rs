@@ -13,6 +13,7 @@ pub enum HleRenderCommand {
     Viewport { x: f32, y: f32, w: f32, h: f32 },
     SetProjectionMatrix([[f32; 4]; 4]),
     SetModelViewMatrix([[f32; 4]; 4]),
+    FillRectangle { x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
     //Vertices(u32),
     Sync,
 }
@@ -49,6 +50,8 @@ pub struct Hle {
     // F3DZEX has storage for 32 vertices
     vertices: [F3DZEX2_Vertex; 32],
 
+    fill_color: u32,
+
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
     start_dma_tx: mpsc::Sender<DmaInfo>,
@@ -65,6 +68,8 @@ impl Hle {
 
             dl_stack: vec![],
             segments: [0u32; 16],
+            fill_color: 0,
+
             vertices: [F3DZEX2_Vertex::default(); 32],
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
@@ -555,15 +560,25 @@ impl Hle {
             },
 
             0xF6 => { // G_FILLRECT
-                let x1 = ((cmd >> 44) & 0xFFF) as u16;
-                let y1 = ((cmd >> 32) & 0xFFF) as u16;
-                let x0 = ((cmd >> 12) & 0xFFF) as u16;
-                let y0 = ((cmd >>  0) & 0xFFF) as u16;
-                print!("gsDPFillRectangle({}, {}, {}, {})", x0 >> 2, y0 >> 2, x1 >> 2, y1 >> 2);
+                let x1 = (((cmd >> 44) & 0xFFF) as u16) >> 2;
+                let y1 = (((cmd >> 32) & 0xFFF) as u16) >> 2;
+                let x0 = (((cmd >> 12) & 0xFFF) as u16) >> 2;
+                let y0 = (((cmd >>  0) & 0xFFF) as u16) >> 2;
+                print!("gsDPFillRectangle({}, {}, {}, {})", x0, y0, x1, y1);
+                self.hle_command_buffer.try_push(HleRenderCommand::FillRectangle {
+                    x: x0 as f32,
+                    y: y0 as f32,
+                    w: (x1 - x0) as f32 + 1.0,
+                    h: (y1 - y0) as f32 + 1.0,
+                    c: [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
+                        ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0],
+                }).expect("HLE command buffer full");
             },
 
             0xF7 => { // G_SETFILLCOLOR 
-                print!("gsDPSetFillColor(0x{:08X})", cmd as u32);
+                assert!((cmd >> 16) as u16 == (cmd & 0xFFFF) as u16); // Someday some code will fill a rect with alternating colors
+                self.fill_color = cmd as u32;
+                print!("gsDPSetFillColor(0x{:08X})", self.fill_color);
             },
 
             0xF9 => { // G_SETBLENDCOLOR

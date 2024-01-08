@@ -140,7 +140,6 @@ impl Rcp {
         None
     }
 
-
     pub fn should_interrupt(&mut self) -> u32 {
         self.mi.should_interrupt()
     }

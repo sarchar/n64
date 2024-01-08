@@ -16,14 +16,15 @@ use n64::hle::{HleRenderCommand, HleCommandBuffer};
 struct Vertex {
     position  : [f32; 3],
     tex_coords: [f32; 2],
+    color     : [f32; 4],
 }
 
 // Y texture coordinate is inverted to flip the resulting image
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], }, // BR
+    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[
@@ -32,26 +33,14 @@ const GAME_TEXTURE_INDICES: &[u16] = &[
 ];
 
 const GAME_VERTICES: &[Vertex] = &[
-    //Vertex { position: [-100.0868241, 100.49240386, 0.0], tex_coords: [0.4131759, 0.99240386], }, // A
-    //Vertex { position: [-100.49513406, 100.06958647, 0.0], tex_coords: [0.0048659444, 0.56958647], }, // B
-    //Vertex { position: [-100.21918549, -100.44939706, 0.0], tex_coords: [0.28081453, 0.05060294], }, // C
-    //Vertex { position: [100.35966998, -100.3473291, 0.0], tex_coords: [0.85967, 0.1526709], }, // D
-    //Vertex { position: [100.44147372, 100.2347359, 0.0], tex_coords: [0.9414737, 0.7347359], }, // E
-//    Vertex { position: [-0.5, -0.5,  0.0], tex_coords: [0.0, 0.0], },
-//    Vertex { position: [ 0.5, -0.5,  0.0], tex_coords: [0.0, 1.0], },
-//    Vertex { position: [ 0.0,  0.5,  0.0], tex_coords: [1.0, 1.0], },
-//    Vertex { position: [-1.0,  1.0, -2.0], tex_coords: [0.0, 0.0], },
-//    Vertex { position: [-0.8,  1.0, -2.0], tex_coords: [0.0, 1.0], },
-//    Vertex { position: [-0.9,  0.6, -2.0], tex_coords: [1.0, 1.0], },
-    Vertex { position: [-64.0,  64.0, -5.0], tex_coords: [0.0, 1.0], },
-    Vertex { position: [ 64.0,  64.0, -5.0], tex_coords: [1.0, 0.0], },
-    Vertex { position: [ 64.0, -64.0, -5.0], tex_coords: [1.0, 1.0], },
-    Vertex { position: [-64.0, -64.0, -5.0], tex_coords: [0.0, 1.0], },
+    Vertex { position: [-64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0], }, // TL
+    Vertex { position: [ 64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], }, // TR
+    Vertex { position: [ 64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 1.0, 1.0], }, // BR
+    Vertex { position: [-64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [1.0, 0.0, 0.0, 1.0], }, // BL
 ];
 
 const GAME_INDICES: &[u16] = &[
     0, 1, 2,
-    //3, 4, 5
     0, 2, 3,
 ];
 
@@ -71,61 +60,12 @@ impl Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x2,
                 },
+                wgpu::VertexAttribute { // color
+                    offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ]
-        }
-    }
-}
-
-const NUM_INSTANCES_PER_ROW: u32 = 1;
-const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(NUM_INSTANCES_PER_ROW as f32 * 0.5, 0.0, NUM_INSTANCES_PER_ROW as f32 * 0.5);
-
-struct Instance {
-    position: cgmath::Vector3<f32>,
-    rotation: cgmath::Quaternion<f32>,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceRaw {
-    model: [[f32; 4]; 4],
-}
-
-impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
-        InstanceRaw {
-            model: (cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation)).into(),
-        }
-    }
-}
-
-impl InstanceRaw {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute { // model matrix row 0
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute { // model matrix row 1
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute { // model matrix row 2
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute { // model matrix row 3
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
         }
     }
 }
@@ -140,14 +80,14 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
+struct MvpPacked {
+    mvp_matrix: [[f32; 4]; 4],
 }
 
-impl CameraUniform {
+impl MvpPacked {
     fn new() -> Self {
         Self {
-            view_proj: cgmath::Matrix4::identity().into(),
+           mvp_matrix: cgmath::Matrix4::identity().into(),
         }
     }
 }
@@ -171,20 +111,14 @@ pub struct Game {
     index_buffer: wgpu::Buffer,
     diffuse_bind_group: wgpu::BindGroup,
 
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
-
-    camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    mvp_buffer: wgpu::Buffer,
+    mvp_bind_group: wgpu::BindGroup,
 
     speed: f32,
     is_forward_pressed: bool,
     is_backward_pressed: bool,
     is_left_pressed: bool,
     is_right_pressed: bool,
-
-    do_render: bool,
 
     ui_frame_count: u64,
     ui_last_fps_time: Instant,
@@ -332,26 +266,6 @@ impl App for Game {
             ],
         });
 
-        let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
-            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                let position = cgmath::Vector3 { x: x as f32, y: 0.0, z: z as f32 } - INSTANCE_DISPLACEMENT;
-                let rotation = cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0));
-
-                Instance {
-                    position, rotation
-                }
-            })
-        }).collect::<Vec<_>>();
-
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Game Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-
         let diffuse_bytes = include_bytes!("happy-tree.png");
         let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
         let diffuse_rgba  = diffuse_image.to_rgba8();
@@ -445,20 +359,20 @@ impl App for Game {
             source: wgpu::ShaderSource::Wgsl(include_str!("game.wgsl").into()),
         });
 
-        let camera_uniform = CameraUniform::new();
-        let camera_buffer = device.create_buffer_init(
+        let mvp_data = MvpPacked::new();
+        let mvp_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Game Camera Buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
+                label: Some("Game MVP Matrix Buffer"),
+                contents: bytemuck::cast_slice(&[mvp_data]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
             }
         );
 
-        let camera_bind_group_layout = device.create_bind_group_layout(
+        let mvp_bind_group_layout = device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
-                label: Some("Game Camera Bind Group Layout"),
+                label: Some("Game MVP Matrix Bind Group Layout"),
                 entries: &[
-                    wgpu::BindGroupLayoutEntry { // Uniform buffer (view_proj)
+                    wgpu::BindGroupLayoutEntry { // Uniform buffer (mvp_matrix)
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
@@ -472,13 +386,13 @@ impl App for Game {
             }
         );
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Game Camera Bind Group"),
-            layout: &camera_bind_group_layout,
+        let mvp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Game MVP Matrix Bind Group"),
+            layout: &mvp_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
+                    resource: mvp_buffer.as_entire_binding(),
                 }
             ],
         });
@@ -487,7 +401,7 @@ impl App for Game {
             label: Some("Game Pipeline Layout"),
             bind_group_layouts: &[
                 &texture_bind_group_layout,
-                &camera_bind_group_layout,
+                &mvp_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -500,7 +414,6 @@ impl App for Game {
                 entry_point: "vs_main",
                 buffers: &[
                     Vertex::desc(),
-                    InstanceRaw::desc(),
                 ],
             },
             fragment: Some(wgpu::FragmentState {
@@ -534,7 +447,7 @@ impl App for Game {
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Game Vertex Buffer"),
                 contents: bytemuck::cast_slice(GAME_VERTICES),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
 
@@ -565,21 +478,14 @@ impl App for Game {
             index_buffer: index_buffer,
             diffuse_bind_group: diffuse_bind_group,
 
-            instances: instances,
-            instance_buffer: instance_buffer,
-
-            //camera: camera,
-            camera_uniform: camera_uniform,
-            camera_buffer: camera_buffer,
-            camera_bind_group: camera_bind_group,
+            mvp_buffer: mvp_buffer,
+            mvp_bind_group: mvp_bind_group,
 
             speed: 0.2,
             is_forward_pressed: false,
             is_backward_pressed: false,
             is_left_pressed: false,
             is_right_pressed: false,
-
-            do_render: false,
 
             ui_frame_count: 0,
             ui_last_fps_time: Instant::now(),
@@ -636,46 +542,10 @@ impl App for Game {
         //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         //appwnd.queue().write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
 
-        'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
-            match cmd {
-                HleRenderCommand::Viewport { .. } => {
-                    self.game_viewport = cmd;
-                },
-
-                HleRenderCommand::SetModelViewMatrix(m) => {
-                    println!("got view: {:?}", m);
-                    self.game_modelview = m.into();
-                },
-
-                HleRenderCommand::SetProjectionMatrix(m) => {
-                    println!("got proj: {:?}", m);
-                    self.game_projection = m.into();
-                },
-
-                HleRenderCommand::Sync => {
-                    println!("sync!");
-                    self.game_frame_count += 1;
-                    if (self.game_frame_count % 10) == 0 {
-                        self.game_fps = 10.0 / self.game_last_fps_time.elapsed().as_secs_f64();
-                        self.game_last_fps_time = Instant::now();
-                    }
-
-                    self.do_render = true;
-                    break 'cmd_loop;
-                },
-    
-                _ => (),
-            };
-        }
     }
 
     fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
-        if self.do_render { 
-            self.do_render = false;
-            let game_render_texture_view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.render_game(appwnd, &game_render_texture_view);
-            self.reset_render_state();
-        } 
+        self.render_game(appwnd);
 
         let mut encoder: wgpu::CommandEncoder =
             appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Render Texture Encoder") });
@@ -716,8 +586,8 @@ impl App for Game {
 }
 
 impl Game {
-    fn render_game(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
-        const CLEAR_COLOR: wgpu::Color = wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 };
+    fn render_game(&mut self, appwnd: &AppWindow) {
+        const CLEAR_COLOR: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
 
         //self.game_projection = cgmath::perspective(cgmath::Deg(45.0), 4.0/3.0, 0.1, 100.0);
         //self.game_projection = cgmath::ortho(-160.0, 160.0, -120.0, 120.0, 0.1, 100.0);
@@ -728,47 +598,133 @@ impl Game {
         //                                                  [0.0, 0.0, -(100.0+0.1)/(100.0-0.1), 1.0].into()).transpose();
         //self.game_modelview = cgmath::Matrix4::look_at_rh([0.0, 0.0, 2.0].into(), [0.0, 0.0, 0.0].into(), cgmath::Vector3::unit_y());
         //self.game_modelview = self.game_modelview * cgmath::Matrix4::from_axis_angle([0.0, 1.0, 0.0].into(), cgmath::Deg(self.speed));
-        let mvp = if false /*(self.game_frame_count % 2) == 0*/ { 
-            OPENGL_TO_WGPU_MATRIX * self.game_projection.transpose() * self.game_modelview
-        } else {
-            self.game_projection.transpose() *  self.game_modelview
-        };
+        'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
+            match cmd {
+                HleRenderCommand::Viewport { .. } => {
+                    self.game_viewport = cmd;
+                    println!("Viewport: {:?}", cmd);
+                    //render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
+                    //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
+                },
 
-        self.camera_uniform.view_proj = mvp.into();
-        appwnd.queue().write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+                HleRenderCommand::SetModelViewMatrix(m) => {
+                    println!("got view: {:?}", m);
+                    self.game_modelview = m.into();
+                },
 
-        let mut encoder: wgpu::CommandEncoder =
-            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Encoder") });
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Game Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
-                        store: true, //. wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                //.occlusion_query_set: None,
-                //.timestamp_writes: None,
-            });
+                HleRenderCommand::SetProjectionMatrix(m) => {
+                    println!("got proj: {:?}", m);
+                    let m: cgmath::Matrix4<f32> = m.into();
+                    self.game_projection = m.transpose();
+                },
 
-            render_pass.set_pipeline(&self.game_pipeline);
-            if let HleRenderCommand::Viewport { x, y, w, h } = self.game_viewport {
-                println!("Viewport: {:?}", self.game_viewport);
-                //render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
-                //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
-            }
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..self.instances.len() as _);
+                HleRenderCommand::FillRectangle { x: rx, y: ry, w: rw, h: rh, c: rc } => {
+                    if let HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh } = self.game_viewport {
+//                        let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
+                        let mvp_matrix = cgmath::ortho( -1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
+                        let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.transpose().into() };
+                        appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
+
+                        println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
+
+                        // upload the rect vertices and color
+                        // map (0,vx) -> (-1,1)
+                        // so (rx/vx * 2) - 1
+                        let scale = |s, maxv| ((s / maxv) * 2.0) - 1.0;
+
+                        let vertices = &[
+                            Vertex { position: [ scale(rx   , vw), scale(ry+rh, vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // TL
+                            Vertex { position: [ scale(rx+rw, vw), scale(ry+rh, vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // TR
+                            Vertex { position: [ scale(rx+rw, vw), scale(ry   , vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // BR
+                            Vertex { position: [ scale(rx   , vw), scale(ry   , vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // BL
+                        ];
+                        appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+                    }
+
+                    let mut encoder: wgpu::CommandEncoder =
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Fill Rect Encoder") });
+                    {
+                        let view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Game Render Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load, //Clear(CLEAR_COLOR),
+                                    store: true, //. wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            //.occlusion_query_set: None,
+                            //.timestamp_writes: None,
+                        });
+
+                        render_pass.set_pipeline(&self.game_pipeline);
+                        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+                        render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..1);
+                    }
+                    appwnd.queue().submit(Some(encoder.finish()));
+                },
+
+                HleRenderCommand::Sync => {
+                    self.game_frame_count += 1;
+                    if (self.game_frame_count % 10) == 0 {
+                        self.game_fps = 10.0 / self.game_last_fps_time.elapsed().as_secs_f64();
+                        self.game_last_fps_time = Instant::now();
+                    }
+
+                    let mvp_matrix = self.game_projection * self.game_modelview;
+                    let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
+                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
+
+                    let vertices = &[
+                        Vertex { position: [-64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0], }, // TL
+                        Vertex { position: [ 64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], }, // TR
+                        Vertex { position: [ 64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 1.0, 1.0], }, // BR
+                        Vertex { position: [-64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [1.0, 0.0, 0.0, 1.0], }, // BL
+                    ];
+                    appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+
+                    let mut encoder: wgpu::CommandEncoder =
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Encoder") });
+                    {
+                        let view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Game Render Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load, //Clear(CLEAR_COLOR),
+                                    store: true, //. wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            //.occlusion_query_set: None,
+                            //.timestamp_writes: None,
+                        });
+
+                        render_pass.set_pipeline(&self.game_pipeline);
+                        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+                        render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..1);
+                    }
+                    appwnd.queue().submit(Some(encoder.finish()));
+
+                    self.reset_render_state();
+                    
+                    break 'cmd_loop;
+                },
+    
+                _ => (),
+            };
         }
-        appwnd.queue().submit(Some(encoder.finish()));
     }
 
     fn reset_render_state(&mut self) {

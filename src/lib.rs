@@ -154,10 +154,7 @@ impl System {
         let _ = self.cpu.reset();
     }
 
-    pub fn run(&mut self) {
-        loop { let _ = self.step(1000); }
-    }
-
+    #[inline(always)]
     pub fn step(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
         let mut i = 0;
         while i < cpu_cycles {
@@ -177,6 +174,11 @@ impl System {
 
         Ok(())
     }
+
+    pub fn run(&mut self) {
+        loop { let _ = self.step(1000); }
+    }
+
 }
 
 
