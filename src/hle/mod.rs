@@ -22,6 +22,18 @@ pub enum HleRenderCommand {
 
 pub type HleCommandBuffer = atomicring::AtomicRingBuffer<HleRenderCommand>;
 
+// There are actually a lot of variations within the RSP ucodes that share
+// a common GBI. 
+#[derive(PartialEq, Debug)]
+enum HleRspSoftwareVersion {
+    Uninitialized,
+    Unknown,
+    S3DEX2, // RSP SW 2.0X (SM64)
+    //.F3DEX1, // Star Fox 64
+    F3DEX2, // Fast3D 2.0 (Zelda)
+}
+
+
 // An F3DZEX vertex has two forms, but only varies with the last color value
 // being either used for prelit color or the normal value
 #[repr(C)]
@@ -45,6 +57,8 @@ struct DLStackEntry {
 
 pub struct Hle {
     hle_command_buffer: Arc<HleCommandBuffer>,
+    software_version: HleRspSoftwareVersion,
+    software_crc: u32,
 
     dl_stack: Vec<DLStackEntry>,
 
@@ -67,6 +81,8 @@ impl Hle {
 
         Self {
             hle_command_buffer: hle_command_buffer,
+            software_version: HleRspSoftwareVersion::Uninitialized,
+            software_crc: 0,
 
             dl_stack: vec![],
             segments: [0u32; 16],
@@ -85,8 +101,37 @@ impl Hle {
         self.vertices = [F3DZEX2_Vertex::default(); 32];
     }
 
-    pub fn process_display_list(&mut self, dl_start: u32, dl_length: u32) {
+    fn detect_software_version(&mut self, ucode_address: u32) -> bool {
+        let ucode = self.load_display_list(ucode_address, 4 * 1024);
+
+        self.software_crc = 0;
+
+        // the CRCs are based on the first 3k of ucode
+        for i in 0..(3072 >> 2) {
+            self.software_crc = self.software_crc.wrapping_add(ucode[i]);
+        }
+
+        // TODO: need a way to organize these into a data or config file
+        self.software_version = match self.software_crc {
+            0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
+            0xB54E7F93 => HleRspSoftwareVersion::S3DEX2, // Nintendo 64 demos
+            0x21F91874 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT
+            0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
+
+            _ => HleRspSoftwareVersion::Unknown,
+        };
+
+        !(self.software_version == HleRspSoftwareVersion::Unknown)
+    }
+
+    pub fn process_display_list(&mut self, dl_start: u32, dl_length: u32, ucode_address: u32) {
         debug!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
+
+        if let HleRspSoftwareVersion::Uninitialized = self.software_version {
+            if !self.detect_software_version(ucode_address) { 
+                unimplemented!("unknown RSP graphics task microcode (CRC 0x{:08X})", self.software_crc);
+            }
+        }
 
         self.reset_display_list();
 

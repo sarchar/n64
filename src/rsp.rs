@@ -236,6 +236,8 @@ impl Rsp {
                     // OSTasks are only set when the RSP is halted, so whenever we wake up we can check and perform tasks
                     if c.process_task {
                         c.process_task = false;
+
+                        // Task type is the first element of the OSTask structure, which is at 0xFC0 
                         let task_type = c.read_u32(0x0FC0).unwrap();
                         match task_type {
                             1 => { // M_GFXTASK
@@ -243,10 +245,13 @@ impl Rsp {
                                 if dl_start != 0 { // for gfx tasks, the DL list start pointer must be valid
                                     let dl_length = c.read_u32(0x0FF4).unwrap(); // OSTask->data_size
 
+                                    // pass along the microcode address so that the HLE can detect which software is running
+                                    let ucode_address = c.read_u32(0x0FD0).unwrap(); // OSTask->ucode;
+
                                     // free the lock on core while running the DL
                                     drop(c);
                                     if let Some(ref mut h) = hle {
-                                        h.process_display_list(dl_start, dl_length);
+                                        h.process_display_list(dl_start, dl_length, ucode_address);
                                     }
 
                                     // reclaim lock
