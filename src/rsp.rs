@@ -235,12 +235,12 @@ impl Rsp {
 
                     // OSTasks are only set when the RSP is halted, so whenever we wake up we can check and perform tasks
                     if c.process_task {
+                        c.process_task = false;
                         let task_type = c.read_u32(0x0FC0).unwrap();
                         match task_type {
                             1 => { // M_GFXTASK
                                 let dl_start = c.read_u32(0x0FF0).unwrap(); // OSTask->data_ptr
-                                if dl_start != 0 { // for gfx tasks, wait for the DL pointer to be valid
-                                    c.process_task = false;
+                                if dl_start != 0 { // for gfx tasks, the DL list start pointer must be valid
                                     let dl_length = c.read_u32(0x0FF4).unwrap(); // OSTask->data_size
 
                                     // free the lock on core while running the DL
@@ -252,7 +252,7 @@ impl Rsp {
                                     // reclaim lock
                                     let mut c = core.lock().unwrap();
 
-                                    // set SIG2 and halt
+                                    // set SIG2 and break, which usually triggers RI
                                     {
                                         let mut shared_state = c.shared_state.write().unwrap();
                                         shared_state.signals |= 1 << 2;
@@ -279,7 +279,6 @@ impl Rsp {
                                 if task_type < 8 {
                                     trace!(target: "RSP", "found task type {}", task_type);
                                 }
-                                c.process_task = false;
                             },
                         }
                     }

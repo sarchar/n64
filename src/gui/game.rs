@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use winit::event::VirtualKeyCode;
+//use winit::event::VirtualKeyCode;
 use image::GenericImageView;
 use wgpu::util::DeviceExt;
 use cgmath::prelude::*;
@@ -68,6 +68,10 @@ impl Vertex {
             ]
         }
     }
+
+    fn offset_of(index: usize) -> wgpu::BufferAddress {
+        (index * std::mem::size_of::<[f32; 9]>()) as wgpu::BufferAddress
+    }
 }
 
 #[rustfmt::skip]
@@ -95,11 +99,12 @@ impl MvpPacked {
 pub struct Game {
     hle_command_buffer: Arc<HleCommandBuffer>,
 
-    game_render_texture: wgpu::Texture,
+    game_render_textures: [wgpu::Texture; 2],
     game_render_texture_pipeline: wgpu::RenderPipeline,
     game_render_texture_vertex_buffer: wgpu::Buffer,
     game_render_texture_index_buffer: wgpu::Buffer,
-    game_render_texture_bind_group: wgpu::BindGroup,
+    game_render_texture_bind_groups: [wgpu::BindGroup; 2],
+    game_render_texture_index: usize,
 
     game_pipeline: wgpu::RenderPipeline,
 
@@ -114,11 +119,11 @@ pub struct Game {
     mvp_buffer: wgpu::Buffer,
     mvp_bind_group: wgpu::BindGroup,
 
-    speed: f32,
-    is_forward_pressed: bool,
-    is_backward_pressed: bool,
-    is_left_pressed: bool,
-    is_right_pressed: bool,
+    //speed: f32,
+    //is_forward_pressed: bool,
+    //is_backward_pressed: bool,
+    //is_left_pressed: bool,
+    //is_right_pressed: bool,
 
     ui_frame_count: u64,
     ui_last_fps_time: Instant,
@@ -134,25 +139,45 @@ impl App for Game {
         let device: &wgpu::Device = appwnd.device();
 
         // create an offscreen render target for the actual game render
+        // we double buffer so we don't get flickering when the n64/hle code is drawing too slowly
         // TODO need to resize texture with the window resize
-        let game_render_texture = device.create_texture(
-            &wgpu::TextureDescriptor {
-                label: Some("Game Render Texture"),
-                size: wgpu::Extent3d {
-                    width: appwnd.surface_config().width,
-                    height: appwnd.surface_config().height,
-                    ..Default::default()
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: appwnd.surface_config().format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            }
-        );
+        // OR maybe the render texture should be mapped to the n64 viewport?
+        let game_render_textures = [
+            device.create_texture(
+                &wgpu::TextureDescriptor {
+                    label: Some("Game Render Texture 0"),
+                    size: wgpu::Extent3d {
+                        width: appwnd.surface_config().width,
+                        height: appwnd.surface_config().height,
+                        ..Default::default()
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: appwnd.surface_config().format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }
+            ),
+            device.create_texture(
+                &wgpu::TextureDescriptor {
+                    label: Some("Game Render Texture 2"),
+                    size: wgpu::Extent3d {
+                        width: appwnd.surface_config().width,
+                        height: appwnd.surface_config().height,
+                        ..Default::default()
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: appwnd.surface_config().format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }
+            ),
+        ];
 
-        // create the main texture render
+        // create the main texture render shader
         let game_render_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Game Render Texture Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gametexture.wgsl").into()),
@@ -240,7 +265,11 @@ impl App for Game {
             }
         );
 
-        let game_render_texture_view = game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let game_render_texture_views = [
+            game_render_textures[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            game_render_textures[1].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+
         let game_render_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -251,20 +280,36 @@ impl App for Game {
             ..Default::default()
         });
 
-        let game_render_texture_bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
-            label: Some("Game Render Texture Bind Group"),
-            layout: &game_render_texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&game_render_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&game_render_texture_sampler),
-                },
-            ],
-        });
+        let game_render_texture_bind_groups = [
+            device.create_bind_group( &wgpu::BindGroupDescriptor {
+                label: Some("Game Render Texture Bind Group 0"),
+                layout: &game_render_texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&game_render_texture_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&game_render_texture_sampler),
+                    },
+                ],
+            }),
+            device.create_bind_group( &wgpu::BindGroupDescriptor {
+                label: Some("Game Render Texture Bind Group 1"),
+                layout: &game_render_texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&game_render_texture_views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&game_render_texture_sampler),
+                    },
+                ],
+            })
+        ];
 
         let diffuse_bytes = include_bytes!("happy-tree.png");
         let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
@@ -455,18 +500,19 @@ impl App for Game {
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Game Index Buffer"),
                 contents: bytemuck::cast_slice(GAME_INDICES),
-                usage: wgpu::BufferUsages::INDEX,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }
         );
 
         Self {
             hle_command_buffer: hle_command_buffer,
 
-            game_render_texture: game_render_texture,
+            game_render_textures: game_render_textures,
             game_render_texture_pipeline: game_render_texture_pipeline,
             game_render_texture_vertex_buffer: game_render_texture_vertex_buffer,
             game_render_texture_index_buffer: game_render_texture_index_buffer,
-            game_render_texture_bind_group: game_render_texture_bind_group,
+            game_render_texture_bind_groups: game_render_texture_bind_groups,
+            game_render_texture_index: 0,
 
             game_pipeline: game_pipeline,
 
@@ -481,11 +527,11 @@ impl App for Game {
             mvp_buffer: mvp_buffer,
             mvp_bind_group: mvp_bind_group,
 
-            speed: 0.2,
-            is_forward_pressed: false,
-            is_backward_pressed: false,
-            is_left_pressed: false,
-            is_right_pressed: false,
+            //speed: 0.2,
+            //is_forward_pressed: false,
+            //is_backward_pressed: false,
+            //is_left_pressed: false,
+            //is_right_pressed: false,
 
             ui_frame_count: 0,
             ui_last_fps_time: Instant::now(),
@@ -496,7 +542,7 @@ impl App for Game {
         }
     }
 
-    fn update(&mut self, appwnd: &AppWindow, delta_time: f32) {
+    fn update(&mut self, _appwnd: &AppWindow, _delta_time: f32) {
         self.ui_frame_count += 1;
         if (self.ui_frame_count % 10) == 0 {
             self.ui_fps = 10.0 / self.ui_last_fps_time.elapsed().as_secs_f64();
@@ -566,7 +612,7 @@ impl App for Game {
             });
 
             render_pass.set_pipeline(&self.game_render_texture_pipeline);
-            render_pass.set_bind_group(0, &self.game_render_texture_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.game_render_texture_bind_groups[self.game_render_texture_index], &[]);
             render_pass.set_vertex_buffer(0, self.game_render_texture_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.game_render_texture_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..GAME_TEXTURE_INDICES.len() as _, 0, 0..1);
@@ -587,64 +633,59 @@ impl App for Game {
 
 impl Game {
     fn render_game(&mut self, appwnd: &AppWindow) {
-        const CLEAR_COLOR: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-
-        //self.game_projection = cgmath::perspective(cgmath::Deg(45.0), 4.0/3.0, 0.1, 100.0);
-        //self.game_projection = cgmath::ortho(-160.0, 160.0, -120.0, 120.0, 0.1, 100.0);
-        //self.game_projection = cgmath::ortho(-2.0, 2.0, -2.0, 2.0, 0.1, 100.0).transpose(); // WGPU uses row-major
-        //self.game_projection = cgmath::Matrix4::from_cols([2.0/4.0, 0.0, 0.0, 0.0].into(), 
-        //                                                  [0.0, 2.0/4.0, 0.0, 0.0].into(), 
-        //                                                  [0.0, 0.0, -2.0/(100.0-0.1), 0.0].into(), 
-        //                                                  [0.0, 0.0, -(100.0+0.1)/(100.0-0.1), 1.0].into()).transpose();
-        //self.game_modelview = cgmath::Matrix4::look_at_rh([0.0, 0.0, 2.0].into(), [0.0, 0.0, 0.0].into(), cgmath::Vector3::unit_y());
-        //self.game_modelview = self.game_modelview * cgmath::Matrix4::from_axis_angle([0.0, 1.0, 0.0].into(), cgmath::Deg(self.speed));
         'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
             match cmd {
                 HleRenderCommand::Viewport { .. } => {
+                    //println!("Viewport: {:?}", cmd);
                     self.game_viewport = cmd;
-                    println!("Viewport: {:?}", cmd);
                     //render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
                     //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
                 },
 
                 HleRenderCommand::SetModelViewMatrix(m) => {
-                    println!("got view: {:?}", m);
+                    //println!("got view: {:?}", m);
                     self.game_modelview = m.into();
                 },
 
                 HleRenderCommand::SetProjectionMatrix(m) => {
-                    println!("got proj: {:?}", m);
+                    //println!("got proj: {:?}", m);
                     let m: cgmath::Matrix4<f32> = m.into();
-                    self.game_projection = m.transpose();
+
+                    // On N64, the Z component is fixed point with 10 bits of precision, so that
+                    // is scaled first to 1..-1 and then scaled to wgpu's 0..1
+                    self.game_projection = m.transpose() * OPENGL_TO_WGPU_MATRIX * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0);
                 },
 
                 HleRenderCommand::FillRectangle { x: rx, y: ry, w: rw, h: rh, c: rc } => {
-                    if let HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh } = self.game_viewport {
-//                        let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
-                        let mvp_matrix = cgmath::ortho( -1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
+                    if let HleRenderCommand::Viewport { x: _, y: _, w: vw, h: vh } = self.game_viewport {
+                        //let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
+                        let mvp_matrix = cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
                         let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.transpose().into() };
                         appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
 
-                        println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
+                        //println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
 
                         // upload the rect vertices and color
                         // map (0,vx) -> (-1,1)
                         // so (rx/vx * 2) - 1
-                        let scale = |s, maxv| ((s / maxv) * 2.0) - 1.0;
-
+                        let scale = |s, maxs| ((s / maxs) * 2.0) - 1.0;
                         let vertices = &[
-                            Vertex { position: [ scale(rx   , vw), scale(ry+rh, vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // TL
-                            Vertex { position: [ scale(rx+rw, vw), scale(ry+rh, vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // TR
-                            Vertex { position: [ scale(rx+rw, vw), scale(ry   , vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // BR
-                            Vertex { position: [ scale(rx   , vw), scale(ry   , vh), -0.0], tex_coords: [0.0, 0.0], color: rc, }, // BL
+                            Vertex { position: [ scale(rx   , vw), scale(ry+rh, vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // TL
+                            Vertex { position: [ scale(rx+rw, vw), scale(ry+rh, vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // TR
+                            Vertex { position: [ scale(rx+rw, vw), scale(ry   , vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // BR
+                            Vertex { position: [ scale(rx   , vw), scale(ry   , vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // BL
                         ];
                         appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+
+                        // restore indices changed by other draw calls
+                        let indices: &[u16] = &[0, 1, 2, 0, 2, 3];
+                        appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
                     }
 
                     let mut encoder: wgpu::CommandEncoder =
                         appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Fill Rect Encoder") });
                     {
-                        let view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let view = self.game_render_textures[self.game_render_texture_index ^ 1].create_view(&wgpu::TextureViewDescriptor::default());
                         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("Game Render Pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -666,6 +707,71 @@ impl Game {
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                         render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..1);
+                    }
+                    appwnd.queue().submit(Some(encoder.finish()));
+                },
+
+                HleRenderCommand::VertexData(v, start_index) => {
+                    let mut vcopy = Vec::new();
+                    for vdata in v.iter() {
+                        let vnew = Vertex {
+                            position: [
+                                vdata.position[0] as f32, 
+                                vdata.position[1] as f32, 
+                                vdata.position[2] as f32
+                            ],
+                            tex_coords: [0.0, 0.0],
+                            color: [
+                                vdata.color_or_normal[0] as f32 / 255.0,
+                                vdata.color_or_normal[1] as f32 / 255.0,
+                                vdata.color_or_normal[2] as f32 / 255.0,
+                                vdata.color_or_normal[3] as f32 / 255.0
+                            ]
+                        };
+                        vcopy.push(vnew);
+                    }
+
+                    let vertices = &vcopy;
+                    appwnd.queue().write_buffer(&self.vertex_buffer, Vertex::offset_of(start_index), bytemuck::cast_slice(vertices));
+                },
+
+                HleRenderCommand::DrawTriangle(v0, v1, v2) => {
+                    // first improvement would be to buffer this draw call until more triangle calls come in and render them all at once
+                    // maybe it's naive of me to think that a new render pass for every triangle is inefficient?
+                    let mvp_matrix = self.game_projection * self.game_modelview;
+                    let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
+                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
+
+                    // upload indices to be rendered
+                    let indices: &[u16] = &[v0, v1, v2, 0, 0, 0];
+                    appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
+
+                    let mut encoder: wgpu::CommandEncoder =
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Fill Rect Encoder") });
+                    {
+                        let view = self.game_render_textures[self.game_render_texture_index ^ 1].create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Game Render Triangle Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            //.occlusion_query_set: None,
+                            //.timestamp_writes: None,
+                        });
+
+                        render_pass.set_pipeline(&self.game_pipeline);
+                        //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
+                        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+                        render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..3 as _, 0, 0..1);
                     }
                     appwnd.queue().submit(Some(encoder.finish()));
                 },
@@ -677,52 +783,15 @@ impl Game {
                         self.game_last_fps_time = Instant::now();
                     }
 
-                    let mvp_matrix = self.game_projection * self.game_modelview;
-                    let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
-                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
-
-                    let vertices = &[
-                        Vertex { position: [-64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0], }, // TL
-                        Vertex { position: [ 64.0,  64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], }, // TR
-                        Vertex { position: [ 64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 1.0, 1.0], }, // BR
-                        Vertex { position: [-64.0, -64.0, -0.0], tex_coords: [0.0, 0.0], color: [1.0, 0.0, 0.0, 1.0], }, // BL
-                    ];
-                    appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
-
-                    let mut encoder: wgpu::CommandEncoder =
-                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Encoder") });
-                    {
-                        let view = self.game_render_texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Game Render Pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load, //Clear(CLEAR_COLOR),
-                                    store: true, //. wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            //.occlusion_query_set: None,
-                            //.timestamp_writes: None,
-                        });
-
-                        render_pass.set_pipeline(&self.game_pipeline);
-                        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                        render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
-                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        render_pass.draw_indexed(0..GAME_INDICES.len() as _, 0, 0..1);
-                    }
-                    appwnd.queue().submit(Some(encoder.finish()));
-
                     self.reset_render_state();
                     
+                    // flip render buffers
+                    self.game_render_texture_index ^= 1;
+
                     break 'cmd_loop;
                 },
     
-                _ => (),
+                z => unimplemented!("unhandled HLE render comand {:?}", z),
             };
         }
     }

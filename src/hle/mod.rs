@@ -7,13 +7,15 @@ use tracing::{trace, debug, error, info, warn};
 use crate::*;
 use rcp::DmaInfo;
 
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum HleRenderCommand {
     Noop,
     Viewport { x: f32, y: f32, w: f32, h: f32 },
     SetProjectionMatrix([[f32; 4]; 4]),
     SetModelViewMatrix([[f32; 4]; 4]),
+    VertexData(Vec<F3DZEX2_Vertex>, usize),
     FillRectangle { x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
+    DrawTriangle(u16, u16, u16),
     //Vertices(u32),
     Sync,
 }
@@ -24,15 +26,15 @@ pub type HleCommandBuffer = atomicring::AtomicRingBuffer<HleRenderCommand>;
 // being either used for prelit color or the normal value
 #[repr(C)]
 #[derive(Copy,Clone,Default,Debug)]
-struct F3DZEX2_Vertex {
-    position: [i16; 3],
-    reserved: u16,
-    texcoord: [i16; 2],
-    color_or_normal: [u8; 4],
+pub struct F3DZEX2_Vertex {
+    pub position: [i16; 3],
+    pub reserved: u16,
+    pub texcoord: [i16; 2],
+    pub color_or_normal: [u8; 4],
 }
 
 #[allow(non_camel_case_types)]
-type F3DZEX2_Matrix = [[i32; 4]; 4];
+pub type F3DZEX2_Matrix = [[i32; 4]; 4];
 
 #[derive(Default)]
 struct DLStackEntry {
@@ -236,6 +238,7 @@ impl Hle {
                 assert!(data_size == vtx_data.len() * 4);
                 assert!((vtx_size % 4) == 0);
 
+                let mut v = Vec::new();
                 for i in 0..numv {
                     let data = &vtx_data[(vtx_size * i as usize) >> 2..];
                     let vtx = F3DZEX2_Vertex {
@@ -249,24 +252,31 @@ impl Hle {
 
                     print!("\nv{}: {:?}", i+vbidx, vtx);
                     self.vertices[(i + vbidx) as usize] = vtx;
+                    v.push(vtx);
                 }
+
+                self.hle_command_buffer.try_push(HleRenderCommand::VertexData(v, vbidx as usize)).expect("HLE command buffer full");
             },
 
             0x05 => { // G_TRI1
-                let v0 = ((cmd >> 49) & 0x7F) as u8;
-                let v1 = ((cmd >> 41) & 0x7F) as u8;
-                let v2 = ((cmd >> 33) & 0x7F) as u8;
+                let v0 = ((cmd >> 49) & 0x7F) as u16;
+                let v1 = ((cmd >> 41) & 0x7F) as u16;
+                let v2 = ((cmd >> 33) & 0x7F) as u16;
                 print!("gsSP1Triangle({}, {}, {})", v0, v1, v2);
+
+                self.hle_command_buffer.try_push(HleRenderCommand::DrawTriangle(v0, v1, v2)).expect("HLE command buffer full");
             },
 
             0x06 => { // G_TRI2
-                let v00 = ((cmd >> 49) & 0x7F) as u8;
-                let v01 = ((cmd >> 41) & 0x7F) as u8;
-                let v02 = ((cmd >> 33) & 0x7F) as u8;
-                let v10 = ((cmd >> 17) & 0x7F) as u8;
-                let v11 = ((cmd >>  9) & 0x7F) as u8;
-                let v12 = ((cmd >>  1) & 0x7F) as u8;
+                let v00 = ((cmd >> 49) & 0x7F) as u16;
+                let v01 = ((cmd >> 41) & 0x7F) as u16;
+                let v02 = ((cmd >> 33) & 0x7F) as u16;
+                let v10 = ((cmd >> 17) & 0x7F) as u16;
+                let v11 = ((cmd >>  9) & 0x7F) as u16;
+                let v12 = ((cmd >>  1) & 0x7F) as u16;
                 print!("gsSP2Triangle({}, {}, {}, 0, {}, {}, {}, 0)", v00, v01, v02, v10, v11, v12);
+                self.hle_command_buffer.try_push(HleRenderCommand::DrawTriangle(v00, v01, v02)).expect("HLE command buffer full");
+                self.hle_command_buffer.try_push(HleRenderCommand::DrawTriangle(v10, v11, v12)).expect("HLE command buffer full");
             },
 
             0xD7 => { // G_TEXTURE
