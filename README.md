@@ -26,6 +26,10 @@ $ cargo run --release -- n64-systemtest.z64 -D
 
 # Screenshots
 
+* "onetri.n64" N64 demo:
+
+![image](https://github.com/sarchar/n64/assets/4928176/132a48b2-2aea-4b1e-9900-5df393774221)
+
 * Current test rate:
 
 ![image](https://github.com/sarchar/n64/assets/4928176/7b206464-8b36-4a8a-838c-7800696358ec)
