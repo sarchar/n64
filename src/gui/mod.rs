@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use winit::{
@@ -14,6 +15,7 @@ use imgui::*;
 use imgui_wgpu::{Renderer, RendererConfig};
 
 use crate::*;
+use n64::SystemCommunication;
 use n64::hle::HleCommandBuffer;
 
 pub mod game;
@@ -203,7 +205,7 @@ impl AppWindow {
 pub trait App {
     /// Called to create the app
     /// Create your pipeline here
-    fn create(appwnd: &AppWindow, hle_command_buffer: Arc<atomicring::AtomicRingBuffer<n64::hle::HleRenderCommand>>) -> Self;
+    fn create(appwnd: &AppWindow, comms: SystemCommunication) -> Self;
 
     /// Called once per frame to update the internal state of the app
     /// Check key presses and controllers that may affect render() here
@@ -217,8 +219,8 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<Arc<HleCommandBuffer>>) -> System) + Send>) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, true).await;
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<SystemCommunication>) -> System) + Send>) {
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, false).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
@@ -239,6 +241,21 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<Arc<Hle
         }),
     }]);
 
+    // create the communication channels
+    let comms = SystemCommunication {
+        hle_command_buffer: Arc::new(HleCommandBuffer::with_capacity(1024 * 512)),
+        vi_origin         : Arc::new(AtomicU32::new(0)),
+    };
+
+    // start the frontend
+    let mut app = T::create(&appwnd, comms.clone());
+
+    // start the emulation
+    std::thread::spawn(move || {
+        let mut system = create_system(Some(comms));
+        system.run();
+    });
+
     // configure imgui to use wgpu 
     let renderer_config = RendererConfig {
         texture_format: appwnd.surface_config().format,
@@ -246,18 +263,8 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<Arc<Hle
     };
 
     let mut renderer = Renderer::new(&mut imgui, appwnd.device(), appwnd.queue(), renderer_config);
-
-    let hle_command_buffer = Arc::new(atomicring::AtomicRingBuffer::with_capacity(4096));
-    let mut app = T::create(&appwnd, hle_command_buffer.clone());
-
     let mut last_frame = Instant::now();
     let mut demo_open = false;
-
-    std::thread::spawn(move || {
-        let mut system = create_system(Some(hle_command_buffer));
-        system.run();
-    });
-
     AppWindow::run(appwnd, move |appwnd: &mut AppWindow, event| {
         if appwnd.input().key_pressed(VirtualKeyCode::F12) {
             demo_open = true;

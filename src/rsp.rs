@@ -58,7 +58,7 @@ pub struct Rsp {
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
 
-    hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>,
+    comms: Option<SystemCommunication>,
 
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
@@ -152,7 +152,7 @@ struct RspCpuCore {
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>) -> Rsp {
+    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: Option<SystemCommunication>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -176,7 +176,7 @@ impl Rsp {
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
 
-            hle_command_buffer: hle_command_buffer,
+            comms: comms,
 
             shared_state: shared_state,
 
@@ -200,9 +200,8 @@ impl Rsp {
             c.broke_tx = Some(broke_tx);
         }
 
-        let hle_command_buffer = mem::replace(&mut self.hle_command_buffer, None);
-        let mut hle = if let Some(cbuf) = hle_command_buffer {
-            Some(Hle::new(self.start_dma_tx.clone(), cbuf))
+        let mut hle = if let Some(ref comms) = self.comms {
+            Some(Hle::new(self.start_dma_tx.clone(), comms.hle_command_buffer.clone()))
         } else {
             None
         };

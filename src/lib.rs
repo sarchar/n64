@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 use std::sync::{Mutex, Arc};
+use std::sync::atomic::AtomicU32;
 
 pub mod avx512f_wrapper;
 pub mod cop1;
@@ -123,13 +124,21 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 
 }
 
+// Collection of thread-safe channels for the front end to communicate with the emulating system
+#[derive(Clone)]
+pub struct SystemCommunication {
+    pub hle_command_buffer: Arc<hle::HleCommandBuffer>,
+    pub vi_origin: Arc<AtomicU32>,
+}
+
 pub struct System {
     pub rcp: Rc<RefCell<rcp::Rcp>>,
     pub cpu: cpu::Cpu,
 }
 
+
 impl System {
-    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>) -> System {
+    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, comms: Option<SystemCommunication>) -> System {
         // load cartridge into memory
         let cartridge_rom = fs::read(cartridge_file_name).expect("Could not open cartridge ROM file");
 
@@ -137,7 +146,7 @@ impl System {
         let boot_rom = fs::read(boot_rom_file_name).expect("Boot rom not found");
 
         // create the RCP and start it
-        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom, hle_command_buffer)));
+        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom, comms)));
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus

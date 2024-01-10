@@ -4,8 +4,9 @@ version = "0.0.1"
 edition = "2021"
 
 [features]
-default = ["gui"]
+default = ["gui", "tracing"]
 gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image", "cgmath"]
+nodebuglogging = ["tracing?/release_max_level_info"]
 headless = []
 
 [dependencies.cgmath]
@@ -38,6 +39,8 @@ version = "0.1"
 
 [dependencies.tracing]
 version = "0.1"
+optional = true
+#features = ["release_max_level_warn"]
 
 [dependencies.tracing-subscriber]
 version = "0.3"

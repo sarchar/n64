@@ -15,8 +15,7 @@ use tracing_subscriber::{filter, prelude::*};
 //.use gilrs::{Gilrs, Button};
 //.use gilrs::ev::filter::Filter;
 
-use n64::hle;
-use n64::System;
+use n64::{System, SystemCommunication};
 use n64::debugger::Debugger;
 
 fn main() {
@@ -102,8 +101,8 @@ fn main() {
     //. }
 
     let program_rom = String::from(args[1].as_str());
-    let make_system = move |hle_command_buffer: Option<std::sync::Arc<hle::HleCommandBuffer>>| {
-        System::new("bios/pifrom.v64", &program_rom, hle_command_buffer)
+    let make_system = move |comms: Option<SystemCommunication>| {
+        System::new("bios/pifrom.v64", &program_rom, comms)
     };
 
     // either run or debug

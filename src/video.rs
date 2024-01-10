@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
 #[allow(unused_imports)]
@@ -10,6 +11,8 @@ const PAL_BURST: u32 = 0x0404233A;
 const NTSC_BURST: u32 = 0x03E52239;
 
 pub struct VideoInterface {
+    comms: Option<SystemCommunication>,
+
     resolution_changed: u32,
     cycle_count: u64,
     mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
@@ -74,8 +77,10 @@ pub struct VideoInterface {
 }
 
 impl VideoInterface {
-    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> VideoInterface {
+    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: Option<SystemCommunication>) -> VideoInterface {
         VideoInterface {
+            comms: comms,
+
             resolution_changed: 0,
             cycle_count: 0,
             mi_interrupts_tx: mi_interrupts_tx,
@@ -279,7 +284,13 @@ impl Addressable for VideoInterface {
             // VI_ORIGIN
             0x0_0004 => {
                 self.origin = value & 0x00FF_FFFF;
-                debug!(target: "VI", "setting RDRAM origin to ${:08X}", self.origin);
+                info!(target: "VI", "setting RDRAM origin to ${:08X}", self.origin);
+
+                // notify renderer of the framebuffer change
+                if let Some(ref comms) = self.comms {
+                    comms.vi_origin.store(self.origin, Ordering::SeqCst);
+                }
+
                 Ok(WriteReturnSignal::None)
             },
 
@@ -299,7 +310,6 @@ impl Addressable for VideoInterface {
 
             // VI_V_CURRENT
             0x0_0010 => {
-                //self.current_line = value & 0x3FF;
                 self.mi_interrupts_tx.send(InterruptUpdate(IMask_VI, InterruptUpdateMode::ClearInterrupt)).unwrap();
                 debug!(target: "VI", "setting current line to {} (int line={})", self.current_line, self.interrupt_line);
                 Ok(WriteReturnSignal::None)

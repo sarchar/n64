@@ -7,7 +7,6 @@ use tracing::{debug, error, trace, info};
 
 use crate::*;
 
-use crate::hle;
 use crate::mips::MipsInterface;
 use crate::peripheral::PeripheralInterface;
 use crate::pifrom::PifRom;
@@ -63,7 +62,7 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>) -> Rcp {
+    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, comms: Option<SystemCommunication>) -> Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
 
@@ -80,7 +79,7 @@ impl Rcp {
         let rdp = Arc::new(Mutex::new(Rdp::new(mi.get_update_channel())));
 
         // create the RSP
-        let rsp = Rsp::new(rdp.clone(), start_dma_tx.clone(), mi.get_update_channel(), hle_command_buffer);
+        let rsp = Rsp::new(rdp.clone(), start_dma_tx.clone(), mi.get_update_channel(), comms.clone());
 
         Rcp {
             pi : pi,
@@ -88,7 +87,7 @@ impl Rcp {
             ri : RdramInterface::new(),
             rsp: rsp,
             si : SerialInterface::new(pif, start_dma_tx.clone(), mi.get_update_channel()),
-            vi : VideoInterface::new(mi.get_update_channel()),
+            vi : VideoInterface::new(mi.get_update_channel(), comms.clone()),
 
             start_dma_rx: start_dma_rx,
             mi : mi,
