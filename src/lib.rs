@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::AtomicU32;
 
 pub mod avx512f_wrapper;
@@ -127,8 +127,29 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 // Collection of thread-safe channels for the front end to communicate with the emulating system
 #[derive(Clone)]
 pub struct SystemCommunication {
-    pub hle_command_buffer: Arc<hle::HleCommandBuffer>,
+    pub hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>,
+
+    // current render framebuffer
     pub vi_origin: Arc<AtomicU32>,
+    // framebuffer width
+    pub vi_width: Arc<AtomicU32>,
+    // framebuffer format
+    pub vi_format: Arc<AtomicU32>, // 2 = 5/5/5/3 (16bpp), 3 = 8/8/8/8 (32bpp)
+
+    // direct access to RDRAM as a speed optimization (rather than going through all the RCP code)
+    pub rdram: Arc<RwLock<Option<Vec<u32>>>>,
+}
+
+impl SystemCommunication {
+    pub fn new(hle_command_buffer: Option<hle::HleCommandBuffer>) -> Self {
+        Self {
+            hle_command_buffer: hle_command_buffer.map_or(None, |v| Some(Arc::new(v))),
+            vi_origin         : Arc::new(AtomicU32::new(0)),
+            vi_width          : Arc::new(AtomicU32::new(0)),
+            vi_format         : Arc::new(AtomicU32::new(0)),
+            rdram             : Arc::new(RwLock::new(None)),
+        }
+    }
 }
 
 pub struct System {
@@ -138,7 +159,7 @@ pub struct System {
 
 
 impl System {
-    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, comms: Option<SystemCommunication>) -> System {
+    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, comms: SystemCommunication) -> System {
         // load cartridge into memory
         let cartridge_rom = fs::read(cartridge_file_name).expect("Could not open cartridge ROM file");
 

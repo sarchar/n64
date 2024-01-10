@@ -4,14 +4,24 @@ use tracing::{trace, debug, error, warn, info};
 use crate::*;
 
 pub struct RdramInterface {
-    ram: Vec<u32>,
+    ram: Arc<RwLock<Option<Vec<u32>>>>,
+    ram_len: usize,
     repeat_count: Option<u32>
 }
 
 impl RdramInterface {
-    pub fn new() -> RdramInterface {
+    pub fn new(comms: SystemCommunication) -> RdramInterface {
+        let ram_len = 2*1024*1024; // 8MiB => 8*1024*1024/4 = 2MiB
+        let ram = vec![0u32; ram_len];
+
+        let mut rdram_ref = comms.rdram.write().unwrap();
+        *rdram_ref = Some(ram);
+        drop(rdram_ref);
+
+        let ram = comms.rdram.clone();
         RdramInterface { 
-            ram: vec![0u32; 2*1024*1024], // 8MiB => 8*1024*1024/4 = 2MiB
+            ram: ram,
+            ram_len: ram_len,
             repeat_count: None,
         }
     }
@@ -30,10 +40,6 @@ impl RdramInterface {
         self
     }
 
-    pub fn rdram(&self) -> &Vec<u32> {
-        &self.ram
-    }
-
     pub fn set_repeat_count(&mut self, repeat_count: Option<u32>) {
         self.repeat_count = repeat_count;
     }
@@ -47,8 +53,10 @@ impl Addressable for RdramInterface {
             // RDRAM memory space
             0x0000_0000..=0x03EF_FFFF => {
                 let rdram_address = ((offset & 0x03FF_FFFF) >> 2) as usize;
-                if rdram_address < self.ram.len() {
-                    Ok(self.ram[rdram_address])
+                if rdram_address < self.ram_len {
+                    let access = self.ram.read().unwrap();
+                    let ram = access.as_ref().unwrap();
+                    Ok(ram[rdram_address])
                 } else { Ok(0) }
             },
 
@@ -88,7 +96,9 @@ impl Addressable for RdramInterface {
             // RDRAM memory space
             0x0000_0000..=0x007F_FFFF => {
                 let rdram_address = offset & 0x03FF_FFFF;
-                self.ram[(rdram_address >> 2) as usize] = value;
+                let mut access = self.ram.write().unwrap();
+                let ram = access.as_deref_mut().unwrap();
+                ram[(rdram_address >> 2) as usize] = value;
             },
 
             // "broken" RDRAM memory access
@@ -142,9 +152,12 @@ impl Addressable for RdramInterface {
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
         if offset < 0x0080_0000 {
+            let access = self.ram.write().unwrap();
+            let ram = access.as_ref().unwrap();
+
             // why doesn't std::vec have copy_into(offset, source_slice)?
-            let (_, right) = self.ram.split_at_mut(offset >> 2);
-            let (left, _) = right.split_at_mut((length >> 2) as usize);
+            let (_, right) = ram.split_at(offset >> 2);
+            let (left, _) = right.split_at((length >> 2) as usize);
             Ok(left.to_owned())
         } else {
             todo!("not likely");
@@ -153,8 +166,11 @@ impl Addressable for RdramInterface {
 
     fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x0080_0000 {
+            let mut access = self.ram.write().unwrap();
+            let ram = access.as_deref_mut().unwrap();
+
             // why doesn't std::vec have copy_into(offset, source_slice)?
-            let (_, right) = self.ram.split_at_mut(offset >> 2);
+            let (_, right) = ram.split_at_mut(offset >> 2);
             let (left, _) = right.split_at_mut(block.len());
             left.copy_from_slice(block);
             Ok(WriteReturnSignal::None)

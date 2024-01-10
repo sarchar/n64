@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use winit::{
@@ -219,8 +217,8 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<SystemCommunication>) -> System) + Send>) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, false).await;
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>) {
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, true).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
@@ -242,17 +240,15 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(Option<SystemC
     }]);
 
     // create the communication channels
-    let comms = SystemCommunication {
-        hle_command_buffer: Arc::new(HleCommandBuffer::with_capacity(1024 * 512)),
-        vi_origin         : Arc::new(AtomicU32::new(0)),
-    };
+    let hle_command_buffer = HleCommandBuffer::with_capacity(1024 * 16);
+    let comms = SystemCommunication::new(Some(hle_command_buffer));
 
     // start the frontend
     let mut app = T::create(&appwnd, comms.clone());
 
     // start the emulation
     std::thread::spawn(move || {
-        let mut system = create_system(Some(comms));
+        let mut system = create_system(comms);
         system.run();
     });
 

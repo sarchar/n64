@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -14,7 +15,7 @@ use crate::*;
 use gui::{App, AppWindow};
 
 use n64::SystemCommunication;
-use n64::hle::HleRenderCommand;
+use n64::hle::{HleRenderCommand, HleCommandBuffer};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -100,6 +101,7 @@ impl MvpPacked {
 
 pub struct Game {
     comms: SystemCommunication,
+    hle_command_buffer: Arc<HleCommandBuffer>,
 
     game_render_textures: HashMap<u32, wgpu::Texture>,
     game_render_texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -108,6 +110,9 @@ pub struct Game {
     game_render_texture_index_buffer: wgpu::Buffer,
     game_render_texture_bind_groups: HashMap<u32, wgpu::BindGroup>,
     current_render_texture_view: Option<wgpu::TextureView>,
+
+    raw_render_texture: Option<wgpu::Texture>,
+    raw_render_texture_bind_group: Option<wgpu::BindGroup>,
 
     game_pipeline: wgpu::RenderPipeline,
 
@@ -138,7 +143,7 @@ pub struct Game {
 }
 
 impl App for Game {
-    fn create(appwnd: &AppWindow, comms: SystemCommunication) -> Self {
+    fn create(appwnd: &AppWindow, mut comms: SystemCommunication) -> Self {
         let device: &wgpu::Device = appwnd.device();
 
         // create the main texture render shader
@@ -424,8 +429,10 @@ impl App for Game {
             }
         );
 
+        let hle_command_buffer = std::mem::replace(&mut comms.hle_command_buffer, None).unwrap();
         Self {
             comms: comms,
+            hle_command_buffer: hle_command_buffer,
 
             game_render_textures: HashMap::new(),
             game_render_texture_bind_group_layout: game_render_texture_bind_group_layout,
@@ -434,6 +441,8 @@ impl App for Game {
             game_render_texture_index_buffer: game_render_texture_index_buffer,
             game_render_texture_bind_groups: HashMap::new(),
             current_render_texture_view: None,
+            raw_render_texture: None,
+            raw_render_texture_bind_group: None,
 
             game_pipeline: game_pipeline,
 
@@ -516,7 +525,7 @@ impl App for Game {
 
         // TODO we need the VI_ORIGIN value to know what to render..
         let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
-        if self.game_render_textures.len() == 0 { return; }
+        if video_buffer == 0 { return; }
 
         // look for the texture associated with the color image address
         let bind_group = if let Some(bind_group) = self.game_render_texture_bind_groups.get(&video_buffer) {
@@ -525,7 +534,63 @@ impl App for Game {
             if let Some(bind_group) = self.game_render_texture_bind_groups.get(&(video_buffer - 640)) { // video_buffer is + 640 on NTSC?
                 bind_group
             } else {
-                return;
+                let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
+                let height = if width == 320 { 240 } else if width == 640 { 480 } else { return; } as usize;
+                let format = self.comms.vi_format.load(Ordering::SeqCst);
+
+                // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
+                if let None = self.raw_render_texture {
+                    let (texture, bind_group) = self.create_framebuffer_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
+                    self.raw_render_texture = Some(texture);
+                    self.raw_render_texture_bind_group = Some(bind_group);
+                }
+
+                // access RDRAM directly
+                // would be nice if I could copy RGB555 into a texture, but this copy seems acceptable for now
+                if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
+                    let start = (video_buffer >> 2) as usize;
+                    let mut image_data = vec![0u8; width*height*4];
+                    for i in 0..(width*height) {
+                        match format {
+                            2 => {
+                                let shift = 16 - ((i & 1) << 4);
+                                let pix = (rdram[start + (i >> 1)] >> shift) as u16;
+                                let r = ((pix >> 11) & 0x1F) as u8;
+                                let g = ((pix >>  6) & 0x1F) as u8;
+                                let b = ((pix >>  1) & 0x1F) as u8;
+                                let a = (pix & 0x01) as u8;
+                                image_data[i*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
+                            },
+                            3 => { 
+                                let pix = rdram[start+i] | 0xff;
+                                image_data[i*4..][..4].copy_from_slice(&pix.to_be_bytes());
+                            },
+                            _ => break,
+                        }
+                    }
+
+                    appwnd.queue().write_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: self.raw_render_texture.as_ref().unwrap(),
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytemuck::cast_slice(&image_data),
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(1 * 4 * width as u32), // 320 pix, rgba*f32,
+                            rows_per_image: Some(height as u32),
+                        },
+                        wgpu::Extent3d {
+                            width: width as u32,
+                            height: height as u32,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+
+                self.raw_render_texture_bind_group.as_ref().unwrap()
             }
         };
 
@@ -569,7 +634,7 @@ impl App for Game {
 }
 
 impl Game {
-    fn create_framebuffer_texture(&mut self, appwnd: &AppWindow, name: &str, _width: u16) -> (wgpu::Texture, wgpu::BindGroup) {
+    fn create_framebuffer_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {
         let device = appwnd.device();
 
         // create an offscreen render target for the actual game render
@@ -580,8 +645,8 @@ impl Game {
             &wgpu::TextureDescriptor {
                 label: Some(format!("Game Render Texture: {name}").as_str()),
                 size: wgpu::Extent3d {
-                    width: appwnd.surface_config().width,
-                    height: appwnd.surface_config().height,
+                    width: width,
+                    height: height,
                     ..Default::default()
                 },
                 mip_level_count: 1,
@@ -589,7 +654,8 @@ impl Game {
                 dimension: wgpu::TextureDimension::D2,
                 format: appwnd.surface_config().format,
                 // TODO at some point probably need COPY_SRC to copy the framebuffer into RDRAM
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING 
+                    | if is_copy_dst { wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::empty() },
                 view_formats: &[],
             }
         );
@@ -600,7 +666,7 @@ impl Game {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter    : wgpu::FilterMode::Linear,
+            mag_filter    : if is_filtered { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
             min_filter    : wgpu::FilterMode::Nearest,
             mipmap_filter : wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -625,15 +691,16 @@ impl Game {
     }
 
     fn render_game(&mut self, appwnd: &AppWindow) {
-        'cmd_loop: while let Some(cmd) = self.comms.hle_command_buffer.try_pop() {
+        'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
             match cmd {
                 HleRenderCommand::SetColorImage {
                     framebuffer_address: addr,
-                    width,
                     ..
                 } => {
                     if !self.game_render_textures.contains_key(&addr) {
-                        let (texture, bind_group) = self.create_framebuffer_texture(appwnd, format!("${:08X}", addr).as_str(), width);
+                        let width = appwnd.surface_config().width;
+                        let height = appwnd.surface_config().height;
+                        let (texture, bind_group) = self.create_framebuffer_texture(appwnd, format!("${:08X}", addr).as_str(), width, height, false, false);
                         self.game_render_textures.insert(addr, texture);
                         self.game_render_texture_bind_groups.insert(addr, bind_group);
                         info!(target: "RENDER", "created color render target for address ${:08X} (width={})", addr, width);

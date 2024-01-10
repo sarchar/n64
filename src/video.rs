@@ -11,7 +11,7 @@ const PAL_BURST: u32 = 0x0404233A;
 const NTSC_BURST: u32 = 0x03E52239;
 
 pub struct VideoInterface {
-    comms: Option<SystemCommunication>,
+    comms: SystemCommunication,
 
     resolution_changed: u32,
     cycle_count: u64,
@@ -77,7 +77,7 @@ pub struct VideoInterface {
 }
 
 impl VideoInterface {
-    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: Option<SystemCommunication>) -> VideoInterface {
+    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: SystemCommunication) -> VideoInterface {
         VideoInterface {
             comms: comms,
 
@@ -278,6 +278,7 @@ impl Addressable for VideoInterface {
                 self.dedither_filter_enable = ((value >> 16) & 0x01) as u8;
                 assert!(self.vbus_clock_enable == 0); // crash if vbus clock is ever enabled, simulating the real thing
                 debug!(target: "VI", "setting pixel type to {}", self.pixel_type);
+                self.comms.vi_format.store(self.pixel_type as u32, Ordering::SeqCst);
                 Ok(WriteReturnSignal::None)
             },
 
@@ -287,9 +288,7 @@ impl Addressable for VideoInterface {
                 info!(target: "VI", "setting RDRAM origin to ${:08X}", self.origin);
 
                 // notify renderer of the framebuffer change
-                if let Some(ref comms) = self.comms {
-                    comms.vi_origin.store(self.origin, Ordering::SeqCst);
-                }
+                self.comms.vi_origin.store(self.origin, Ordering::SeqCst);
 
                 Ok(WriteReturnSignal::None)
             },
@@ -298,6 +297,10 @@ impl Addressable for VideoInterface {
             0x0_0008 => {
                 self.frame_buffer_width = value & 0x0FFF;
                 debug!(target: "VI", "setting framebuffer width to {}", self.frame_buffer_width);
+
+                // notify renderer of the framebuffer size
+                self.comms.vi_width.store(self.frame_buffer_width, Ordering::SeqCst);
+
                 Ok(WriteReturnSignal::None)
             },
 

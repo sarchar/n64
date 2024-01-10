@@ -101,19 +101,21 @@ fn main() {
     //. }
 
     let program_rom = String::from(args[1].as_str());
-    let make_system = move |comms: Option<SystemCommunication>| {
+    let make_system = move |comms: SystemCommunication| {
         System::new("bios/pifrom.v64", &program_rom, comms)
     };
 
     // either run or debug
     if args.len() == 3 && args[2] == "-D" {
-        let mut debugger = Debugger::new(make_system(None), change_logging);
+        let comms = SystemCommunication::new(None);
+        let mut debugger = Debugger::new(make_system(comms), change_logging);
         println!("Entering debugger...");
         debugger.run().expect("Debugger failed");
     } else {
         cfg_if! {
             if #[cfg(feature="headless")] {
-                make_system(None).run();
+                let comms = SystemCommunication::new(None);
+                make_system(comms).run();
             } else {
                 pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system)));
             }

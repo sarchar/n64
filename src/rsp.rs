@@ -43,6 +43,7 @@ const Cop2_VCE: usize = 2;
 /// N64 Reality Signal Processor
 /// Resides on the die of the RCP.
 pub struct Rsp {
+    comms: SystemCommunication,
     mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     core: Arc<Mutex<RspCpuCore>>,
@@ -57,8 +58,6 @@ pub struct Rsp {
     start_dma_tx: mpsc::Sender<DmaInfo>,
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
-
-    comms: Option<SystemCommunication>,
 
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
@@ -152,7 +151,7 @@ struct RspCpuCore {
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: Option<SystemCommunication>) -> Rsp {
+    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: SystemCommunication) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -163,6 +162,7 @@ impl Rsp {
         let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), rdp, start_dma_tx.clone(), dma_completed_tx.clone())));
 
         Rsp {
+            comms: comms,
             mi_interrupts_tx: mi_interrupts_tx,
 
             core: core,
@@ -175,8 +175,6 @@ impl Rsp {
             start_dma_tx: start_dma_tx,
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
-
-            comms: comms,
 
             shared_state: shared_state,
 
@@ -200,8 +198,8 @@ impl Rsp {
             c.broke_tx = Some(broke_tx);
         }
 
-        let mut hle = if let Some(ref comms) = self.comms {
-            Some(Hle::new(self.start_dma_tx.clone(), comms.hle_command_buffer.clone()))
+        let mut hle = if let Some(ref hle_command_buffer) = self.comms.hle_command_buffer {
+            Some(Hle::new(self.start_dma_tx.clone(), hle_command_buffer.clone()))
         } else {
             None
         };

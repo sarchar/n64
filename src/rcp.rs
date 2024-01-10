@@ -62,7 +62,7 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, comms: Option<SystemCommunication>) -> Rcp {
+    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, comms: SystemCommunication) -> Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
 
@@ -84,7 +84,7 @@ impl Rcp {
         Rcp {
             pi : pi,
             rdp: LockedAddressable::new(rdp), // wrap rdp in a LockedAddressable so that match_addressable can return the rdp
-            ri : RdramInterface::new(),
+            ri : RdramInterface::new(comms.clone()),
             rsp: rsp,
             si : SerialInterface::new(pif, start_dma_tx.clone(), mi.get_update_channel()),
             vi : VideoInterface::new(mi.get_update_channel(), comms.clone()),
