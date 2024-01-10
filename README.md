@@ -26,13 +26,13 @@ $ cargo run --release -- n64-systemtest.z64 -D
 
 # Screenshots
 
+* Current test rate:
+
+![image](https://github.com/sarchar/n64/assets/4928176/c6a6b774-afde-40d6-9acd-8f0157002369)
+
 * "onetri.n64" N64 demo:
 
 ![image](https://github.com/sarchar/n64/assets/4928176/132a48b2-2aea-4b1e-9900-5df393774221)
-
-* Current test rate:
-
-![image](https://github.com/sarchar/n64/assets/4928176/7b206464-8b36-4a8a-838c-7800696358ec)
 
 * [Mandelbrot](https://github.com/PeterLemon/N64/tree/master/CP1/Fractal/32BPP/640X480/Mandelbrot/Double)
 
