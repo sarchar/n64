@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::mpsc;
 use std::sync::atomic::AtomicU32;
 
 pub mod avx512f_wrapper;
@@ -123,7 +124,6 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
     }
 
 }
-
 // Collection of thread-safe channels for the front end to communicate with the emulating system
 #[derive(Clone)]
 pub struct SystemCommunication {
@@ -136,6 +136,12 @@ pub struct SystemCommunication {
     // framebuffer format
     pub vi_format: Arc<AtomicU32>, // 2 = 5/5/5/3 (16bpp), 3 = 8/8/8/8 (32bpp)
 
+    // interrupt signal
+    pub mi_interrupts_tx: Option<mpsc::Sender<mips::InterruptUpdate>>,
+
+    // start DMA transfer signal
+    pub start_dma_tx: Option<mpsc::Sender<rcp::DmaInfo>>,
+
     // direct access to RDRAM as a speed optimization (rather than going through all the RCP code)
     pub rdram: Arc<RwLock<Option<Vec<u32>>>>,
 }
@@ -147,6 +153,8 @@ impl SystemCommunication {
             vi_origin         : Arc::new(AtomicU32::new(0)),
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
+            mi_interrupts_tx  : None,
+            start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
         }
     }
@@ -156,7 +164,6 @@ pub struct System {
     pub rcp: Rc<RefCell<rcp::Rcp>>,
     pub cpu: cpu::Cpu,
 }
-
 
 impl System {
     pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, comms: SystemCommunication) -> System {

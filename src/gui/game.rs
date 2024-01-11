@@ -16,6 +16,7 @@ use gui::{App, AppWindow};
 
 use n64::SystemCommunication;
 use n64::hle::{HleRenderCommand, HleCommandBuffer};
+use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -869,7 +870,10 @@ impl Game {
 
                     self.reset_render_state();
 
-                    // TODO trigger RDP interrupt to signal render is done
+                    // trigger RDP interrupt to signal render is done
+                    if let Some(mi) = &self.comms.mi_interrupts_tx {
+                        mi.send(InterruptUpdate(IMask_DP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                    }
                     
                     break 'cmd_loop;
                 },

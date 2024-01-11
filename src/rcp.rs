@@ -62,32 +62,34 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, comms: SystemCommunication) -> Rcp {
+    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, mut comms: SystemCommunication) -> Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
+        comms.start_dma_tx = Some(start_dma_tx.clone());
 
         // create MI first so we can create the interrupt interconnect
         let mut mi = MipsInterface::new();
+        comms.mi_interrupts_tx = Some(mi.get_update_channel());
 
         // create the PI first
-        let mut pi = PeripheralInterface::new(cartridge_rom, start_dma_tx.clone(), mi.get_update_channel());
+        let mut pi = PeripheralInterface::new(comms.clone(), cartridge_rom);
 
         // the PIF-ROM needs to know what CIC chip the cartridge is using, so we pass it along
         let pif = PifRom::new(boot_rom, &mut pi);
 
         // create the RDP
-        let rdp = Arc::new(Mutex::new(Rdp::new(mi.get_update_channel())));
+        let rdp = Arc::new(Mutex::new(Rdp::new(comms.clone())));
 
         // create the RSP
-        let rsp = Rsp::new(rdp.clone(), start_dma_tx.clone(), mi.get_update_channel(), comms.clone());
+        let rsp = Rsp::new(comms.clone(), rdp.clone());
 
         Rcp {
             pi : pi,
             rdp: LockedAddressable::new(rdp), // wrap rdp in a LockedAddressable so that match_addressable can return the rdp
             ri : RdramInterface::new(comms.clone()),
             rsp: rsp,
-            si : SerialInterface::new(pif, start_dma_tx.clone(), mi.get_update_channel()),
-            vi : VideoInterface::new(mi.get_update_channel(), comms.clone()),
+            si : SerialInterface::new(comms.clone(), pif),
+            vi : VideoInterface::new(comms.clone()),
 
             start_dma_rx: start_dma_rx,
             mi : mi,

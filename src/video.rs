@@ -1,5 +1,4 @@
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 
 #[allow(unused_imports)]
 use tracing::{debug,error,trace,warn,info};
@@ -15,7 +14,6 @@ pub struct VideoInterface {
 
     resolution_changed: u32,
     cycle_count: u64,
-    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     // VI_CTRL control flags
     dedither_filter_enable: u8,
@@ -77,13 +75,12 @@ pub struct VideoInterface {
 }
 
 impl VideoInterface {
-    pub fn new(mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: SystemCommunication) -> VideoInterface {
+    pub fn new(comms: SystemCommunication) -> VideoInterface {
         VideoInterface {
             comms: comms,
 
             resolution_changed: 0,
             cycle_count: 0,
-            mi_interrupts_tx: mi_interrupts_tx,
 
             // VI_CTRL
             dedither_filter_enable: 0,
@@ -179,7 +176,7 @@ impl VideoInterface {
 
             if self.current_line == self.interrupt_line {
                 //TODO enabling the interrupt causes LoZ to stop working?
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
         }
     }
@@ -285,7 +282,7 @@ impl Addressable for VideoInterface {
             // VI_ORIGIN
             0x0_0004 => {
                 self.origin = value & 0x00FF_FFFF;
-                info!(target: "VI", "setting RDRAM origin to ${:08X}", self.origin);
+                debug!(target: "VI", "setting RDRAM origin to ${:08X}", self.origin);
 
                 // notify renderer of the framebuffer change
                 self.comms.vi_origin.store(self.origin, Ordering::SeqCst);
@@ -313,7 +310,7 @@ impl Addressable for VideoInterface {
 
             // VI_V_CURRENT
             0x0_0010 => {
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_VI, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::ClearInterrupt)).unwrap();
                 debug!(target: "VI", "setting current line to {} (int line={})", self.current_line, self.interrupt_line);
                 Ok(WriteReturnSignal::None)
             },

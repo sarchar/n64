@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::time::Instant;
 
 use winit::{
@@ -241,16 +242,24 @@ pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunic
 
     // create the communication channels
     let hle_command_buffer = HleCommandBuffer::with_capacity(1024 * 16);
-    let comms = SystemCommunication::new(Some(hle_command_buffer));
+    let mut comms = SystemCommunication::new(Some(hle_command_buffer));
+
+    // we need the mi_interrupts_tx channel out of the system, but the system is created in another thread
+    let (tx, rx) = mpsc::channel();
+
+    // start the emulation
+    let thread_comms = comms.clone();
+    std::thread::spawn(move || {
+        let mut system = create_system(thread_comms);
+        tx.send(system.rcp.borrow_mut().mi.get_update_channel()).unwrap();
+        system.run();
+    });
+
+    // wait for the system to start and get the interrupt channel
+    comms.mi_interrupts_tx = Some(rx.recv().unwrap());
 
     // start the frontend
     let mut app = T::create(&appwnd, comms.clone());
-
-    // start the emulation
-    std::thread::spawn(move || {
-        let mut system = create_system(comms);
-        system.run();
-    });
 
     // configure imgui to use wgpu 
     let renderer_config = RendererConfig {

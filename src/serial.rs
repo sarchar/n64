@@ -9,10 +9,11 @@ use pifrom::PifRom;
 use mips::{InterruptUpdate, InterruptUpdateMode, IMask_SI};
 
 pub struct SerialInterface {
-    start_dma_tx: mpsc::Sender<DmaInfo>,
+    comms: SystemCommunication,
+
     dma_completed_tx: mpsc::Sender<DmaInfo>,
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
-    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
+
     interrupt_flag: bool,
     pif: PifRom,
 
@@ -20,15 +21,15 @@ pub struct SerialInterface {
 }
 
 impl SerialInterface {
-    pub fn new(pif: PifRom, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> Self {
+    pub fn new(comms: SystemCommunication, pif: PifRom) -> Self {
         let (tx, rx) = mpsc::channel();
 
         SerialInterface {
-            start_dma_tx: start_dma_tx,
+            comms: comms,
+
             dma_completed_tx: tx,
             dma_completed_rx: rx,
 
-            mi_interrupts_tx: mi_interrupts_tx,
             interrupt_flag: false,
             pif: pif,
 
@@ -39,7 +40,7 @@ impl SerialInterface {
     pub fn step(&mut self) {
         if let Ok(_) = self.dma_completed_rx.try_recv() {
             self.interrupt_flag = true;
-            self.mi_interrupts_tx.send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+            self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
         }
     }
 
@@ -88,7 +89,7 @@ impl SerialInterface {
                 };
 
                 // start DMA
-                self.start_dma_tx.send(dma_info).unwrap();
+                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
             },
 
             // SI_PIF_AD_WR64B - DMA 64 bytes from RDRAM to PIF-RAM
@@ -109,13 +110,13 @@ impl SerialInterface {
                 };
 
                 // start DMA
-                self.start_dma_tx.send(dma_info).unwrap();
+                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
             },
 
             // SI_STATUS
             0x0_0018 => {
                 self.interrupt_flag = false;
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_SI, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::ClearInterrupt)).unwrap();
             },
 
             _ => warn!(target: "SI", "unimplemented SI register write value=${:08X} offset=${:08X}", value, offset),
@@ -141,7 +142,7 @@ impl Addressable for SerialInterface {
             0x1FC0_0000 => {
                 // all writes into PIFROM/RAM generate SI interrupt
                 self.interrupt_flag = true;
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u32(value, offset & 0x000F_FFFF)
             },
 
@@ -155,7 +156,7 @@ impl Addressable for SerialInterface {
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
                 self.interrupt_flag = true;
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u16(value, offset & 0x000F_FFFF)
             },
             _ => todo!(),
@@ -168,7 +169,7 @@ impl Addressable for SerialInterface {
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
                 self.interrupt_flag = true;
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u8(value, offset & 0x000F_FFFF)
             },
             _ => todo!(),

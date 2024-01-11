@@ -44,7 +44,6 @@ const Cop2_VCE: usize = 2;
 /// Resides on the die of the RCP.
 pub struct Rsp {
     comms: SystemCommunication,
-    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     core: Arc<Mutex<RspCpuCore>>,
     shared_state: Arc<RwLock<RspSharedState>>,
@@ -55,7 +54,6 @@ pub struct Rsp {
     // access to RspCpuCore memory
     mem: Arc<RwLock<Vec<u32>>>,
 
-    start_dma_tx: mpsc::Sender<DmaInfo>,
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
 
@@ -87,8 +85,9 @@ pub struct RspSharedState {
     signals: u32,
 }
 
-#[derive(Debug)]
 struct RspCpuCore {
+    comms: SystemCommunication,
+
     num_steps: u64,
 
     // registers
@@ -133,7 +132,6 @@ struct RspCpuCore {
     shared_state: Arc<RwLock<RspSharedState>>,
 
     broke_tx: Option<mpsc::Sender<bool>>,
-    start_dma_tx: mpsc::Sender<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
 
     // running state
@@ -151,7 +149,7 @@ struct RspCpuCore {
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
 
 impl Rsp {
-    pub fn new(rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>, comms: SystemCommunication) -> Rsp {
+    pub fn new(comms: SystemCommunication, rdp: Arc<Mutex<Rdp>>) -> Rsp {
         let mem = Arc::new(RwLock::new(vec![0u32; 2*1024]));
 
         let shared_state = Arc::new(RwLock::new(RspSharedState::default()));
@@ -159,11 +157,10 @@ impl Rsp {
         // dma_completed channel is created here and sent with every DmaInfo message
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
-        let core = Arc::new(Mutex::new(RspCpuCore::new(mem.clone(), shared_state.clone(), rdp, start_dma_tx.clone(), dma_completed_tx.clone())));
+        let core = Arc::new(Mutex::new(RspCpuCore::new(comms.clone(), mem.clone(), shared_state.clone(), rdp, dma_completed_tx.clone())));
 
         Rsp {
             comms: comms,
-            mi_interrupts_tx: mi_interrupts_tx,
 
             core: core,
 
@@ -172,7 +169,6 @@ impl Rsp {
             wakeup_tx: None,
             broke_rx: None,
 
-            start_dma_tx: start_dma_tx,
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
 
@@ -199,7 +195,7 @@ impl Rsp {
         }
 
         let mut hle = if let Some(ref hle_command_buffer) = self.comms.hle_command_buffer {
-            Some(Hle::new(self.start_dma_tx.clone(), hle_command_buffer.clone()))
+            Some(Hle::new(self.comms.start_dma_tx.as_ref().unwrap().clone(), hle_command_buffer.clone()))
         } else {
             None
         };
@@ -312,7 +308,7 @@ impl Rsp {
                 shared_state.dma_current_read_length  = 0xFF8;
                 shared_state.dma_current_write_length = 0xFF8;
                 shared_state.dma_busy = true;
-                self.start_dma_tx.send(dma_info).unwrap(); 
+                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap(); 
             }
         }
     }
@@ -327,7 +323,7 @@ impl Rsp {
                     self.halted = true;
                     let shared_state = self.shared_state.read().unwrap();
                     if shared_state.intbreak {
-                        self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                        self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
                     }
                 }
             }
@@ -483,7 +479,7 @@ impl Rsp {
                     shared_state.dma_current_read_length  = 0xFF8;
                     shared_state.dma_current_write_length = 0xFF8;
                     shared_state.dma_busy = true;
-                    self.start_dma_tx.send(dma_info).unwrap();
+                    self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                 }
             },
 
@@ -569,12 +565,12 @@ impl Rsp {
 
                 // SET_INTR: manually trigger SP interrupt
                 if (value & 0x10) != 0 {
-                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                    self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
                 }
 
                 // CLR_INTR: ack SP interrupt
                 if (value & 0x08) != 0 {
-                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_SP, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                    self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::ClearInterrupt)).unwrap();
                 }
 
                 // loop over the signals
@@ -749,7 +745,7 @@ impl Addressable for Rsp {
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
-    fn new(mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, rdp: Arc<Mutex<Rdp>>, start_dma_tx: mpsc::Sender<DmaInfo>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
+    fn new(comms: SystemCommunication, mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, rdp: Arc<Mutex<Rdp>>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
         // initialize the reciprocal table.. the algorithm is widely available but I'll include the Ares license here as well, since it's used in n64-systemtest
         // The generation of the RCP and RSP tables was ported from Ares: https://github.com/ares-emulator/ares/blob/acd2130a4d4c9e7208f61e0ff762895f7c9b8dc6/ares/n64/rsp/rsp.cpp#L102
         // which uses the following license:
@@ -792,6 +788,8 @@ impl RspCpuCore {
         info!(target: "RSP", "RSQ table generation took {:.2?}", alg_time);
 
         let mut core = RspCpuCore {
+            comms: comms,
+
             num_steps: 0,
             pc: 0,
             current_instruction_pc: 0,
@@ -824,7 +822,6 @@ impl RspCpuCore {
             mem: mem,
             shared_state: shared_state,
             broke_tx: None,
-            start_dma_tx: start_dma_tx,
             dma_completed_tx: dma_completed_tx,
 
             halted: false,
@@ -1461,7 +1458,7 @@ impl RspCpuCore {
                             shared_state.dma_current_read_length  = 0xFF8;
                             shared_state.dma_current_write_length = 0xFF8;
                             shared_state.dma_busy = true;
-                            self.start_dma_tx.send(dma_info).unwrap();
+                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                         }
 
                         Ok(())
@@ -1499,7 +1496,7 @@ impl RspCpuCore {
                             shared_state.dma_current_read_length  = 0xFF8;
                             shared_state.dma_current_write_length = 0xFF8;
                             shared_state.dma_busy = true;
-                            self.start_dma_tx.send(dma_info).unwrap();
+                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                         }
 
                         Ok(())

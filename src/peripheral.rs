@@ -13,6 +13,8 @@ use mips::{InterruptUpdate, InterruptUpdateMode, IMask_PI};
 /// N64 Peripheral Interface
 /// Connects EEPROM, cartridge, controllers, and more
 pub struct PeripheralInterface {
+    comms: SystemCommunication,
+
     dram_addr: u32,
     cart_addr: u32,
     dma_status: u32,
@@ -21,12 +23,8 @@ pub struct PeripheralInterface {
     cartridge_rom: Vec<u32>,
     cartridge_rom_write: Option<u32>,
 
-    start_dma_tx: mpsc::Sender<DmaInfo>,
-
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
-
-    mi_interrupts_tx: mpsc::Sender<InterruptUpdate>,
 
     // ISViewer 
     debug_buffer: Vec<u8>,
@@ -37,7 +35,7 @@ pub struct PeripheralInterface {
 }
 
 impl PeripheralInterface {
-    pub fn new(cartridge_rom: Vec<u8>, start_dma_tx: mpsc::Sender<DmaInfo>, mi_interrupts_tx: mpsc::Sender<InterruptUpdate>) -> PeripheralInterface {
+    pub fn new(comms: SystemCommunication, cartridge_rom: Vec<u8>) -> PeripheralInterface {
         // convert cartridge_rom to u32
         let mut word_rom = vec![];
         for i in (0..cartridge_rom.len()).step_by(4) {
@@ -48,6 +46,8 @@ impl PeripheralInterface {
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
         PeripheralInterface {
+            comms: comms,
+
             dram_addr: 0,
             cart_addr: 0,
             dma_status: 0,
@@ -56,12 +56,8 @@ impl PeripheralInterface {
             cartridge_rom: word_rom,
             cartridge_rom_write: None,
 
-            start_dma_tx: start_dma_tx,
-
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
-
-            mi_interrupts_tx: mi_interrupts_tx,
 
             // ISViewer
             debug_buffer: vec![0; 0xFFE0], // ISViewer buffer starts at 0x......20, so buf size is 0x10000-0x20
@@ -77,7 +73,7 @@ impl PeripheralInterface {
         if let Ok(_) = self.dma_completed_rx.try_recv() {
             if (self.dma_status & 0x01) != 0 {
                 self.dma_status = 0x08;
-                self.mi_interrupts_tx.send(InterruptUpdate(IMask_PI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_PI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
         }
     }
@@ -200,7 +196,7 @@ impl PeripheralInterface {
                         };
 
                         self.dma_status |= 0x01;
-                        self.start_dma_tx.send(dma_info).unwrap();
+                        self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                         WriteReturnSignal::None
                     } else {
                         WriteReturnSignal::None
@@ -218,7 +214,7 @@ impl PeripheralInterface {
                 }
 
                 if (value & 0x02) != 0 { // clear INT flag 
-                    self.mi_interrupts_tx.send(InterruptUpdate(IMask_PI, InterruptUpdateMode::ClearInterrupt)).unwrap();
+                    self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_PI, InterruptUpdateMode::ClearInterrupt)).unwrap();
                     self.dma_status &= !0x08;
                 }
 

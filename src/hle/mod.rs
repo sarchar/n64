@@ -4,6 +4,7 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 
+use cgmath::prelude::*;
 use cgmath::Matrix4;
 
 use crate::*;
@@ -66,6 +67,7 @@ pub struct Hle {
     dl_stack: Vec<DLStackEntry>,
 
     segments: [u32; 16],
+    matrices: Vec<Matrix4<f32>>,
     // F3DZEX has storage for 32 vertices
     vertices: [F3DZEX2_Vertex; 32],
 
@@ -98,6 +100,7 @@ impl Hle {
 
             dl_stack: vec![],
             segments: [0u32; 16],
+            matrices: vec![],
             fill_color: 0,
 
             vertices: [F3DZEX2_Vertex::default(); 32],
@@ -118,6 +121,7 @@ impl Hle {
         self.dl_stack.clear();
         self.segments = [0u32; 16];
         self.vertices = [F3DZEX2_Vertex::default(); 32];
+        self.matrices.clear();
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -376,7 +380,7 @@ impl Hle {
         let c1 = [elem(0,  0), elem(2,  0), elem(4,  0), elem(6,  0)];
         let c2 = [elem(1, 16), elem(3, 16), elem(5, 16), elem(7, 16)];
         let c3 = [elem(1,  0), elem(3,  0), elem(5,  0), elem(7,  0)];
-        let cgmat = Matrix4::from_cols(c0.into(), c1.into(), c2.into(), c3.into());
+        let mut cgmat = Matrix4::from_cols(c0.into(), c1.into(), c2.into(), c3.into());
 
         //.for row in 0..4 {
         //.    match row {
@@ -422,6 +426,19 @@ impl Hle {
         //.    }
 
         //.}
+
+        let set_index = self.matrices.len();
+        if set_index != 0 && mul {
+            let other = &self.matrices[set_index - 1];
+            cgmat = cgmat * other;
+        }
+
+        if set_index == 0 || push {
+            self.matrices.push(cgmat);
+            assert!(self.matrices.len() < 16);
+        } else {
+            self.matrices[set_index - 1] = cgmat;
+        }
 
         if proj {
             self.send_hle_render_command(HleRenderCommand::SetProjectionMatrix(cgmat));
