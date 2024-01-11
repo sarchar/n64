@@ -179,6 +179,8 @@ impl Hle {
                 self.command_table[0xEE] = Hle::handle_setprimdepth;
                 self.command_table[0xED] = Hle::handle_setscissor;
                 self.command_table[0xEC] = Hle::handle_setconvert;
+                self.command_table[0xEB] = Hle::handle_setkeyr;
+                self.command_table[0xEA] = Hle::handle_setkeygb;
                 self.command_table[0xE9] = Hle::handle_rdpfullsync;
                 self.command_table[0xE8] = Hle::handle_rdptilesync;
                 self.command_table[0xE7] = Hle::handle_rdppipesync;
@@ -704,6 +706,14 @@ impl Hle {
         let x1 = ((self.command >> 12) & 0xFFF) as u16;
         let y1 = ((self.command >>  0) & 0xFFF) as u16;
         trace!(target: "HLE", "{} gsDPSetScissor({}, {}, {}, {}, {})", self.command_prefix, m, x0, y0, x1 >> 2, y1 >> 2);
+    }
+
+    fn handle_setkeyr(&mut self) { // G_SETKEYR
+        trace!(target: "HLE", "{} gsDPSetKeyR(...)", self.command_prefix);
+    }
+
+    fn handle_setkeygb(&mut self) { // G_SETKEYGB
+        trace!(target: "HLE", "{} gsDPSetKeyGB(...)", self.command_prefix);
     }
 
     fn handle_setconvert(&mut self) { // G_SETCONVERT
