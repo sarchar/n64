@@ -62,7 +62,7 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(boot_rom: Vec<u8>, cartridge_rom: Vec<u8>, mut comms: SystemCommunication) -> Rcp {
+    pub fn new(mut comms: SystemCommunication, boot_rom: Vec<u8>, cartridge_rom: Vec<u8>) -> Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
         comms.start_dma_tx = Some(start_dma_tx.clone());
@@ -217,8 +217,6 @@ impl Rcp {
 
     // Slow, maybe at some point we can do more of a direct memory copy
     fn do_dma(&mut self, dma_info: &mut DmaInfo) -> Result<(), ReadWriteFault> {
-        //debug!(target: "RCP", "performing DMA!");
-
         if (dma_info.length % 4) != 0 {
             return Err(ReadWriteFault::Invalid);
         } 

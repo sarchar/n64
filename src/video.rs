@@ -168,7 +168,8 @@ impl VideoInterface {
         // CPU runs at 93.75MHz, so we should render a frame every 1,562,500 cpu cycles
         // Just assuming a 320x240 resolution, we should complete a scanline every ~6510 cycles
         const NUM_LINES: u32 = 280;
-        const CYC_PER_SCANLINE: u64 = 1562500 / (NUM_LINES as u64);
+//        const CYC_PER_SCANLINE: u64 = 1562500 / (NUM_LINES as u64);
+        const CYC_PER_SCANLINE: u64 = 400000 / (NUM_LINES as u64);
         self.cycle_count += cpu_cycles_elapsed;
         while self.cycle_count >= CYC_PER_SCANLINE { 
             self.cycle_count -= CYC_PER_SCANLINE;
@@ -177,6 +178,7 @@ impl VideoInterface {
             if self.current_line == self.interrupt_line {
                 //TODO enabling the interrupt causes LoZ to stop working?
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.comms.check_interrupts.store(1, Ordering::SeqCst);
             }
         }
     }

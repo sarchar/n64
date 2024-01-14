@@ -1226,6 +1226,7 @@ name = "n64"
 version = "0.0.1"
 dependencies = [
  "atomicring",
+ "backtrace",
  "bytemuck",
  "cc",
  "cfg-if",

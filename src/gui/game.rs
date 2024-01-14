@@ -6,7 +6,7 @@ use std::time::Instant;
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 
-//use winit::event::VirtualKeyCode;
+use winit::event::VirtualKeyCode;
 use image::GenericImageView;
 use wgpu::util::DeviceExt;
 use cgmath::prelude::*;
@@ -39,13 +39,8 @@ const GAME_TEXTURE_INDICES: &[u16] = &[
     1, 3, 2,
 ];
 
-const GAME_INDICES: &[u16] = &[
-    0, 1, 2,
-    0, 2, 3,
-];
-
 impl Vertex {
-    fn new() -> Self {
+    fn _new() -> Self {
         Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], }
     }
 
@@ -73,8 +68,12 @@ impl Vertex {
         }
     }
 
-    fn offset_of(index: usize) -> wgpu::BufferAddress {
-        (index * std::mem::size_of::<[f32; 9]>()) as wgpu::BufferAddress
+    fn size() -> usize {
+        std::mem::size_of::<[f32; 9]>() as usize
+    }
+
+    fn _offset_of(index: usize) -> wgpu::BufferAddress {
+        (index * Self::size()) as wgpu::BufferAddress
     }
 }
 
@@ -97,6 +96,14 @@ impl MvpPacked {
         Self {
            mvp_matrix: cgmath::Matrix4::identity().into(),
         }
+    }
+
+    fn size() -> usize {
+        std::mem::size_of::<[f32; 16]>() as usize
+    }
+
+    fn offset_of(index: usize) -> wgpu::DynamicOffset {
+        (index * Self::size()) as wgpu::DynamicOffset
     }
 }
 
@@ -141,6 +148,9 @@ pub struct Game {
     game_frame_count: u64,
     game_last_fps_time: Instant,
     game_fps: f64,
+
+    vertex_buffer_writes: u32,
+    index_buffer_writes: u32,
 }
 
 impl App for Game {
@@ -346,7 +356,7 @@ impl App for Game {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
+                            has_dynamic_offset: true,
                             min_binding_size: None,
                         },
                         count: None,
@@ -412,21 +422,22 @@ impl App for Game {
             multiview: None,
         });
 
-        // reserve space for 32 vertices
-        let vertices = &[Vertex::new(); 32];
-        let vertex_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        // reserve space for 1024 vertices
+        let vertex_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
                 label: Some("Game Vertex Buffer"),
-                contents: bytemuck::cast_slice(vertices),
+                size : (Vertex::size() * 64 * 1024) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             }
         );
 
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let index_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
                 label: Some("Game Index Buffer"),
-                contents: bytemuck::cast_slice(GAME_INDICES),
+                size : (std::mem::size_of::<u16>() * 10 * 1024) as u64,
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             }
         );
 
@@ -470,14 +481,33 @@ impl App for Game {
             game_frame_count: 0,
             game_last_fps_time: Instant::now(),
             game_fps: 0.0,
+
+            vertex_buffer_writes: 0,
+            index_buffer_writes: 0,
         }
     }
 
-    fn update(&mut self, _appwnd: &AppWindow, _delta_time: f32) {
+    fn update(&mut self, appwnd: &AppWindow, _delta_time: f32) {
         self.ui_frame_count += 1;
         if (self.ui_frame_count % 10) == 0 {
             self.ui_fps = 10.0 / self.ui_last_fps_time.elapsed().as_secs_f64();
             self.ui_last_fps_time = Instant::now();
+        }
+
+        // CTRL+F5+n to generate interrupt signal n
+        if appwnd.input().key_held(VirtualKeyCode::LControl) {
+            const KEYS: &[VirtualKeyCode] = &[
+                VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7,
+                VirtualKeyCode::F8, VirtualKeyCode::F9, VirtualKeyCode::F10,
+            ];
+            if let Some(mi) = &self.comms.mi_interrupts_tx {
+                for i in 0..6 {
+                    if appwnd.input().key_pressed(KEYS[i]) {
+                        println!("generating interrupt {}", i);
+                        mi.send(InterruptUpdate(i as u32, InterruptUpdateMode::SetInterrupt)).unwrap();
+                    }
+                }
+            }
         }
 
         //let input = appwnd.input();
@@ -591,7 +621,18 @@ impl App for Game {
                     );
                 }
 
-                self.raw_render_texture_bind_group.as_ref().unwrap()
+                //if let Some((addr, bind_group)) = self.game_render_texture_bind_groups.iter().last() {
+                //    if (self.ui_frame_count & 1) == 0 {
+                //        let (addr, bind_group) = self.game_render_texture_bind_groups.iter().next().unwrap();
+                //        println!("rendering ${addr:08X}");
+                //        bind_group
+                //    } else {
+                //        println!("rendering ${addr:08X}");
+                //        bind_group
+                //    }
+                //} else {
+                    self.raw_render_texture_bind_group.as_ref().unwrap()
+                //}
             }
         };
 
@@ -722,13 +763,14 @@ impl Game {
                     //println!("got view: {:?}", m);
                     // On N64, the Z component is fixed point with 10 bits of precision, so that
                     // is scaled first to 1..-1 and then scaled to wgpu's 0..1
-                    self.game_modelview = OPENGL_TO_WGPU_MATRIX * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0) * m.transpose();
+                    //self.game_modelview = OPENGL_TO_WGPU_MATRIX * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0) * m.transpose();
+                    self.game_modelview = m * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0);
                 },
 
                 HleRenderCommand::SetProjectionMatrix(m) => {
                     //println!("got proj: {:?}", m);
 
-                    self.game_projection = m;
+                    self.game_projection = OPENGL_TO_WGPU_MATRIX * m;
                     //self.game_projection = cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0/1023.0).transpose() * m;
                 },
 
@@ -739,7 +781,7 @@ impl Game {
                     if let HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh } = self.game_viewport {
                         //let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
                         let mvp_matrix = cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
-                        let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.transpose().into() };
+                        let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
                         appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
 
                         //println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
@@ -785,7 +827,7 @@ impl Game {
 
                             render_pass.set_pipeline(&self.game_pipeline);
                             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
+                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[0 as wgpu::DynamicOffset]);
                             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                             render_pass.draw_indexed(0..6 as _, 0, 0..1);
@@ -794,7 +836,7 @@ impl Game {
                     }
                 },
 
-                HleRenderCommand::VertexData(v, start_index) => {
+                HleRenderCommand::VertexData(v) => {
                     let mut vcopy = Vec::new();
                     for vdata in v.iter() {
                         let vnew = Vertex {
@@ -815,28 +857,37 @@ impl Game {
                     }
 
                     let vertices = &vcopy;
-                    appwnd.queue().write_buffer(&self.vertex_buffer, Vertex::offset_of(start_index), bytemuck::cast_slice(vertices));
+                    appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+                    self.vertex_buffer_writes += vcopy.len() as u32;
                 },
 
-                HleRenderCommand::DrawTriangle(v0, v1, v2) => {
+                HleRenderCommand::IndexData(v) => {
+                    let indices = &v;
+                    appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
+                },
+
+                HleRenderCommand::MatrixData(v) => {
+                    let mut vcopy = Vec::new();
+                    for vdata in v.iter() {
+                        let vnew = MvpPacked {
+                            mvp_matrix: (*vdata).into(),
+                        };
+                        vcopy.push(vnew);
+                    }
+
+                    let matrices = &vcopy;
+                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(matrices));
+                },
+
+                HleRenderCommand::RenderTriangleLists(v) => {
                     if let None = self.current_render_texture_view { continue; }
                     let view = self.current_render_texture_view.as_ref().unwrap();
 
-                    // first improvement would be to buffer this draw call until more triangle calls come in and render them all at once
-                    // maybe it's naive of me to think that a new render pass for every triangle is inefficient?
-                    let mvp_matrix = self.game_projection * self.game_modelview;
-                    let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
-                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
-
-                    // upload indices to be rendered
-                    let indices: &[u16] = &[v0, v1, v2, 0, 0, 0];
-                    appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
-
                     let mut encoder: wgpu::CommandEncoder =
-                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Fill Rect Encoder") });
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Draw Triangle Encoder") });
                     {
                         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Game Render Triangle Pass"),
+                            label: Some("Draw Triangle Render Pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: view,
                                 resolve_target: None,
@@ -846,18 +897,21 @@ impl Game {
                                 },
                             })],
                             depth_stencil_attachment: None,
-                            //.occlusion_query_set: None,
-                            //.timestamp_writes: None,
                         });
 
                         render_pass.set_pipeline(&self.game_pipeline);
-                        //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
                         render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                        render_pass.set_bind_group(1, &self.mvp_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        render_pass.draw_indexed(0..3 as _, 0, 0..1);
+
+                        for tl in v {
+                            // using the dynamic offset into the mvp uniform buffer, we can select which matrix is used for the triangle list
+                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(tl.matrix_index as usize)]);
+                            let last_index = tl.start_index + tl.num_indices;
+                            render_pass.draw_indexed(tl.start_index..last_index as _, 0, 0..1);
+                        }
                     }
+
                     appwnd.queue().submit(Some(encoder.finish()));
                 },
 
@@ -870,9 +924,14 @@ impl Game {
 
                     self.reset_render_state();
 
+                    trace!(target: "RENDER", "vertex buffer writes: {}, index buffer writes: {}", self.vertex_buffer_writes, self.index_buffer_writes);
+                    self.vertex_buffer_writes = 0;
+                    self.index_buffer_writes = 0;
+
                     // trigger RDP interrupt to signal render is done
                     if let Some(mi) = &self.comms.mi_interrupts_tx {
                         mi.send(InterruptUpdate(IMask_DP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                        self.comms.check_interrupts.store(1, Ordering::SeqCst);
                     }
                     
                     break 'cmd_loop;

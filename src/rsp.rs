@@ -195,7 +195,7 @@ impl Rsp {
         }
 
         let mut hle = if let Some(ref hle_command_buffer) = self.comms.hle_command_buffer {
-            Some(Hle::new(self.comms.start_dma_tx.as_ref().unwrap().clone(), hle_command_buffer.clone()))
+            Some(Hle::new(self.comms.clone(), hle_command_buffer.clone()))
         } else {
             None
         };
@@ -232,6 +232,7 @@ impl Rsp {
 
                         // Task type is the first element of the OSTask structure, which is at 0xFC0 
                         let task_type = c.read_u32(0x0FC0).unwrap();
+                        debug!(target: "RSP", "processing task type {}", task_type);
                         match task_type {
                             1 => { // M_GFXTASK
                                 let dl_start = c.read_u32(0x0FF0).unwrap(); // OSTask->data_ptr
@@ -250,11 +251,12 @@ impl Rsp {
                                     // reclaim lock
                                     let mut c = core.lock().unwrap();
 
-                                    // set SIG2 and break, which usually triggers RI
+                                    // set SIG2 (SP_STATUS_TASKDONE)
                                     {
                                         let mut shared_state = c.shared_state.write().unwrap();
                                         shared_state.signals |= 1 << 2;
                                     }
+                                    // and break, which usually triggers SP interrupt
                                     let _ = c.special_break().unwrap();
 
                                     // RSP isn't running
@@ -264,6 +266,8 @@ impl Rsp {
                                         let mut rdp = c.rdp.lock().unwrap();
                                         rdp.write_u32(0x04, 0x0010_000C as usize).unwrap(); // write CLR_FREEZE bit
                                     }
+                                } else {
+                                    todo!();
                                 }
                             },
 
@@ -314,17 +318,13 @@ impl Rsp {
     }
 
     pub fn is_broke(&mut self) -> bool {
-        // check if BREAK happened
+        // update the local BREAK status
         if let Some(broke_rx) = &self.broke_rx {
-            if let Ok(set) = broke_rx.try_recv() {
+            while let Ok(set) = broke_rx.try_recv() {
                 self.broke = false;
                 if set {
                     self.broke = true;
                     self.halted = true;
-                    let shared_state = self.shared_state.read().unwrap();
-                    if shared_state.intbreak {
-                        self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
-                    }
                 }
             }
         }
@@ -608,7 +608,7 @@ impl Rsp {
 
             // SP_PC
             0x8_0000 => {
-                //debug!(target: "RSP", "write SP_PC value=${:08X}", value);
+                trace!(target: "RSP", "write SP_PC value=${:08X}", value);
 
                 let mut core = self.core.lock().unwrap();
                 core.pc = value & 0x0FFC;
@@ -1241,6 +1241,13 @@ impl RspCpuCore {
         // write break signal to channel
         if let Some(broke_tx) = &self.broke_tx {
             broke_tx.send(true).unwrap();
+        }
+
+        // trigger interrupt
+        let shared_state = self.shared_state.read().unwrap();
+        if shared_state.intbreak {
+            self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+            self.comms.check_interrupts.store(1, Ordering::SeqCst);
         }
 
         Ok(())

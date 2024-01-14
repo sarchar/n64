@@ -39,7 +39,7 @@ fn main() {
     let default_filter = filter::Targets::new()
                             .with_target("rustyline", tracing_core::Level::ERROR)
                             //.with_target("RCP", tracing_core::Level::TRACE)
-                            .with_target("RDP", tracing_core::Level::DEBUG)
+                            //.with_target("RDP", tracing_core::Level::TRACE)
                             //.with_target("VI", tracing_core::Level::DEBUG)
                             //.with_target("RSP", tracing_core::Level::DEBUG)
                             //.with_target("JOY", tracing_core::Level::DEBUG)
@@ -102,7 +102,7 @@ fn main() {
 
     let program_rom = String::from(args[1].as_str());
     let make_system = move |comms: SystemCommunication| {
-        System::new("bios/pifrom.v64", &program_rom, comms)
+        System::new(comms, "bios/pifrom.v64", &program_rom)
     };
 
     // either run or debug

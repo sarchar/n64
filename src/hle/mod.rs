@@ -1,14 +1,25 @@
 use std::mem;
-use std::sync::mpsc;
 
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 
 use cgmath::prelude::*;
-use cgmath::Matrix4;
+use cgmath::{Matrix4, Vector4};
 
 use crate::*;
-use rcp::DmaInfo;
+
+// Z values in OpenGL ranges from -1..1 but DirectX (what WGPU uses) 
+// uses a Z range of 0..1. This matrix converts from OpenGL to DirectX.
+// Note that the matrix is actually transposed from how it looks written out
+// (col 2 row 3 is 0.5)
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
+    Vector4::new(1.0, 0.0, 0.0, 0.0),
+    Vector4::new(0.0, 1.0, 0.0, 0.0),
+    Vector4::new(0.0, 0.0, 0.5, 0.5),
+    Vector4::new(0.0, 0.0, 0.0, 1.0),
+);
+
 
 #[derive(Debug, Clone)]
 pub enum HleRenderCommand {
@@ -17,9 +28,11 @@ pub enum HleRenderCommand {
     Viewport { x: f32, y: f32, w: f32, h: f32 },
     SetProjectionMatrix(Matrix4<f32>),
     SetModelViewMatrix(Matrix4<f32>),
-    VertexData(Vec<F3DZEX2_Vertex>, usize),
+    VertexData(Vec<F3DZEX2_Vertex>),
+    IndexData(Vec<u16>),
+    MatrixData(Vec<Matrix4<f32>>),
     FillRectangle { x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
-    DrawTriangle(u16, u16, u16),
+    RenderTriangleLists(Vec<TriangleList>),
     //Vertices(u32),
     Sync,
 }
@@ -59,23 +72,39 @@ struct DLStackEntry {
     base_address: u32,
 }
 
+#[derive(Clone,Debug,Default)]
+pub struct TriangleList {
+    pub matrix_index: u32,
+    pub start_index: u32,
+    pub num_indices: u32,
+}
+
 pub struct Hle {
+    comms: SystemCommunication,
+
     hle_command_buffer: Arc<HleCommandBuffer>,
     software_version: HleRspSoftwareVersion,
     software_crc: u32,
 
     dl_stack: Vec<DLStackEntry>,
-
     segments: [u32; 16],
-    matrices: Vec<Matrix4<f32>>,
+
     // F3DZEX has storage for 32 vertices
-    vertices: [F3DZEX2_Vertex; 32],
+    vertices: Vec<F3DZEX2_Vertex>,
+    vertex_stack: [u16; 32],
+    indices: Vec<u16>,
+
+    matrices: Vec<Matrix4<f32>>,             // all the unique matrices in the DL
+    matrix_stack: Vec<Matrix4<f32>>,         // modelview only, not multiplied by proj
+    current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
+    current_projection_matrix: Matrix4<f32>, // current projection matrix
+    current_matrix_index: Option<u32>,       // index into matrices[]; None when the current matrix isn't pushed yet
+
+    // draw_list an array of triangle lists, where each triangle shares common state
+    draw_list: Vec<TriangleList>,
+    num_tris: u32,
 
     fill_color: u32,
-
-    dma_completed_rx: mpsc::Receiver<DmaInfo>,
-    dma_completed_tx: mpsc::Sender<DmaInfo>,
-    start_dma_tx: mpsc::Sender<DmaInfo>,
 
     command_table: [DLCommand; 256],
     command_address: u32,
@@ -90,23 +119,31 @@ const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let
 type DLCommand = fn(&mut Hle) -> ();
 
 impl Hle {
-    pub fn new(start_dma_tx: mpsc::Sender<DmaInfo>, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
-        let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
-
+    pub fn new(comms: SystemCommunication, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
         Self {
+            comms: comms,
+
             hle_command_buffer: hle_command_buffer,
             software_version: HleRspSoftwareVersion::Uninitialized,
             software_crc: 0,
 
             dl_stack: vec![],
             segments: [0u32; 16],
-            matrices: vec![],
-            fill_color: 0,
 
-            vertices: [F3DZEX2_Vertex::default(); 32],
-            dma_completed_rx: dma_completed_rx,
-            dma_completed_tx: dma_completed_tx,
-            start_dma_tx: start_dma_tx,
+            vertices: vec![],
+            vertex_stack: [0; 32],
+            indices: vec![],
+
+            matrices: vec![],
+            matrix_stack: vec![],
+            current_matrix: Matrix4::identity(),
+            current_projection_matrix: Matrix4::identity(),
+            current_matrix_index: None,
+
+            draw_list: vec![],
+            num_tris: 0,
+
+            fill_color: 0,
 
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
@@ -120,12 +157,21 @@ impl Hle {
     fn reset_display_list(&mut self) {
         self.dl_stack.clear();
         self.segments = [0u32; 16];
-        self.vertices = [F3DZEX2_Vertex::default(); 32];
+        self.vertices.clear();
+        self.vertex_stack = [0; 32];
+        self.indices.clear();
         self.matrices.clear();
+        self.matrix_stack.clear();
+        self.current_matrix = Matrix4::identity();
+        self.current_projection_matrix = Matrix4::identity();
+        self.current_matrix_index = None;
+        self.draw_list.clear();
+        self.num_tris = 0;
+        self.fill_color = 0;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
-        let ucode = self.load_display_list(ucode_address, 4 * 1024);
+        let ucode = self.load_from_rdram(ucode_address, 4 * 1024);
 
         self.software_crc = 0;
 
@@ -202,7 +248,7 @@ impl Hle {
     }
 
     pub fn process_display_list(&mut self, dl_start: u32, dl_length: u32, ucode_address: u32) {
-        trace!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
+        info!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
 
         if let HleRspSoftwareVersion::Uninitialized = self.software_version {
             if !self.detect_software_version(ucode_address) { 
@@ -214,7 +260,7 @@ impl Hle {
 
         // sometimes dl_length ends up greater than DL_FETCH_SIZE, so it would reduce the # of DMAs
         let cur_dl = DLStackEntry {
-            dl: self.load_display_list(dl_start, dl_length),
+            dl: self.load_from_rdram(dl_start, dl_length).to_vec(),
             base_address: dl_start,
             ..Default::default()
         };
@@ -225,6 +271,28 @@ impl Hle {
             let cmd = self.next_display_list_command();
             self.process_display_list_command(addr, cmd);
         }
+
+        println!("found {} matrices", self.matrices.len());
+        println!("found {} vertices", self.vertices.len());
+        println!("found {} indices", self.indices.len());
+        println!("found {} draw calls", self.draw_list.len());
+        println!("found {} tris", self.num_tris);
+
+        // upload verts
+        let vertices = std::mem::replace(&mut self.vertices, vec![]);
+        self.send_hle_render_command(HleRenderCommand::VertexData(vertices));
+
+        // upload indices
+        let indices = std::mem::replace(&mut self.indices, vec![]);
+        self.send_hle_render_command(HleRenderCommand::IndexData(indices));
+
+        // upload matrices
+        let matrices = std::mem::replace(&mut self.matrices, vec![]);
+        self.send_hle_render_command(HleRenderCommand::MatrixData(matrices));
+
+        // issue draw commands
+        let draw_list = std::mem::replace(&mut self.draw_list, vec![]);
+        self.send_hle_render_command(HleRenderCommand::RenderTriangleLists(draw_list));
 
         self.send_hle_render_command(HleRenderCommand::Sync);
     }
@@ -246,7 +314,7 @@ impl Hle {
                 cur.base_address + cur.pc * 4
             };
 
-            let dl = self.load_display_list(load_address, DL_FETCH_SIZE);
+            let dl = self.load_from_rdram(load_address, DL_FETCH_SIZE);
             {
                 let cur = self.dl_stack.last_mut().unwrap();
                 cur.dl.extend_from_slice(&dl);
@@ -259,27 +327,13 @@ impl Hle {
         r
     }
 
-    fn load_display_list(&self, start: u32, length: u32) -> Vec<u32> {
-        let dma_info = DmaInfo {
-            initiator      : "HLE-DL",
-            source_address : start,
-            dest_address   : 0xFFFF_FFFF,
-            count          : 1,
-            length         : length,
-            completed      : Some(self.dma_completed_tx.clone()),
-            ..Default::default()
-        };
-
-        self.start_dma_tx.send(dma_info).unwrap();
-        match self.dma_completed_rx.recv() {
-            Ok(dma_info) => {
-                dma_info.internal_buffer.unwrap()
-            },
-
-            Err(e) => {
-                panic!("shouldn't happen: {}", e);
-            },
-        }
+    fn load_from_rdram(&self, start: u32, length: u32) -> Vec<u32> {
+        let access = self.comms.rdram.read();
+        let rdram: &[u32] = access.as_deref().unwrap().as_ref().unwrap();
+        let length = ((length + 7) & !7) as usize;
+        let start = ((start & !0x8000_0000) >> 2) as usize;
+        let end   = start + (length >> 2);
+        rdram[start..end].into()
     }
 
     // read memory until a \0 is encountered, and decode into a printable string
@@ -292,7 +346,7 @@ impl Hle {
         let mut skip_one = (start & 0x04) == 0x04;
 
         loop {
-            let block = self.load_display_list(start, block_size);
+            let block = self.load_from_rdram(start, block_size);
             for e in block {
                 if skip_one {
                     skip_one = false;
@@ -360,7 +414,7 @@ impl Hle {
         if proj { s.push_str("|G_MTX_PROJECTION"); } else { s.push_str("|G_MTX_MODELVIEW"); }
         trace!(target: "HLE", "{} gsSPMatrix(0x{:08X}, {})", self.command_prefix, addr, s);
 
-        let mtx_data = self.load_display_list(translated_addr, 64);
+        let mtx_data = self.load_from_rdram(translated_addr, 64);
         //let mut mtx: F3DZEX2_Matrix = [[0i32; 4]; 4];
         //let mut fmtx = [[0f32; 4]; 4];
 
@@ -372,15 +426,17 @@ impl Hle {
         //
         // becomes
         //
-        // 0000.gggg 1111.hhhh 2222.iiii 3333.jjjj
-        // ..
-        // cccc.kkkk dddd.tttt eeee.uuuu ffff.vvvv
+        // [ 0000.gggg 1111.hhhh 2222.iiii 3333.jjjj ]
+        // [ ..        ..        ..        ..        ]
+        // [ cccc.ssss dddd.tttt eeee.uuuu ffff.vvvv ]
         let elem = |i, s| (((mtx_data[i] >> s) as i16) as f32) + (((mtx_data[i + 8] >> s) as u16) as f32) / 65536.0;
         let c0 = [elem(0, 16), elem(2, 16), elem(4, 16), elem(6, 16)];
         let c1 = [elem(0,  0), elem(2,  0), elem(4,  0), elem(6,  0)];
         let c2 = [elem(1, 16), elem(3, 16), elem(5, 16), elem(7, 16)];
         let c3 = [elem(1,  0), elem(3,  0), elem(5,  0), elem(7,  0)];
         let mut cgmat = Matrix4::from_cols(c0.into(), c1.into(), c2.into(), c3.into());
+        //println!("data: {mtx_data:?}");
+        //println!("matrix: {cgmat:?}");
 
         //.for row in 0..4 {
         //.    match row {
@@ -427,24 +483,28 @@ impl Hle {
 
         //.}
 
-        let set_index = self.matrices.len();
-        if set_index != 0 && mul {
-            let other = &self.matrices[set_index - 1];
-            cgmat = cgmat * other;
-        }
-
-        if set_index == 0 || push {
-            self.matrices.push(cgmat);
-            assert!(self.matrices.len() < 16);
-        } else {
-            self.matrices[set_index - 1] = cgmat;
-        }
-
         if proj {
-            self.send_hle_render_command(HleRenderCommand::SetProjectionMatrix(cgmat));
+            //println!("proj: {cgmat:?}");
+            self.current_projection_matrix = cgmat * OPENGL_TO_WGPU_MATRIX;
         } else {
-            self.send_hle_render_command(HleRenderCommand::SetModelViewMatrix(cgmat));
+            let count = self.matrix_stack.len();
+            if mul && count > 0 {
+                let other = &self.matrix_stack[count - 1];
+                cgmat = cgmat * other;
+            }
+
+            if count == 0 || (push && count < 10) {
+                self.matrix_stack.push(cgmat);
+            } else {
+                self.matrix_stack[count - 1] = cgmat;
+            }
+
+            // the matrices used on n64 expect the vertex to be left-multiplied: v' = v*(M*V*P)
+            self.current_matrix = cgmat * self.current_projection_matrix;
         }
+
+        // clear the current matrix index without creating a new state, since the matrix could be updated further
+        self.current_matrix_index = None;
     }
 
     fn handle_moveword(&mut self) { // G_MOVEWORD
@@ -476,7 +536,7 @@ impl Hle {
                     (addr & 0x00FF_FFFF) + self.segments[segment as usize] 
                 };
 
-                let vp = self.load_display_list(translated_addr, size as u32);
+                let vp = self.load_from_rdram(translated_addr, size as u32);
                 let frac: [f32; 4] = [0.00, 0.25, 0.5, 0.75];
                 let xs = (vp[0] >> 16) as i16;
                 let ys = vp[0] as i16;
@@ -564,11 +624,10 @@ impl Hle {
         let data_size = numv as usize * vtx_size;
         trace!(target: "HLE", "{} gsSPVertex(0x{:08X} [0x{:08X}], {}, {}) (size_of<vtx>={}, data_size={})", self.command_prefix, addr, translated_addr, numv, vbidx, vtx_size, data_size);
 
-        let vtx_data = self.load_display_list(translated_addr, data_size as u32);
+        let vtx_data = self.load_from_rdram(translated_addr, data_size as u32);
         assert!(data_size == vtx_data.len() * 4);
         assert!((vtx_size % 4) == 0);
 
-        let mut v = Vec::new();
         for i in 0..numv {
             let data = &vtx_data[(vtx_size * i as usize) >> 2..];
             let vtx = F3DZEX2_Vertex {
@@ -581,31 +640,65 @@ impl Hle {
             };
 
             //println!("v{}: {:?}", i+vbidx, vtx);
-            self.vertices[(i + vbidx) as usize] = vtx;
-            v.push(vtx);
+            let cur_pos = self.vertices.len() as u16;
+            self.vertices.push(vtx);
+            self.vertex_stack[(i + vbidx) as usize] = cur_pos;
         }
 
-        self.send_hle_render_command(HleRenderCommand::VertexData(v, vbidx as usize));
+        //self.send_hle_render_command(HleRenderCommand::VertexData(v, vbidx as usize));
     }
         
+    fn get_current_triangle_list(&mut self) -> &mut TriangleList {
+        if let None = self.current_matrix_index { // TODO: other ways to check if the state has changed
+            let matrix_index = self.matrices.len() as u32;
+            self.matrices.push(self.current_matrix);
+            self.current_matrix_index = Some(matrix_index);
+
+            let tl = TriangleList {
+                matrix_index: matrix_index,
+                ..Default::default()
+            };
+            self.draw_list.push(tl);
+        }
+
+        let len = self.draw_list.len();
+        &mut self.draw_list[len - 1]
+    }
+
     fn handle_tri1(&mut self) { // G_TRI1
-        let v0 = ((self.command >> 49) & 0x7F) as u16;
-        let v1 = ((self.command >> 41) & 0x7F) as u16;
-        let v2 = ((self.command >> 33) & 0x7F) as u16;
+        let v0 = ((self.command >> 49) & 0x1F) as u16;
+        let v1 = ((self.command >> 41) & 0x1F) as u16;
+        let v2 = ((self.command >> 33) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP1Triangle({}, {}, {})", self.command_prefix, v0, v1, v2);
-        self.send_hle_render_command(HleRenderCommand::DrawTriangle(v0, v1, v2));
+        // translate to global vertex index
+        let v0 = self.vertex_stack[v0 as usize];
+        let v1 = self.vertex_stack[v1 as usize];
+        let v2 = self.vertex_stack[v2 as usize];
+        let tl = self.get_current_triangle_list();
+        tl.num_indices += 3;
+        self.indices.extend_from_slice(&[v0, v1, v2]);
+        self.num_tris += 1;
     }
 
     fn handle_tri2(&mut self) { // G_TRI2
-        let v00 = ((self.command >> 49) & 0x7F) as u16;
-        let v01 = ((self.command >> 41) & 0x7F) as u16;
-        let v02 = ((self.command >> 33) & 0x7F) as u16;
-        let v10 = ((self.command >> 17) & 0x7F) as u16;
-        let v11 = ((self.command >>  9) & 0x7F) as u16;
-        let v12 = ((self.command >>  1) & 0x7F) as u16;
+        let v00 = ((self.command >> 49) & 0x1F) as u16;
+        let v01 = ((self.command >> 41) & 0x1F) as u16;
+        let v02 = ((self.command >> 33) & 0x1F) as u16;
+        let v10 = ((self.command >> 17) & 0x1F) as u16;
+        let v11 = ((self.command >>  9) & 0x1F) as u16;
+        let v12 = ((self.command >>  1) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP2Triangle({}, {}, {}, 0, {}, {}, {}, 0)", self.command_prefix, v00, v01, v02, v10, v11, v12);
-        self.send_hle_render_command(HleRenderCommand::DrawTriangle(v00, v01, v02));
-        self.send_hle_render_command(HleRenderCommand::DrawTriangle(v10, v11, v12));
+        // translate to global vertex stack
+        let v00 = self.vertex_stack[v00 as usize];
+        let v01 = self.vertex_stack[v01 as usize];
+        let v02 = self.vertex_stack[v02 as usize];
+        let v10 = self.vertex_stack[v10 as usize];
+        let v11 = self.vertex_stack[v11 as usize];
+        let v12 = self.vertex_stack[v12 as usize];
+        let tl = self.get_current_triangle_list();
+        tl.num_indices += 6;
+        self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
+        self.num_tris += 2;
     }
 
     fn handle_texrect(&mut self) { // G_TEXRECT

@@ -6,7 +6,7 @@ use std::fs;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod avx512f_wrapper;
 pub mod cop1;
@@ -138,6 +138,7 @@ pub struct SystemCommunication {
 
     // interrupt signal
     pub mi_interrupts_tx: Option<mpsc::Sender<mips::InterruptUpdate>>,
+    pub check_interrupts: Arc<AtomicU32>,
 
     // start DMA transfer signal
     pub start_dma_tx: Option<mpsc::Sender<rcp::DmaInfo>>,
@@ -154,6 +155,7 @@ impl SystemCommunication {
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
             mi_interrupts_tx  : None,
+            check_interrupts  : Arc::new(AtomicU32::new(0)),
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
         }
@@ -161,12 +163,14 @@ impl SystemCommunication {
 }
 
 pub struct System {
+    comms: SystemCommunication,
+
     pub rcp: Rc<RefCell<rcp::Rcp>>,
     pub cpu: cpu::Cpu,
 }
 
 impl System {
-    pub fn new(boot_rom_file_name: &str, cartridge_file_name: &str, comms: SystemCommunication) -> System {
+    pub fn new(comms: SystemCommunication, boot_rom_file_name: &str, cartridge_file_name: &str) -> System {
         // load cartridge into memory
         let cartridge_rom = fs::read(cartridge_file_name).expect("Could not open cartridge ROM file");
 
@@ -174,13 +178,15 @@ impl System {
         let boot_rom = fs::read(boot_rom_file_name).expect("Boot rom not found");
 
         // create the RCP and start it
-        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(boot_rom, cartridge_rom, comms)));
+        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(comms.clone(), boot_rom, cartridge_rom)));
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
         let cpu = cpu::Cpu::new(rcp.clone());
 
         System {
+            comms: comms,
+
             rcp: rcp,
             cpu: cpu,
         }
@@ -194,10 +200,12 @@ impl System {
     #[inline(always)]
     pub fn step(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
         let mut i = 0;
-        while i < cpu_cycles {
+        while i < cpu_cycles && self.comms.check_interrupts.load(Ordering::SeqCst) == 0 {
             self.cpu.step()?; // TODO should probably still call rcp.step() if this returns an error?
             i += 1;
         }
+
+        self.comms.check_interrupts.store(0, Ordering::SeqCst);
 
         let trigger_int = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();

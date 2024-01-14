@@ -252,11 +252,19 @@ impl Cpu {
         self.prefetch()?;
         self.next_is_delay_slot = false;
 
+        // setup current_instruction_pc to be correct
+        self.current_instruction_pc = self.next_instruction_pc;
+        self.is_delay_slot = false;
+
         Ok(())
     }
 
     pub fn num_steps(&self) -> &u64 {
         &self.num_steps
+    }
+
+    pub fn current_instruction_pc(&self) -> &u64 {
+        &self.current_instruction_pc
     }
 
     pub fn next_instruction(&self) -> &u32 {
@@ -454,7 +462,7 @@ impl Cpu {
 
         // set the Exception Program Counter to the currently executing instruction
         self.cp0gpr[Cop0_EPC] = (if self.is_delay_slot {
-            // also set the BD flag
+            // also set the BD flag indicating the exception was in a delay slot
             self.cp0gpr[Cop0_Cause] |= 0x8000_0000;
             self.current_instruction_pc - 4
         } else {
@@ -475,6 +483,7 @@ impl Cpu {
         });
 
         // we need to throw away next_instruction, so prefetch the new instruction now
+        self.next_is_delay_slot = false;
         self.prefetch()?;
 
         // break out of all processing
@@ -583,10 +592,11 @@ impl Cpu {
     pub fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
-        //println!("CPU: interrupt!");
         // check if the interrupts are enabled
         if ((interrupt_signal as u64) & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
-            if (self.cp0gpr[Cop0_Status] & 0x01) != 0 { // interrupt enable IE
+            if (self.cp0gpr[Cop0_Status] & 0x07) == 0x01 { // IE must be set, and EXL and ERL both clear
+                // interrupts are executed outside of step(), which means self.current_instruction_pc isn't correct
+                // and self.exception uses self.current_instruction_pc, so update it
                 self.exception(ExceptionCode_Int, false)?;
             }
         }
@@ -860,10 +870,6 @@ impl Cpu {
     pub fn step(&mut self) -> Result<(), InstructionFault> {
         self.num_steps += 1;
 
-        //if self.pc == 0x8000_02B4 {
-        //    trace!(target: "CPU", "Starting cartridge ROM!");
-        //}
-
         // increment Cop0_Count at half PClock and trigger exception
         self.half_clock ^= 1;
         self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + self.half_clock) as u64;
@@ -871,7 +877,7 @@ impl Cpu {
         if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
             // Timer interrupt enable, bit 7 of IM field 
             if self.interrupts_enabled(STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG) { // TODO move to self.timer_interrupt()
-                println!("COP0: timer interrupt");
+                debug!(target: "CPU", "COP0: timer interrupt");
                 self.timer_interrupt()?;
             }
         }
@@ -892,6 +898,9 @@ impl Cpu {
         // the address being fetched. This lets Cop0_EPC be set to the correct PC
         self.current_instruction_pc = self.pc; // For Cop0_EPC in case of a TLB miss in a delay
                                                // slot after a jump to an invalid TLB page
+        self.is_delay_slot = false; // prefetch (self.pc) will only be invalid here after a jump
+                                    // so even though the next instruction could be a delay slot,
+                                    // the prefetch has to generate the exception
         // check for invalid PC addresses
         if (self.pc & 0x03) != 0 {
             return self.address_exception(self.pc, false);
@@ -911,27 +920,78 @@ impl Cpu {
         self.inst.target     = inst & 0x3FFFFFF;
         self.inst.sa         = (inst >> 6) & 0x1F;
 
-        // next instruction fetch. we need to catch TLB misses
+        // next instruction prefetch. we need to catch TLB misses
         self.next_instruction = match self.read_u32(self.pc as usize) {
             Err(InstructionFault::OtherException(ExceptionCode_TLBL)) => {
-                // its possible for a TLB miss to occur while prefetching a delay slot instruction
-                // BEFORE the jump and link instruction is executed. However the link register
-                // still needs to be set correctly. So here, we check if the next-to-execute
-                // instruction is a jump and link and set RA. Quite a hack, but works when we're
-                // not cycle-accurate
-                match self.inst.v & 0xFC00_003F {
-                    0x0000_0009 => { // JALR
-                        // the TLB miss of the delay slot is in BadVAddr, so set RA to the instruction after it
-                        self.gpr[self.inst.rd] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                // we need to know if the current self.next_instruction is a jump instruction and thus, if self.pc fetch is in a delay slot.
+                // link instructions also need to correctly update RA to be after the delay slot
+                let is_branch = match self.inst.op {
+                    0b000_000 => { // special
+                        match self.inst.v & 0x3F {
+                            0b001_001 => { // JALR
+                                self.gpr[self.inst.rd] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                                true
+                            },
+
+                            0b001_000 => true, // JR
+
+                            _ => false,
+                        }
                     },
-                    // There's no test in n64-systemtests for this but it should be the same
-                    // situation as JALR
-                    0x0C00_0000..=0x0C00_003F => { // JL
-                        warn!(target: "CPU", "let me know when this happens");
-                        self.gpr[self.inst.rd] = self.cp0gpr[Cop0_BadVAddr] + 4;
+
+                    0b000_001 => { // regimm
+                        let regimm = (self.inst.v >> 16) & 0x1F;
+                        match regimm {
+                            0b00_000   // BLTZ
+                            | 0b00_001 // BGEZ
+                            | 0b00_010 // BLTZL
+                            | 0b00_011 // BGEZL
+                                => true,
+
+                            // these two branches save the PC to r31
+                            0b10_001 // BGEZAL
+                            | 0b10_011 // BGEZALL
+                                => {
+                                self.gpr[31] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                                true
+                            },
+
+                            _ => false,
+                        }
                     },
-                    _ => { },
+
+                    0b000_010   // J
+                    | 0b000_100 // BEQ
+                    | 0b000_101 // BNE
+                    | 0b000_110 // BLEZ
+                    | 0b000_111 // BGTZ
+                    | 0b010_100 // BEQL
+                    | 0b010_101 // BNEL
+                    | 0b010_110 // BLEZL
+                    | 0b010_111 // BGTZL
+                        => true,
+
+                    0b000_011 => { // JAL
+                        self.gpr[31] = self.cp0gpr[Cop0_BadVAddr] + 4;
+                        true
+                    },
+
+                    _ => false,
                 };
+
+                // exception in the delay slot sets EPC to the address of the jump, not the delay slot
+                if is_branch {
+                    // just curious if this actually ever happens...
+                    // check if not jalr...
+                    if (self.inst.v & 0xFC00_003F) != 0x0000_0009 { // JALR
+                        warn!(target: "CPU", "let me know when this happens");
+                        todo!();
+                    }
+
+                    self.cp0gpr[Cop0_EPC] -= 4;
+                    // also set the BD flag indicating the exception was in a delay slot
+                    self.cp0gpr[Cop0_Cause] |= 0x8000_0000;
+                }
 
                 return Err(InstructionFault::OtherException(ExceptionCode_TLBL));
             }
@@ -941,6 +1001,9 @@ impl Cpu {
         };
 
         // update and increment PC
+        // current_instruction_pc is set twice, once at the beginning in case an external factor
+        // changes the PC (see fn interupt()), and once at the end to keep it valid outside of
+        // step()
         self.current_instruction_pc = self.next_instruction_pc;
         self.next_instruction_pc = self.pc;
         self.pc += 4;
@@ -981,6 +1044,10 @@ impl Cpu {
 
         // r0 must always be zero
         self.gpr[0] = 0;
+
+        // PC and next_instruction_pc have changed, update current_instruction_pc
+        self.current_instruction_pc = self.next_instruction_pc;
+        self.is_delay_slot = self.next_is_delay_slot;
 
         result
     }
