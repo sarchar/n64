@@ -190,7 +190,7 @@ impl PeripheralInterface {
                             source_address: self.cart_addr,
                             dest_address  : self.dram_addr,
                             count         : 1,
-                            length        : end - start,
+                            length        : ((end - start) + 7) & !7,
                             completed     : Some(self.dma_completed_tx.clone()),
                             ..Default::default()
                         };
