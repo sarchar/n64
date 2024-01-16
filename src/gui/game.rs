@@ -631,8 +631,8 @@ impl App for Game {
                 }
             }
 
-            // CTLR+TAB to change the view mode
-            if appwnd.input().key_pressed(VirtualKeyCode::Tab) {
+            // CTLR+V to change the view mode
+            if appwnd.input().key_pressed(VirtualKeyCode::V) {
                 self.view_mode = match self.view_mode {
                     ViewMode::Game => {
                         if self.game_render_texture_bind_groups.len() > 0 {
@@ -840,7 +840,7 @@ impl App for Game {
               .build(|| {
                   ui.text(format!("UI   FPS: {}", self.ui_fps));
                   ui.text(format!("GAME FPS: {}", self.game_fps));
-                  ui.text(format!("VIEW    : {:?} (Ctrl-Tab)", self.view_mode));
+                  ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
               });
     }
 }
@@ -1071,18 +1071,9 @@ impl Game {
                     let mut vcopy = Vec::new();
                     for vdata in v.iter() {
                         let vnew = Vertex {
-                            position: [
-                                vdata.position[0] as f32, 
-                                vdata.position[1] as f32, 
-                                vdata.position[2] as f32
-                            ],
-                            tex_coords: [0.0, 0.0],
-                            color: [
-                                vdata.color_or_normal[0] as f32 / 255.0,
-                                vdata.color_or_normal[1] as f32 / 255.0,
-                                vdata.color_or_normal[2] as f32 / 255.0,
-                                vdata.color_or_normal[3] as f32 / 255.0
-                            ]
+                            position: vdata.position,
+                            tex_coords: vdata.tex_coords,
+                            color: vdata.color,
                         };
                         vcopy.push(vnew);
                     }
