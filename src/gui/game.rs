@@ -423,7 +423,7 @@ impl App for Game {
         let mvp_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Game MVP Matrix Buffer"),
-                size : (MvpPacked::size() * 256) as u64,
+                size : (MvpPacked::size() * 1024) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }
@@ -744,7 +744,7 @@ impl App for Game {
                     } else {
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
-                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { unimplemented!("weird size"); } as usize;
+                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { warn!(target: "RENDER", "unknown render size {}", width); return; } as usize;
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
 
                         if self.raw_render_texture.is_none() {
@@ -997,74 +997,6 @@ impl Game {
                     self.game_viewport = cmd;
                     //render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
                     //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
-                },
-
-                HleRenderCommand::FillRectangle { framebuffer_address: addr, x: rx, y: ry, w: rw, h: rh, c: rc } => {
-                    let res = self.game_render_textures.get(&addr.or(Some(0xFFFF_FFFF)).unwrap());
-                    let color_texture: &wgpu::Texture = if res.is_none() {
-                        warn!(target: "RENDER", "triangle without a color target!");
-                        continue;
-                    } else {
-                        res.unwrap()
-                    };
-                    let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-                    if let HleRenderCommand::Viewport { x: vx, y: vy, z: _, w: vw, h: vh, d: _ } = self.game_viewport {
-                        //let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
-                        let mvp_matrix = cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
-                        let mvp_packed = MvpPacked::new(mvp_matrix.into());
-                        appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
-
-                        //println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
-                        let is_fullview = rx == vx && ry == vy && rw == vw && rh == vh;
-
-                        // upload the rect vertices and color
-                        // map (0,vx) -> (-1,1)
-                        // so (rx/vx * 2) - 1
-                        let scale = |s, maxs| ((s / maxs) * 2.0) - 1.0;
-                        let vertices = &[
-                            Vertex { position: [ scale(rx   , vw), scale(ry+rh, vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // TL
-                            Vertex { position: [ scale(rx+rw, vw), scale(ry+rh, vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // TR
-                            Vertex { position: [ scale(rx+rw, vw), scale(ry   , vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // BR
-                            Vertex { position: [ scale(rx   , vw), scale(ry   , vh), 0.0], tex_coords: [0.0, 0.0], color: rc, }, // BL
-                        ];
-                        appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
-
-                        // restore indices changed by other draw calls
-                        let indices: &[u16] = &[0, 1, 2, 0, 2, 3];
-                        appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
-
-                        let mut encoder: wgpu::CommandEncoder =
-                            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Fill Rect Encoder") });
-                        {
-                            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("Game Render Pass"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &color_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: if is_fullview {
-                                            wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
-                                        } else {
-                                            wgpu::LoadOp::Load
-                                        },
-                                        store: true, //. wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                //.occlusion_query_set: None,
-                                //.timestamp_writes: None,
-                            });
-
-                            render_pass.set_pipeline(&self.game_pipeline_no_depth);
-                            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[0 as wgpu::DynamicOffset]);
-                            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                            render_pass.draw_indexed(0..6 as _, 0, 0..1);
-                        }
-                        appwnd.queue().submit(Some(encoder.finish()));
-                    }
                 },
 
                 HleRenderCommand::VertexData(v) => {

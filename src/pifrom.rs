@@ -159,10 +159,10 @@ impl PifRom {
 
                             if channel == 0 {
                                 // four bytes indicate buttons and two axes
-                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 3).unwrap();
+                                self.write_u8_correct(0x00, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
+                                self.write_u8_correct(0x00, res_addr + 1).unwrap(); // lTrTcUcDcLcR
+                                self.write_u8_correct(0x00, res_addr + 2).unwrap(); // x-axis
+                                self.write_u8_correct(0x00, res_addr + 3).unwrap(); // y-axis
                             } else {
                                 self.write_u8_correct(0x00, res_addr + 0).unwrap();
                                 self.write_u8_correct(0x00, res_addr + 1).unwrap();

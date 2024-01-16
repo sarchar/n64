@@ -95,7 +95,7 @@ impl AppWindow {
             format: surface_format,
             width: window_size.width as u32,
             height: window_size.height as u32,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: wgpu::PresentMode::AutoNoVsync, //surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };

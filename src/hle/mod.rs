@@ -31,7 +31,6 @@ pub enum HleRenderCommand {
     VertexData(Vec<Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
-    FillRectangle { framebuffer_address: Option<u32>, x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
     RenderPass(RenderPassState),
     Sync,
 }
@@ -754,7 +753,7 @@ impl Hle {
     fn next_render_pass(&mut self) {
         // don't create a new render pass if this one isn't rendering anything, however, keep the current state
         if self.render_passes.len() > 0 {
-            if self.render_passes.last().unwrap().draw_list.len() == 0 {
+            if self.render_passes.last().unwrap().draw_list.last().unwrap().num_indices == 0 {
                 return;
             }
 
