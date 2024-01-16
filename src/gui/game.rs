@@ -1002,14 +1002,14 @@ impl Game {
                 HleRenderCommand::FillRectangle { framebuffer_address: addr, x: rx, y: ry, w: rw, h: rh, c: rc } => {
                     let res = self.game_render_textures.get(&addr.or(Some(0xFFFF_FFFF)).unwrap());
                     let color_texture: &wgpu::Texture = if res.is_none() {
-                        warn!(target: "HLE", "triangle without a color target!");
+                        warn!(target: "RENDER", "triangle without a color target!");
                         continue;
                     } else {
                         res.unwrap()
                     };
                     let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                    if let HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh } = self.game_viewport {
+                    if let HleRenderCommand::Viewport { x: vx, y: vy, z: _, w: vw, h: vh, d: _ } = self.game_viewport {
                         //let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
                         let mvp_matrix = cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
                         let mvp_packed = MvpPacked::new(mvp_matrix.into());
@@ -1127,7 +1127,7 @@ impl Game {
                         (&self.game_pipeline, Some(wgpu::RenderPassDepthStencilAttachment {
                             view: depth_view.as_ref().unwrap(),
                             depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0), // TODO proper clearing
+                                load: if rp.clear_depth { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
                                 store: true,
                             }),
                             stencil_ops: None,
@@ -1143,7 +1143,11 @@ impl Game {
                                 view: &color_view,
                                 resolve_target: None,
                                 ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
+                                    load: if let Some(c) = rp.clear_color { 
+                                        wgpu::LoadOp::Clear(wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: c[3] as f64 }) 
+                                    } else { 
+                                        wgpu::LoadOp::Load 
+                                    },
                                     store: true,
                                 },
                             })],

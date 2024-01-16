@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::mem;
 
 #[allow(unused_imports)]
@@ -26,7 +27,7 @@ pub enum HleRenderCommand {
     Noop,
     DefineColorImage { bytes_per_pixel: u8, width: u16, framebuffer_address: u32 },
     DefineDepthImage { framebuffer_address: u32 },
-    Viewport { x: f32, y: f32, w: f32, h: f32 },
+    Viewport { x: f32, y: f32, z: f32, w: f32, h: f32, d: f32 },
     VertexData(Vec<F3DZEX2_Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
@@ -76,6 +77,9 @@ pub struct RenderPassState {
     pub color_buffer: Option<u32>,
     pub depth_buffer: Option<u32>,
 
+    pub clear_color: Option<[f32; 4]>,
+    pub clear_depth: bool,
+
     // draw_list an array of triangle lists, where each triangle shares common state
     pub draw_list: Vec<TriangleList>,
 }
@@ -107,6 +111,12 @@ pub struct Hle {
     current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
     current_projection_matrix: Matrix4<f32>, // current projection matrix
     current_matrix_index: Option<u32>,       // index into matrices[]; None when the current matrix isn't pushed yet
+
+    current_viewport: Option<HleRenderCommand>,
+
+    color_images: HashMap<u32, HleRenderCommand>,
+    depth_images: HashMap<u32, HleRenderCommand>,
+    clear_images: HashMap<u32, [f32; 4]>,
 
     // list of render_passes. the last of the array is always the current render pass
     render_passes: Vec<RenderPassState>,
@@ -148,6 +158,11 @@ impl Hle {
             current_matrix: Matrix4::identity(),
             current_projection_matrix: Matrix4::identity(),
             current_matrix_index: None,
+            current_viewport: None,
+
+            color_images: HashMap::new(),
+            depth_images: HashMap::new(),
+            clear_images: HashMap::new(),
 
             render_passes: vec![],
             num_draws: 0,
@@ -175,6 +190,10 @@ impl Hle {
         self.current_matrix = Matrix4::identity();
         self.current_projection_matrix = Matrix4::identity();
         self.current_matrix_index = None;
+        self.current_viewport = None;
+        self.color_images.clear();
+        self.depth_images.clear();
+        self.clear_images.clear();
         self.render_passes.clear();
         self.next_render_pass();
         self.num_draws = 0;
@@ -285,12 +304,31 @@ impl Hle {
             self.process_display_list_command(addr, cmd);
         }
 
+        // finalize current render pass
+        self.finalize_render_pass();
+
         println!("found {} matrices", self.matrices.len());
         println!("found {} vertices", self.vertices.len());
         println!("found {} indices", self.indices.len());
         println!("found {} render passes", self.render_passes.len());
         println!("found {} draw calls", self.num_draws);
         println!("found {} tris", self.num_tris);
+
+        // depth buffers are cleared by being used as color images, so remove them from being
+        // created as actual color targets
+        let depth_images = std::mem::replace(&mut self.depth_images, HashMap::new());
+        for (key, buffer_cmd) in depth_images {
+            if self.color_images.contains_key(&key) {
+                self.color_images.remove(&key);
+            }
+            self.send_hle_render_command(buffer_cmd);
+        }
+
+        // create the color buffers
+        let color_images = std::mem::replace(&mut self.color_images, HashMap::new());
+        for (_, buffer_cmd) in color_images {
+            self.send_hle_render_command(buffer_cmd);
+        }
 
         // upload verts
         let vertices = std::mem::replace(&mut self.vertices, vec![]);
@@ -567,23 +605,26 @@ impl Hle {
                 let zs = (vp[1] >> 16) as i16;
                 let x_scale = (xs >> 2) as f32 + frac[(xs & 3) as usize];
                 let y_scale = (ys >> 2) as f32 + frac[(ys & 3) as usize];
-                let _z_scale = (zs >> 2) as f32 + frac[(zs & 3) as usize];
+                let z_scale = (zs >> 2) as f32 + frac[(zs & 3) as usize];
                 let xt = (vp[2] >> 16) as i16;
                 let yt = vp[2] as i16;
                 let zt = (vp[3] >> 16) as i16;
                 let x_translate = (xt >> 2) as f32 + frac[(xt & 3) as usize];
                 let y_translate = (yt >> 2) as f32 + frac[(yt & 3) as usize];
-                let _z_translate = (zt >> 2) as f32 + frac[(zt & 3) as usize];
+                let z_translate = (zt >> 2) as f32 + frac[(zt & 3) as usize];
 
                 trace!(target: "HLE", "{} gsSPViewport(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
-                //println!("Viewport {{ vscale: [ {}, {}, {}, 0.0 ], vtrans: [ {}, {}, {}, 0.0 ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
+                println!("Viewport {{ vscale: [ {}, {}, {} ], vtrans: [ {}, {}, {} ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
 
-                self.send_hle_render_command(HleRenderCommand::Viewport {
+                self.current_viewport = Some(HleRenderCommand::Viewport {
                     x: -1.0 * x_scale + x_translate,
                     y: -1.0 * y_scale + y_translate,
+                    z: -1.0 * z_scale + z_translate,
                     w:  2.0 * x_scale,
                     h:  2.0 * y_scale,
+                    d:  2.0 * z_scale,
                 });
+                println!("{:?}", self.current_viewport);
             },
 
             _ => {
@@ -677,10 +718,13 @@ impl Hle {
     }
 
     fn next_render_pass(&mut self) {
-        // throw away the current render pass if there is nothing drawn
-        // (we just don't push a new pass)
-        if self.render_passes.len() > 0 && self.render_passes.last().unwrap().draw_list.len() == 0 {
-            return;
+        // don't create a new render pass if this one isn't rendering anything, however, keep the current state
+        if self.render_passes.len() > 0 {
+            if self.render_passes.last().unwrap().draw_list.len() == 0 {
+                return;
+            }
+
+            self.finalize_render_pass();
         }
 
         let rp = RenderPassState {
@@ -689,10 +733,30 @@ impl Hle {
         self.render_passes.push(rp);
     }
 
+    fn finalize_render_pass(&mut self) {
+        let (color_buffer, depth_buffer) = {
+            let rp = self.current_render_pass();
+            (rp.color_buffer, rp.depth_buffer)
+        };
+
+        if let Some(color_addr) = color_buffer {
+            let clear_color = self.clear_images.get(&color_addr).copied();
+            self.current_render_pass().clear_color = clear_color;
+        }
+
+        if let Some(depth_addr) = depth_buffer {
+            if self.clear_images.contains_key(&depth_addr) {
+                self.current_render_pass().clear_depth = true;
+            }
+        }
+    }
+
     fn current_triangle_list(&mut self) -> &mut TriangleList {
         if let None = self.current_matrix_index { // TODO: other ways to check if the state has changed
-            let matrix_index = self.matrices.len() as u32;
-            self.matrices.push(self.current_matrix);
+            if self.matrices.len() == 0 || self.current_matrix != *self.matrices.last().unwrap() {
+                self.matrices.push(self.current_matrix);
+            }
+            let matrix_index = (self.matrices.len() as u32) - 1;
             self.current_matrix_index = Some(matrix_index);
 
             let tl = TriangleList {
@@ -879,16 +943,32 @@ impl Hle {
         let x0 = (((self.command >> 12) & 0xFFF) as u16) >> 2;
         let y0 = (((self.command >>  0) & 0xFFF) as u16) >> 2;
         trace!(target: "HLE", "{} gsDPFillRectangle({}, {}, {}, {})", self.command_prefix, x0, y0, x1, y1);
-        let color_buffer = self.current_render_pass().color_buffer.clone();
-        self.send_hle_render_command(HleRenderCommand::FillRectangle {
-            framebuffer_address: color_buffer,
-            x: x0 as f32,
-            y: y0 as f32,
-            w: (x1 - x0) as f32 + 1.0,
-            h: (y1 - y0) as f32 + 1.0,
-            c: [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
-                ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0],
-        });
+        if let Some(HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh, .. }) = &self.current_viewport {
+            if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) {
+                let w = x1 - x0 + 1;
+                let h = y1 - y0 + 1;
+                if x0 == *vx as u16 && y0 == *vy as u16 && w == *vw as u16 && h == *vh as u16 {
+                    let addr = self.current_render_pass().color_buffer.clone().unwrap();
+                    // we can't just mark clear_color in the current render pass, because
+                    // the N64 uses the color buffer to clear depth buffers, so we mark this
+                    // address as cleared in a separate buffer and only when next_render_pass() is
+                    // called do we know that the render targets are set
+                    let color = [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
+                                 ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0];
+                    self.clear_images.insert(addr, color);
+                }
+            }
+        }
+        //let color_buffer = self.current_render_pass().color_buffer.clone();
+        //self.send_hle_render_command(HleRenderCommand::FillRectangle {
+        //    framebuffer_address: color_buffer,
+        //    x: x0 as f32,
+        //    y: y0 as f32,
+        //    w: (x1 - x0) as f32 + 1.0,
+        //    h: (y1 - y0) as f32 + 1.0,
+        //    c: [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
+        //        ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0],
+        //});
     }
 
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
@@ -956,7 +1036,10 @@ impl Hle {
         }
         self.current_render_pass().depth_buffer = Some(translated_addr);
 
-        self.send_hle_render_command(HleRenderCommand::DefineDepthImage { framebuffer_address: translated_addr });
+        let hle_render_command = HleRenderCommand::DefineDepthImage { framebuffer_address: translated_addr };
+        if !self.depth_images.contains_key(&translated_addr) {
+            self.depth_images.insert(translated_addr, hle_render_command);
+        }
     }
 
     fn handle_setcimg(&mut self) { // G_SETCIMG
@@ -983,7 +1066,10 @@ impl Hle {
         self.current_render_pass().color_buffer = Some(translated_addr);
 
         // create the color buffer
-        self.send_hle_render_command(HleRenderCommand::DefineColorImage { bytes_per_pixel: bpp, width: width, framebuffer_address: translated_addr });
+        let hle_render_command = HleRenderCommand::DefineColorImage { bytes_per_pixel: bpp, width: width, framebuffer_address: translated_addr };
+        if !self.color_images.contains_key(&translated_addr) {
+            self.color_images.insert(translated_addr, hle_render_command);
+        }
     }
 
     fn send_hle_render_command(&mut self, hle_render_command: HleRenderCommand) {
