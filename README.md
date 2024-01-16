@@ -7,7 +7,7 @@ consoles. It's time I conquered 3D.
 # Requirements
 
 You'll need a PIF rom (sorry, can't help you out here. Google is your friend)
-in the working directory named "boot.rom".  And you'll need a test rom. I
+in the ./bios/ directory "pifrom.v64".  And you'll need a program to run. I
 recommend [n64-systemtest](https://github.com/lemmy-64/n64-systemtest).
 
 # Building
@@ -29,6 +29,10 @@ $ cargo run --release -- n64-systemtest.z64 -D
 * Current test rate:
 
 ![image](https://github.com/sarchar/n64/assets/4928176/c6a6b774-afde-40d6-9acd-8f0157002369)
+
+* "squaredemo.n64" from [n64-sdk-demo](https://github.com/jsdf/n64-sdk-demo)
+
+![image](https://github.com/sarchar/n64/assets/4928176/a22fb087-a33c-444c-8526-a21a2d031a2e)
 
 * "onetri.n64" N64 demo:
 
