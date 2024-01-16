@@ -24,16 +24,14 @@ pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
 #[derive(Debug, Clone)]
 pub enum HleRenderCommand {
     Noop,
-    SetColorImage { bytes_per_pixel: u8, width: u16, framebuffer_address: u32 },
+    DefineColorImage { bytes_per_pixel: u8, width: u16, framebuffer_address: u32 },
+    DefineDepthImage { framebuffer_address: u32 },
     Viewport { x: f32, y: f32, w: f32, h: f32 },
-    SetProjectionMatrix(Matrix4<f32>),
-    SetModelViewMatrix(Matrix4<f32>),
     VertexData(Vec<F3DZEX2_Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
-    FillRectangle { x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
-    RenderTriangleLists(Vec<TriangleList>),
-    //Vertices(u32),
+    FillRectangle { framebuffer_address: Option<u32>, x: f32, y: f32, w: f32, h: f32, c: [f32; 4] },
+    RenderPass(RenderPassState),
     Sync,
 }
 
@@ -73,6 +71,16 @@ struct DLStackEntry {
 }
 
 #[derive(Clone,Debug,Default)]
+pub struct RenderPassState {
+    // current render targets for tris
+    pub color_buffer: Option<u32>,
+    pub depth_buffer: Option<u32>,
+
+    // draw_list an array of triangle lists, where each triangle shares common state
+    pub draw_list: Vec<TriangleList>,
+}
+
+#[derive(Clone,Debug,Default)]
 pub struct TriangleList {
     pub matrix_index: u32,
     pub start_index: u32,
@@ -100,8 +108,9 @@ pub struct Hle {
     current_projection_matrix: Matrix4<f32>, // current projection matrix
     current_matrix_index: Option<u32>,       // index into matrices[]; None when the current matrix isn't pushed yet
 
-    // draw_list an array of triangle lists, where each triangle shares common state
-    draw_list: Vec<TriangleList>,
+    // list of render_passes. the last of the array is always the current render pass
+    render_passes: Vec<RenderPassState>,
+    num_draws: u32,
     num_tris: u32,
 
     fill_color: u32,
@@ -140,7 +149,8 @@ impl Hle {
             current_projection_matrix: Matrix4::identity(),
             current_matrix_index: None,
 
-            draw_list: vec![],
+            render_passes: vec![],
+            num_draws: 0,
             num_tris: 0,
 
             fill_color: 0,
@@ -165,7 +175,9 @@ impl Hle {
         self.current_matrix = Matrix4::identity();
         self.current_projection_matrix = Matrix4::identity();
         self.current_matrix_index = None;
-        self.draw_list.clear();
+        self.render_passes.clear();
+        self.next_render_pass();
+        self.num_draws = 0;
         self.num_tris = 0;
         self.fill_color = 0;
     }
@@ -200,6 +212,7 @@ impl Hle {
                 self.command_table[0x06] = Hle::handle_tri2;
 
                 self.command_table[0xD7] = Hle::handle_texture;
+                self.command_table[0xD8] = Hle::handle_popmtx;
                 self.command_table[0xD9] = Hle::handle_geometrymode;
                 self.command_table[0xDA] = Hle::handle_mtx;
                 self.command_table[0xDB] = Hle::handle_moveword;
@@ -275,7 +288,8 @@ impl Hle {
         println!("found {} matrices", self.matrices.len());
         println!("found {} vertices", self.vertices.len());
         println!("found {} indices", self.indices.len());
-        println!("found {} draw calls", self.draw_list.len());
+        println!("found {} render passes", self.render_passes.len());
+        println!("found {} draw calls", self.num_draws);
         println!("found {} tris", self.num_tris);
 
         // upload verts
@@ -290,9 +304,11 @@ impl Hle {
         let matrices = std::mem::replace(&mut self.matrices, vec![]);
         self.send_hle_render_command(HleRenderCommand::MatrixData(matrices));
 
-        // issue draw commands
-        let draw_list = std::mem::replace(&mut self.draw_list, vec![]);
-        self.send_hle_render_command(HleRenderCommand::RenderTriangleLists(draw_list));
+        // run each render pass
+        for i in 0..self.render_passes.len() {
+            let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
+            self.send_hle_render_command(HleRenderCommand::RenderPass(rp));
+        }
 
         self.send_hle_render_command(HleRenderCommand::Sync);
     }
@@ -507,6 +523,14 @@ impl Hle {
         self.current_matrix_index = None;
     }
 
+    fn handle_popmtx(&mut self) { // G_POPMTX
+        let num = ((self.command & 0xFFFF_FFFF) >> 6) as u32; // num / 64
+
+        trace!(target: "HLE", "{} gsSPPopMatrixN(G_MTX_MODELVIEW, {})", self.command_prefix, num);
+        for _ in 0..num { self.matrix_stack.pop(); }
+        self.current_matrix_index = None;
+    }
+
     fn handle_moveword(&mut self) { // G_MOVEWORD
         let index  = ((self.command >> 48) & 0xFF) as u8;
         let offset = ((self.command >> 32) & 0xFFFF) as u16;
@@ -648,7 +672,24 @@ impl Hle {
         //self.send_hle_render_command(HleRenderCommand::VertexData(v, vbidx as usize));
     }
         
-    fn get_current_triangle_list(&mut self) -> &mut TriangleList {
+    fn current_render_pass(&mut self) -> &mut RenderPassState {
+        self.render_passes.last_mut().expect("must always have a valid RP")
+    }
+
+    fn next_render_pass(&mut self) {
+        // throw away the current render pass if there is nothing drawn
+        // (we just don't push a new pass)
+        if self.render_passes.len() > 0 && self.render_passes.last().unwrap().draw_list.len() == 0 {
+            return;
+        }
+
+        let rp = RenderPassState {
+            ..Default::default()
+        };
+        self.render_passes.push(rp);
+    }
+
+    fn current_triangle_list(&mut self) -> &mut TriangleList {
         if let None = self.current_matrix_index { // TODO: other ways to check if the state has changed
             let matrix_index = self.matrices.len() as u32;
             self.matrices.push(self.current_matrix);
@@ -658,11 +699,13 @@ impl Hle {
                 matrix_index: matrix_index,
                 ..Default::default()
             };
-            self.draw_list.push(tl);
+
+            let rp = self.current_render_pass();
+            rp.draw_list.push(tl);
+            self.num_draws += 1;
         }
 
-        let len = self.draw_list.len();
-        &mut self.draw_list[len - 1]
+        self.current_render_pass().draw_list.last_mut().expect("must have one draw list!")
     }
 
     fn handle_tri1(&mut self) { // G_TRI1
@@ -674,7 +717,7 @@ impl Hle {
         let v0 = self.vertex_stack[v0 as usize];
         let v1 = self.vertex_stack[v1 as usize];
         let v2 = self.vertex_stack[v2 as usize];
-        let tl = self.get_current_triangle_list();
+        let tl = self.current_triangle_list();
         tl.num_indices += 3;
         self.indices.extend_from_slice(&[v0, v1, v2]);
         self.num_tris += 1;
@@ -695,7 +738,7 @@ impl Hle {
         let v10 = self.vertex_stack[v10 as usize];
         let v11 = self.vertex_stack[v11 as usize];
         let v12 = self.vertex_stack[v12 as usize];
-        let tl = self.get_current_triangle_list();
+        let tl = self.current_triangle_list();
         tl.num_indices += 6;
         self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
         self.num_tris += 2;
@@ -836,7 +879,9 @@ impl Hle {
         let x0 = (((self.command >> 12) & 0xFFF) as u16) >> 2;
         let y0 = (((self.command >>  0) & 0xFFF) as u16) >> 2;
         trace!(target: "HLE", "{} gsDPFillRectangle({}, {}, {}, {})", self.command_prefix, x0, y0, x1, y1);
+        let color_buffer = self.current_render_pass().color_buffer.clone();
         self.send_hle_render_command(HleRenderCommand::FillRectangle {
+            framebuffer_address: color_buffer,
             x: x0 as f32,
             y: y0 as f32,
             w: (x1 - x0) as f32 + 1.0,
@@ -897,7 +942,21 @@ impl Hle {
 
     fn handle_setzimg(&mut self) { // G_SETZIMG
         let addr = self.command as u32;
-        trace!(target: "HLE", "{} gsDPSetDepthImage(..., 0x{:08X})", self.command_prefix, addr);
+
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+            let segment = ((addr >> 24) & 0x0F) as usize;
+            self.segments[segment] + (addr & 0x00FF_FFFF)
+        };
+
+        trace!(target: "HLE", "{} gsDPSetDepthImage(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
+
+        // if the color depth changes, start a new render pass
+        if self.current_render_pass().depth_buffer.is_some_and(|v| v != translated_addr) {
+            self.next_render_pass();
+        }
+        self.current_render_pass().depth_buffer = Some(translated_addr);
+
+        self.send_hle_render_command(HleRenderCommand::DefineDepthImage { framebuffer_address: translated_addr });
     }
 
     fn handle_setcimg(&mut self) { // G_SETCIMG
@@ -906,7 +965,7 @@ impl Hle {
         let bpp   = ((self.command >> 51) & 0x03) as u8;
         let fmt   = ((self.command >> 53) & 0x07) as u8;
 
-        let translated_addr = if (addr & 0x8000_0000) != 0 { addr } else {
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
             self.segments[segment] + (addr & 0x00FF_FFFF)
         };
@@ -917,7 +976,14 @@ impl Hle {
             unimplemented!("color targets not of RGBA not yet supported");
         }
 
-        self.send_hle_render_command(HleRenderCommand::SetColorImage { bytes_per_pixel: bpp, width: width, framebuffer_address: translated_addr });
+        // if the color buffer changes, start a new render pass
+        if self.current_render_pass().color_buffer.is_some_and(|v| v != translated_addr) {
+            self.next_render_pass();
+        }
+        self.current_render_pass().color_buffer = Some(translated_addr);
+
+        // create the color buffer
+        self.send_hle_render_command(HleRenderCommand::DefineColorImage { bytes_per_pixel: bpp, width: width, framebuffer_address: translated_addr });
     }
 
     fn send_hle_render_command(&mut self, hle_render_command: HleRenderCommand) {

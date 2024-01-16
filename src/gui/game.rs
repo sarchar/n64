@@ -77,29 +77,25 @@ impl Vertex {
     }
 }
 
-#[rustfmt::skip]
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.5,
-    0.0, 0.0, 0.0, 1.0,
-);
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MvpPacked {
-    mvp_matrix: [[f32; 4]; 4],
+    mvp_matrix: [[f32; 4]; 4], // 64
+    // padding to 256 bytes
+    padding: [u64; 24],
 }
 
 impl MvpPacked {
-    fn new() -> Self {
+    fn new(mat: [[f32; 4]; 4]) -> Self {
         Self {
-           mvp_matrix: cgmath::Matrix4::identity().into(),
+           mvp_matrix: mat,
+           padding: [0; 24]
         }
     }
 
     fn size() -> usize {
-        std::mem::size_of::<[f32; 16]>() as usize
+        (std::mem::size_of::<[f32; 16]>() 
+          + std::mem::size_of::<[u64; 24]>()) as usize
     }
 
     fn offset_of(index: usize) -> wgpu::DynamicOffset {
@@ -107,22 +103,36 @@ impl MvpPacked {
     }
 }
 
+#[derive(Debug,Copy,Clone)]
+enum ViewMode {
+    Game,
+    Color(usize),
+    Depth(usize),
+}
+
 pub struct Game {
     comms: SystemCommunication,
     hle_command_buffer: Arc<HleCommandBuffer>,
 
+    view_mode: ViewMode,
+
     game_render_textures: HashMap<u32, wgpu::Texture>,
-    game_render_texture_bind_group_layout: wgpu::BindGroupLayout,
-    game_render_texture_pipeline: wgpu::RenderPipeline,
+    game_render_color_texture_bind_group_layout: wgpu::BindGroupLayout,
+    game_render_depth_texture_bind_group_layout: wgpu::BindGroupLayout,
+    game_render_color_texture_pipeline: wgpu::RenderPipeline,
+    game_render_depth_texture_pipeline: wgpu::RenderPipeline,
     game_render_texture_vertex_buffer: wgpu::Buffer,
     game_render_texture_index_buffer: wgpu::Buffer,
     game_render_texture_bind_groups: HashMap<u32, wgpu::BindGroup>,
-    current_render_texture_view: Option<wgpu::TextureView>,
+
+    game_depth_textures: HashMap<u32, wgpu::Texture>,
+    game_depth_texture_bind_groups: HashMap<u32, wgpu::BindGroup>,
 
     raw_render_texture: Option<wgpu::Texture>,
     raw_render_texture_bind_group: Option<wgpu::BindGroup>,
 
     game_pipeline: wgpu::RenderPipeline,
+    game_pipeline_no_depth: wgpu::RenderPipeline,
 
     game_viewport: HleRenderCommand,
     game_modelview: cgmath::Matrix4<f32>,
@@ -157,15 +167,21 @@ impl App for Game {
     fn create(appwnd: &AppWindow, mut comms: SystemCommunication) -> Self {
         let device: &wgpu::Device = appwnd.device();
 
-        // create the main texture render shader
-        let game_render_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Game Render Texture Shader"),
+        // create the main color texture render shader
+        let game_render_color_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Game Render Color Texture Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gametexture.wgsl").into()),
         });
 
-        // create the texture bind group for the game texture
-        let game_render_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Game Render Texture Bind Group"),
+        // create the depth texture render shader
+        let game_render_depth_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Game Render Depth Texture Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gamedepth.wgsl").into()),
+        });
+
+        // create the texture bind group for the game textures
+        let game_render_color_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Game Render Color Texture Bind Group"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -186,24 +202,52 @@ impl App for Game {
             ],
         });
 
-        let game_render_texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Game Render Texture Pipeline Layout"),
-            bind_group_layouts: &[&game_render_texture_bind_group_layout],
+        let game_render_depth_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Game Render Depth Texture Bind Group"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let game_render_color_texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Game Render Color Texture Pipeline Layout"),
+            bind_group_layouts: &[&game_render_color_texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        let game_render_texture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Game Render Texture Pipeline"),
-            layout: Some(&game_render_texture_pipeline_layout),
+        let game_render_depth_texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Game Render Depth Texture Pipeline Layout"),
+            bind_group_layouts: &[&game_render_depth_texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let game_render_color_texture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Game Render Color Texture Pipeline"),
+            layout: Some(&game_render_color_texture_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &game_render_texture_shader,
+                module: &game_render_color_texture_shader,
                 entry_point: "vs_main",
                 buffers: &[
                     Vertex::desc(),
                 ],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &game_render_texture_shader,
+                module: &game_render_color_texture_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: appwnd.surface_config().format,
@@ -228,6 +272,44 @@ impl App for Game {
             },
             multiview: None,
         });
+
+        let game_render_depth_texture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Game Render Depth Texture Pipeline"),
+            layout: Some(&game_render_depth_texture_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &game_render_depth_texture_shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    Vertex::desc(),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &game_render_depth_texture_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: appwnd.surface_config().format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
 
         let game_render_texture_vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -338,12 +420,12 @@ impl App for Game {
             source: wgpu::ShaderSource::Wgsl(include_str!("game.wgsl").into()),
         });
 
-        let mvp_data = MvpPacked::new();
-        let mvp_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let mvp_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
                 label: Some("Game MVP Matrix Buffer"),
-                contents: bytemuck::cast_slice(&[mvp_data]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
+                size : (MvpPacked::size() * 256) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             }
         );
 
@@ -371,7 +453,13 @@ impl App for Game {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: mvp_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(
+                        wgpu::BufferBinding {
+                            buffer: &mvp_buffer,
+                            offset: 0,
+                            size: core::num::NonZeroU64::new(MvpPacked::size() as u64),
+                        }
+                    ),
                 }
             ],
         });
@@ -385,44 +473,69 @@ impl App for Game {
             push_constant_ranges: &[],
         });
 
+        let game_pipeline_vertex_state = wgpu::VertexState {
+            module: &game_shader,
+            entry_point: "vs_main",
+            buffers: &[Vertex::desc()],
+        };
+
+        let game_pipeline_fragment_state = wgpu::FragmentState {
+            module: &game_shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: appwnd.surface_config().format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        };
+
+        let game_pipeline_primitive_state = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None, //Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        };
+
+        let game_pipeline_depth_stencil_state = wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default()
+        };
+
+        let game_pipeline_multisample_state = wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        };
+
         let game_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Game Pipeline"),
             layout: Some(&game_render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &game_shader,
-                entry_point: "vs_main",
-                buffers: &[
-                    Vertex::desc(),
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &game_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: appwnd.surface_config().format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, //Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            vertex: game_pipeline_vertex_state.clone(),
+            fragment: Some(game_pipeline_fragment_state.clone()),
+            primitive: game_pipeline_primitive_state,
+            depth_stencil: Some(game_pipeline_depth_stencil_state),
+            multisample: game_pipeline_multisample_state,
             multiview: None,
         });
 
-        // reserve space for 1024 vertices
+        let game_pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Game Pipeline"),
+            layout: Some(&game_render_pipeline_layout),
+            vertex: game_pipeline_vertex_state,
+            fragment: Some(game_pipeline_fragment_state),
+            primitive: game_pipeline_primitive_state,
+            depth_stencil: None,
+            multisample: game_pipeline_multisample_state,
+            multiview: None,
+        });
+
+        // reserve space for 64k vertices
         let vertex_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Game Vertex Buffer"),
@@ -432,6 +545,7 @@ impl App for Game {
             }
         );
 
+        // and 10k indices
         let index_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Game Index Buffer"),
@@ -446,17 +560,25 @@ impl App for Game {
             comms: comms,
             hle_command_buffer: hle_command_buffer,
 
+            view_mode: ViewMode::Game,
+
             game_render_textures: HashMap::new(),
-            game_render_texture_bind_group_layout: game_render_texture_bind_group_layout,
-            game_render_texture_pipeline: game_render_texture_pipeline,
+            game_render_color_texture_bind_group_layout: game_render_color_texture_bind_group_layout,
+            game_render_depth_texture_bind_group_layout: game_render_depth_texture_bind_group_layout,
+            game_render_color_texture_pipeline: game_render_color_texture_pipeline,
+            game_render_depth_texture_pipeline: game_render_depth_texture_pipeline,
             game_render_texture_vertex_buffer: game_render_texture_vertex_buffer,
             game_render_texture_index_buffer: game_render_texture_index_buffer,
             game_render_texture_bind_groups: HashMap::new(),
-            current_render_texture_view: None,
+
+            game_depth_textures: HashMap::new(),
+            game_depth_texture_bind_groups: HashMap::new(),
+
             raw_render_texture: None,
             raw_render_texture_bind_group: None,
 
             game_pipeline: game_pipeline,
+            game_pipeline_no_depth: game_pipeline_no_depth,
 
             game_viewport: HleRenderCommand::Noop,
             game_modelview: cgmath::Matrix4::identity(),
@@ -508,6 +630,37 @@ impl App for Game {
                     }
                 }
             }
+
+            // CTLR+TAB to change the view mode
+            if appwnd.input().key_pressed(VirtualKeyCode::Tab) {
+                self.view_mode = match self.view_mode {
+                    ViewMode::Game => {
+                        if self.game_render_texture_bind_groups.len() > 0 {
+                            ViewMode::Color(0)
+                        } else if self.game_depth_texture_bind_groups.len() > 0 {
+                            ViewMode::Depth(0)
+                        } else {
+                            ViewMode::Game
+                        }
+                    },
+                    ViewMode::Color(i) => {
+                        if self.game_render_texture_bind_groups.len() > (i + 1) {
+                            ViewMode::Color(i + 1)
+                        } else if self.game_depth_texture_bind_groups.len() > 0 {
+                            ViewMode::Depth(0)
+                        } else {
+                            ViewMode::Game
+                        }
+                    },
+                    ViewMode::Depth(i) => {
+                        if self.game_depth_texture_bind_groups.len() > (i + 1) {
+                            ViewMode::Depth(i + 1)
+                        } else {
+                            ViewMode::Game
+                        }
+                    },
+                };
+            }
         }
 
         //let input = appwnd.input();
@@ -554,88 +707,6 @@ impl App for Game {
     fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
         self.render_game(appwnd);
 
-        // TODO we need the VI_ORIGIN value to know what to render..
-        let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
-        if video_buffer == 0 { return; }
-
-        // look for the texture associated with the color image address
-        let bind_group = if let Some(bind_group) = self.game_render_texture_bind_groups.get(&video_buffer) {
-            bind_group
-        } else {
-            if let Some(bind_group) = self.game_render_texture_bind_groups.get(&(video_buffer - 640)) { // video_buffer is + 640 on NTSC?
-                bind_group
-            } else {
-                let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
-                let height = if width == 320 { 240 } else if width == 640 { 480 } else { return; } as usize;
-                let format = self.comms.vi_format.load(Ordering::SeqCst);
-
-                // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
-                if let None = self.raw_render_texture {
-                    let (texture, bind_group) = self.create_framebuffer_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
-                    self.raw_render_texture = Some(texture);
-                    self.raw_render_texture_bind_group = Some(bind_group);
-                }
-
-                // access RDRAM directly
-                // would be nice if I could copy RGB555 into a texture, but this copy seems acceptable for now
-                if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
-                    let start = (video_buffer >> 2) as usize;
-                    let mut image_data = vec![0u8; width*height*4];
-                    for i in 0..(width*height) {
-                        match format {
-                            2 => {
-                                let shift = 16 - ((i & 1) << 4);
-                                let pix = (rdram[start + (i >> 1)] >> shift) as u16;
-                                let r = ((pix >> 11) & 0x1F) as u8;
-                                let g = ((pix >>  6) & 0x1F) as u8;
-                                let b = ((pix >>  1) & 0x1F) as u8;
-                                let a = (pix & 0x01) as u8;
-                                image_data[i*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
-                            },
-                            3 => { 
-                                let pix = rdram[start+i] | 0xff;
-                                image_data[i*4..][..4].copy_from_slice(&pix.to_be_bytes());
-                            },
-                            _ => break,
-                        }
-                    }
-
-                    appwnd.queue().write_texture(
-                        wgpu::ImageCopyTexture {
-                            texture: self.raw_render_texture.as_ref().unwrap(),
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        bytemuck::cast_slice(&image_data),
-                        wgpu::ImageDataLayout {
-                            offset: 0,
-                            bytes_per_row: Some(1 * 4 * width as u32), // 320 pix, rgba*f32,
-                            rows_per_image: Some(height as u32),
-                        },
-                        wgpu::Extent3d {
-                            width: width as u32,
-                            height: height as u32,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
-
-                //if let Some((addr, bind_group)) = self.game_render_texture_bind_groups.iter().last() {
-                //    if (self.ui_frame_count & 1) == 0 {
-                //        let (addr, bind_group) = self.game_render_texture_bind_groups.iter().next().unwrap();
-                //        println!("rendering ${addr:08X}");
-                //        bind_group
-                //    } else {
-                //        println!("rendering ${addr:08X}");
-                //        bind_group
-                //    }
-                //} else {
-                    self.raw_render_texture_bind_group.as_ref().unwrap()
-                //}
-            }
-        };
-
         let mut encoder: wgpu::CommandEncoder =
             appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Render Texture Encoder") });
         {
@@ -655,8 +726,106 @@ impl App for Game {
                 //.timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.game_render_texture_pipeline);
-            render_pass.set_bind_group(0, bind_group, &[]);
+            // look for the texture associated with the color image address
+            match self.view_mode {
+                ViewMode::Game => {
+                    // we need the VI_ORIGIN value to know what to render..
+                    let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
+                    if video_buffer == 0 { 
+                        // Throw away the render pass and encoder, no biggie
+                        return; 
+                    }
+
+                    // The video buffer pointer is either exact or off by 640, or it doesn't exist at all
+                    let bind_group = if self.game_render_texture_bind_groups.contains_key(&video_buffer) {
+                        self.game_render_texture_bind_groups.get(&video_buffer).unwrap()
+                    } else if self.game_render_texture_bind_groups.contains_key(&(video_buffer - 640)) { // video_buffer is + 640 on NTSC?
+                        self.game_render_texture_bind_groups.get(&(video_buffer - 640)).unwrap()
+                    } else {
+                        // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
+                        let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
+                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { unimplemented!("weird size"); } as usize;
+                        let format = self.comms.vi_format.load(Ordering::SeqCst);
+
+                        if self.raw_render_texture.is_none() {
+                            let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
+                            self.raw_render_texture = Some(texture);
+                            self.raw_render_texture_bind_group = Some(bind_group);
+                        }
+
+                        // access RDRAM directly
+                        // would be nice if I could copy RGB555 into a texture, but this copy seems acceptable for now
+                        if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
+                            let start = (video_buffer >> 2) as usize;
+                            let mut image_data = vec![0u8; width*height*4];
+                            for i in 0..(width*height) {
+                                match format {
+                                    2 => {
+                                        let shift = 16 - ((i & 1) << 4);
+                                        let pix = (rdram[start + (i >> 1)] >> shift) as u16;
+                                        let r = ((pix >> 11) & 0x1F) as u8;
+                                        let g = ((pix >>  6) & 0x1F) as u8;
+                                        let b = ((pix >>  1) & 0x1F) as u8;
+                                        let a = (pix & 0x01) as u8;
+                                        image_data[i*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
+                                    },
+                                    3 => { 
+                                        let pix = rdram[start+i] | 0xff;
+                                        image_data[i*4..][..4].copy_from_slice(&pix.to_be_bytes());
+                                    },
+                                    _ => break,
+                                }
+                            }
+
+                            appwnd.queue().write_texture(
+                                wgpu::ImageCopyTexture {
+                                    texture: self.raw_render_texture.as_ref().unwrap(),
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                bytemuck::cast_slice(&image_data),
+                                wgpu::ImageDataLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(1 * 4 * width as u32), // 320 pix, rgba*f32,
+                                    rows_per_image: Some(height as u32),
+                                },
+                                wgpu::Extent3d {
+                                    width: width as u32,
+                                    height: height as u32,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                        }
+
+                        self.raw_render_texture_bind_group.as_ref().unwrap()
+                    };
+
+                    render_pass.set_pipeline(&self.game_render_color_texture_pipeline);
+                    render_pass.set_bind_group(0, bind_group, &[]);
+                },
+
+                ViewMode::Color(color_buffer) => {
+                    let buffers: Vec<_> = self.game_render_texture_bind_groups.iter().collect();
+                    if color_buffer >= buffers.len() {
+                        return;
+                    }
+
+                    render_pass.set_pipeline(&self.game_render_color_texture_pipeline);
+                    render_pass.set_bind_group(0, buffers[color_buffer].1, &[]);
+                },
+
+                ViewMode::Depth(depth_buffer) => {
+                    let buffers: Vec<_> = self.game_depth_texture_bind_groups.iter().collect();
+                    if depth_buffer >= buffers.len() {
+                        return;
+                    }
+
+                    render_pass.set_pipeline(&self.game_render_depth_texture_pipeline);
+                    render_pass.set_bind_group(0, buffers[depth_buffer].1, &[]);
+                },
+            };
+
             render_pass.set_vertex_buffer(0, self.game_render_texture_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.game_render_texture_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..GAME_TEXTURE_INDICES.len() as _, 0, 0..1);
@@ -671,12 +840,13 @@ impl App for Game {
               .build(|| {
                   ui.text(format!("UI   FPS: {}", self.ui_fps));
                   ui.text(format!("GAME FPS: {}", self.game_fps));
+                  ui.text(format!("VIEW    : {:?} (Ctrl-Tab)", self.view_mode));
               });
     }
 }
 
 impl Game {
-    fn create_framebuffer_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {
+    fn create_color_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {
         let device = appwnd.device();
 
         // create an offscreen render target for the actual game render
@@ -716,7 +886,7 @@ impl Game {
 
         let bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
             label: Some(format!("Game Render Texture Bind Group: {name}").as_str()),
-            layout: &self.game_render_texture_bind_group_layout,
+            layout: &self.game_render_color_texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -732,25 +902,95 @@ impl Game {
         (texture, bind_group)
     }
 
+    fn create_depth_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32) -> (wgpu::Texture, wgpu::BindGroup) {
+        let device = appwnd.device();
+
+        // create texture for the depth buffer
+        // TODO need to resize texture with the window resize
+        // OR maybe the render texture should be mapped to the n64 viewport?
+        let texture = device.create_texture(
+            &wgpu::TextureDescriptor {
+                label: Some(format!("Game Depth Texture: {name}").as_str()),
+                size: wgpu::Extent3d {
+                    width: width,
+                    height: height,
+                    ..Default::default()
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                // TODO at some point probably need COPY_SRC to copy the buffer into RDRAM
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter    : wgpu::FilterMode::Linear,
+            min_filter    : wgpu::FilterMode::Linear,
+            mipmap_filter : wgpu::FilterMode::Nearest,
+            //compare: Some(wgpu::CompareFunction::LessEqual),
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 100.0,
+            ..Default::default()
+        });
+
+        let bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
+            label: Some(format!("Game Depth Texture Bind Group: {name}").as_str()),
+            layout: &self.game_render_depth_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        (texture, bind_group)
+    }
+
+
     fn render_game(&mut self, appwnd: &AppWindow) {
         'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
             match cmd {
-                HleRenderCommand::SetColorImage {
+                HleRenderCommand::DefineColorImage {
                     framebuffer_address: addr,
                     ..
                 } => {
                     if !self.game_render_textures.contains_key(&addr) {
                         let width = appwnd.surface_config().width;
                         let height = appwnd.surface_config().height;
-                        let (texture, bind_group) = self.create_framebuffer_texture(appwnd, format!("${:08X}", addr).as_str(), width, height, false, false);
+                        let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", addr).as_str(), width, height, false, false);
                         self.game_render_textures.insert(addr, texture);
                         self.game_render_texture_bind_groups.insert(addr, bind_group);
                         info!(target: "RENDER", "created color render target for address ${:08X} (width={})", addr, width);
                     }
-
-                    let texture: &wgpu::Texture = self.game_render_textures.get(&addr).unwrap();
-                    self.current_render_texture_view = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
                 },
+
+                HleRenderCommand::DefineDepthImage {
+                    framebuffer_address: addr,
+                    ..
+                } => {
+                    if !self.game_depth_textures.contains_key(&addr) {
+                        let width = appwnd.surface_config().width;
+                        let height = appwnd.surface_config().height;
+                        let (texture, bind_group) = self.create_depth_texture(appwnd, format!("${:08X}", addr).as_str(), width, height);
+                        self.game_depth_textures.insert(addr, texture);
+                        self.game_depth_texture_bind_groups.insert(addr, bind_group);
+                        info!(target: "RENDER", "created depth render target for address ${:08X} (width={})", addr, width);
+                    }
+                },
+
 
                 HleRenderCommand::Viewport { .. } => {
                     //println!("Viewport: {:?}", cmd);
@@ -759,29 +999,20 @@ impl Game {
                     //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
                 },
 
-                HleRenderCommand::SetModelViewMatrix(m) => {
-                    //println!("got view: {:?}", m);
-                    // On N64, the Z component is fixed point with 10 bits of precision, so that
-                    // is scaled first to 1..-1 and then scaled to wgpu's 0..1
-                    //self.game_modelview = OPENGL_TO_WGPU_MATRIX * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0) * m.transpose();
-                    self.game_modelview = m * cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0 / 1023.0);
-                },
-
-                HleRenderCommand::SetProjectionMatrix(m) => {
-                    //println!("got proj: {:?}", m);
-
-                    self.game_projection = OPENGL_TO_WGPU_MATRIX * m;
-                    //self.game_projection = cgmath::Matrix4::from_nonuniform_scale(1.0, 1.0, 1.0/1023.0).transpose() * m;
-                },
-
-                HleRenderCommand::FillRectangle { x: rx, y: ry, w: rw, h: rh, c: rc } => {
-                    if let None = self.current_render_texture_view { continue; }
-                    let view = self.current_render_texture_view.as_ref().unwrap();
+                HleRenderCommand::FillRectangle { framebuffer_address: addr, x: rx, y: ry, w: rw, h: rh, c: rc } => {
+                    let res = self.game_render_textures.get(&addr.or(Some(0xFFFF_FFFF)).unwrap());
+                    let color_texture: &wgpu::Texture = if res.is_none() {
+                        warn!(target: "HLE", "triangle without a color target!");
+                        continue;
+                    } else {
+                        res.unwrap()
+                    };
+                    let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                     if let HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh } = self.game_viewport {
                         //let mvp_matrix = cgmath::ortho(0.0, vx, 0.0, vy, 0.1, 100.0);
                         let mvp_matrix = cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
-                        let mvp_packed = MvpPacked { mvp_matrix: mvp_matrix.into() };
+                        let mvp_packed = MvpPacked::new(mvp_matrix.into());
                         appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&[mvp_packed]));
 
                         //println!("render rect: {rx},{ry},{rw},{rh} into vp {vx},{vy},{vw},{vh}, color {rc:?}");
@@ -809,7 +1040,7 @@ impl Game {
                             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("Game Render Pass"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: view,
+                                    view: &color_view,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
                                         load: if is_fullview {
@@ -825,7 +1056,7 @@ impl Game {
                                 //.timestamp_writes: None,
                             });
 
-                            render_pass.set_pipeline(&self.game_pipeline);
+                            render_pass.set_pipeline(&self.game_pipeline_no_depth);
                             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                             render_pass.set_bind_group(1, &self.mvp_bind_group, &[0 as wgpu::DynamicOffset]);
                             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -869,9 +1100,7 @@ impl Game {
                 HleRenderCommand::MatrixData(v) => {
                     let mut vcopy = Vec::new();
                     for vdata in v.iter() {
-                        let vnew = MvpPacked {
-                            mvp_matrix: (*vdata).into(),
-                        };
+                        let vnew = MvpPacked::new((*vdata).into());
                         vcopy.push(vnew);
                     }
 
@@ -879,36 +1108,58 @@ impl Game {
                     appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(matrices));
                 },
 
-                HleRenderCommand::RenderTriangleLists(v) => {
-                    if let None = self.current_render_texture_view { continue; }
-                    let view = self.current_render_texture_view.as_ref().unwrap();
+                HleRenderCommand::RenderPass(rp) => {
+                    let res = self.game_render_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap());
+                    let color_texture: &wgpu::Texture = if res.is_none() {
+                        warn!(target: "HLE", "render pass without a color target!");
+                        continue;
+                    } else {
+                        res.unwrap()
+                    };
+                    let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                    let res = self.game_depth_textures.get(&rp.depth_buffer.or(Some(0xFFFF_FFFF)).unwrap());
+                    let depth_view: Option<wgpu::TextureView>;
+                    let (pipeline, depth_stencil_attachment) = if res.is_none() {
+                        (&self.game_pipeline_no_depth, None)
+                    } else {
+                        depth_view = Some(res.unwrap().create_view(&wgpu::TextureViewDescriptor::default()));
+                        (&self.game_pipeline, Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view.as_ref().unwrap(),
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0), // TODO proper clearing
+                                store: true,
+                            }),
+                            stencil_ops: None,
+                        }))
+                    };
 
                     let mut encoder: wgpu::CommandEncoder =
-                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Draw Triangle Encoder") });
+                        appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Render Pass Encoder") });
                     {
                         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Draw Triangle Render Pass"),
+                            label: Some("Game Render Pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: view,
+                                view: &color_view,
                                 resolve_target: None,
                                 ops: wgpu::Operations {
                                     load: wgpu::LoadOp::Load,
                                     store: true,
                                 },
                             })],
-                            depth_stencil_attachment: None,
+                            depth_stencil_attachment: depth_stencil_attachment,
                         });
 
-                        render_pass.set_pipeline(&self.game_pipeline);
+                        render_pass.set_pipeline(pipeline);
                         render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-                        for tl in v {
+                        for dl in rp.draw_list {
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix is used for the triangle list
-                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(tl.matrix_index as usize)]);
-                            let last_index = tl.start_index + tl.num_indices;
-                            render_pass.draw_indexed(tl.start_index..last_index as _, 0, 0..1);
+                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(dl.matrix_index as usize)]);
+                            let last_index = dl.start_index + dl.num_indices;
+                            render_pass.draw_indexed(dl.start_index..last_index as _, 0, 0..1);
                         }
                     }
 

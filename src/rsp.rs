@@ -1530,6 +1530,12 @@ impl RspCpuCore {
                             val &= !0x02;
                         }
 
+                        // SET_SSTEP: wtf
+                        if (val & 0x40) != 0 {
+                            warn!(target: "RSP", "Single step mode enabled");
+                            val &= !0x40;
+                        }
+
                         if (val & 0x1FF) != 0 { // TODO
                             todo!("wrote status bits ${val:08X}");
                         }

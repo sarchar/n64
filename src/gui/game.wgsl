@@ -24,7 +24,6 @@ fn vs_main(
     var out: VertexOutput;
     out.tex_coords    = vec2<f32>(in.tex_coords.x, 1.0-in.tex_coords.y);
     out.clip_position = vec4<f32>(in.position, 1.0) * camera.view_proj;
-//    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.color         = in.color;
     return out;
 }
