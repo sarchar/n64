@@ -32,6 +32,11 @@ impl PifRom {
                 ram[9] = 0x00003F3F;
             },
 
+            0xD6497E414B => { // CIC 6103, Paper Mario (NuSystems?)
+                info!(target: "PIF", "CIC 6103 detected");
+                ram[9] = 0x00007878;
+            },
+
             0x11A49F60E96 => { // CIC CIC 6105, Ocarina of Time, Majora's Mask
                 info!(target: "PIF", "CIC 6105 detected");
                 ram[9] = 0x00029100;
@@ -250,7 +255,7 @@ impl Addressable for PifRom {
         if offset >= 0x7C0 { // ignore writes to ROM
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
-                //info!(target: "PIF-RAM", "write value=${:08X} offset=${:08X}", value, offset);
+                trace!(target: "PIF-RAM", "write value=${:08X} offset=${:08X}", value, offset);
                 self.ram[ram_offset as usize] = value;
 
                 if ram_offset == 0x0F {

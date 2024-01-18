@@ -234,6 +234,7 @@ impl Hle {
             0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
             0x21F91874 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT
             0xC901CE73 => HleRspSoftwareVersion::F3DEX2, // More demos?
+            0x21F91834 => HleRspSoftwareVersion::F3DEX2, // Paper Mario, (NuSys?), 
 
             0xB54E7F93 => HleRspSoftwareVersion::S3DEX2, // Nintendo 64 demos
             0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
@@ -635,7 +636,7 @@ impl Hle {
                 let z_translate = (zt >> 2) as f32 + frac[(zt & 3) as usize];
 
                 trace!(target: "HLE", "{} gsSPViewport(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
-                println!("Viewport {{ vscale: [ {}, {}, {} ], vtrans: [ {}, {}, {} ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
+                //println!("Viewport {{ vscale: [ {}, {}, {} ], vtrans: [ {}, {}, {} ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
 
                 self.current_viewport = Some(HleRenderCommand::Viewport {
                     x: -1.0 * x_scale + x_translate,
@@ -645,7 +646,11 @@ impl Hle {
                     h:  2.0 * y_scale,
                     d:  2.0 * z_scale,
                 });
-                println!("{:?}", self.current_viewport);
+                //println!("{:?}", self.current_viewport);
+            },
+
+            14 => { // G_MV_MATRIX
+                todo!();
             },
 
             _ => {
@@ -1059,8 +1064,13 @@ impl Hle {
         let (vx, vy, vw, vh) = match self.current_viewport.clone() {
             Some(HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh, .. }) => (vx, vy, vw, vh),
             _ => {
-                warn!(target: "HLE", "gsDPFillRectangle with empty viewport!");
-                return;
+                // now viewport set?
+                if x0 == 0 && y0 == 0 && w == 320 && h == 240 {
+                    (0.0, 0.0, 320.0, 240.0)
+                } else {
+                    warn!(target: "HLE", "gsDPFillRectangle with empty viewport!");
+                    return;
+                }
             },
         };
 
