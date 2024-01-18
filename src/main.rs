@@ -46,6 +46,7 @@ fn main() {
                             //.with_target("MI", tracing_core::Level::DEBUG)
                             //.with_target("DMA", tracing_core::Level::TRACE)
                             .with_target("HLE", tracing_core::Level::TRACE)
+                            //.with_target("PIF-RAM", tracing_core::Level::TRACE)
                             .with_target("wgpu_hal", tracing_core::Level::WARN)
                             .with_target("wgpu_core", tracing_core::Level::WARN)
                             .with_target("GUI", tracing_core::Level::DEBUG)

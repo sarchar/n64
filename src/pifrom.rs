@@ -1,7 +1,29 @@
 #[allow(unused_imports)]
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::*;
+
+const IPL3_START : usize = 0x40;
+const IPL3_LENGTH: usize = 0x1000 - IPL3_START;
+
+#[derive(Debug)]
+enum CicType {
+    Nus6101,
+    Nus6102,
+    Nus6103,
+    Nus6105,
+    Nus6106,
+    Nus7101,
+    Nus7102,
+    Nus7103,
+    Nus7105,
+    Nus7106,
+    _Nus8303,
+    _Nus8401,
+    _NusDdus,
+    UnknownNTSC, // uses the 6102 seed
+    UnknownPAL,  // uses the 7101 seed
+}
 
 /// N64 PIF-ROM, where the boot rom is stored
 /// boot_rom is big endian data
@@ -16,42 +38,160 @@ impl PifRom {
     pub fn new(boot_rom: Vec<u8>, pi: &mut peripheral::PeripheralInterface) -> PifRom {
         let mut ram = vec![0u32; 16]; // 64 byte RAM
 
-        // CRC the IPL3 code, which starts after the 64 byte header and goes up to address 0x1000
-        let mut crc: u64 = 0;
-        for i in (0x40..0x1000).step_by(4) {
-            crc += match pi.read_u32((0x1000_0000 | i) as usize) {
-                Ok(value) => value as u64,
-                Err(_) => panic!("could not read cartridge, this shouldn't happen"),
-            }
-        }
-
-        // HACK! To simulate the CIC exchange, we need certain seed values at 0x7E4 in PIF ram
-        match crc {
-            0xD057C85244 => { // CIC 6102, GoldenEye
-                info!(target: "PIF", "CIC 6102 detected");
-                ram[9] = 0x00003F3F;
-            },
-
-            0xD6497E414B => { // CIC 6103, Paper Mario (NuSystems?)
-                info!(target: "PIF", "CIC 6103 detected");
-                ram[9] = 0x00007878;
-            },
-
-            0x11A49F60E96 => { // CIC CIC 6105, Ocarina of Time, Majora's Mask
-                info!(target: "PIF", "CIC 6105 detected");
-                ram[9] = 0x00029100;
-            },
-
-            _ => {
-                info!(target: "PIF", "unknown IPL3/CIC checksum ${:08X}. game probably won't run", crc);
-            }
+        // Get the country code of the rom
+        let cc = ((pi.read_u32(0x1000_003C).expect("error reading rom") >> 8) as u8) as char;
+        let is_pal = match cc {
+            'D' | 'F' | 'I' | 'P' | 'S' | 'U' | 'X' | 'Y' => true, // Germany, France, Italy, Europe, Spain, Australia
+            _ => false,
         };
+
+        // Determine the CIC. We need the IPL3 code.
+        let ipl3 = pi.read_block(0x1000_0000 | IPL3_START, IPL3_LENGTH as u32).expect("error reading rom");
+        let (cic_type, hash, seed) = PifRom::determine_cic(&ipl3, is_pal);
+        info!(target: "PIF", "found CIC {cic_type:?}, hash ${hash:010X}, seed 0x{seed:02X}, region {cc}");
+
+        // Seed the seeds at 0x7E6-7
+        let seed = seed as u32;
+        ram[9] = (seed << 8) | seed;
 
         PifRom {
             boot_rom: boot_rom,
             ram: ram,
             command_finished: false,
         }
+    }
+
+    // Calculate the hash used by IPL2 to verify the ROM.  The hash depends on the seed value,
+    // which we don't really know until we know what CIC is used.  Basically, guess.
+    fn determine_cic(data: &[u32], is_pal: bool) -> (CicType, u64, u8) {
+        let seed = 0x3F;
+        match PifRom::ipl2hash(data, seed) {
+            x @ 0x45CC73EE317A => { return (CicType::Nus6101, x, seed); }, // only Star Fox 64
+            x @ 0xA536C0F1D859 => { return (if is_pal { CicType::Nus7101 } else { CicType::Nus6102 }, x, seed); }, // Looootttssss of games.
+            x @ 0x44160EC5D9AF => { return (CicType::Nus7102, x, seed); },
+            _ => {},
+        };
+
+        let seed = 0x78;
+        match PifRom::ipl2hash(data, seed) {
+            x @ 0x586FD4709867 => { return (if is_pal { CicType::Nus7103 } else { CicType::Nus6103 }, x, seed); }, // Paper Mario, Pokemon Stadium, Super Smash Bros, and a few others
+            _ => {},
+        };
+
+        let seed = 0x91;
+        match PifRom::ipl2hash(data, seed) {
+            x @ 0x8618A45BC2D3 => { return (if is_pal { CicType::Nus7105 } else { CicType::Nus6105 }, x, seed); }, // LoZ, a few others
+            _ => {},
+        };
+
+        let seed = 0x85;
+        match PifRom::ipl2hash(data, seed) {
+            x @ 0x2BBAD4E6EB74 => { return (if is_pal { CicType::Nus7106 } else { CicType::Nus6106 }, x, seed); }, // Cruis'n World, F-Zero X, Yoshi's Story
+            _ => {},
+        };
+
+        let seed = 0xDD; // 64DD? Niiice.
+        match PifRom::ipl2hash(data, seed) {
+            //x @ 0x32B294E2AB90 => (CicType::Nus8303, x, seed, false), // 64DD retail JP
+            //x @ 0x6EE8D9E84970 => (CicType::Nus8401, x, seed, false), // 64DD dev
+            //x @ 0x083C6C77E0B1 => (CicType::Nus5167, x, seed, false), // 64DD conversion cartridges ??
+            //x @ 0x05BA2EF0A5f1 => (CicType::NusDdus, x, seed, false), // 64DD retail US
+            _ => {},
+        };
+
+        // Unknown IPL3 checksum, default to 6102 with seed 0x3F
+        let checksum = PifRom::ipl2hash(data, 0x3F);
+        warn!(target: "PIF", "unknown IPL3/CIC checksum ${:010X}, game may not run.", checksum);
+        (if is_pal { CicType::UnknownPAL } else { CicType::UnknownNTSC }, checksum, 0x3F)
+    }
+
+    // Many thanks to @korgeaux of Summer Cart 64 for the algorithm. Minor changes included
+    // https://github.com/Polprzewodnikowy/SummerCart64/blob/main/sw/deployer/src/sc64/cic.rs#L6
+    fn ipl2hash(data: &[u32], seed: u8) -> u64 {
+        const MAGIC: u32 = 0x6C078965;
+        assert!(data.len() == IPL3_LENGTH / 4);
+
+        let add = |a: u32, b: u32| a.wrapping_add(b);
+        let sub = |a: u32, b: u32| a.wrapping_sub(b);
+        let rol = |a: u32, i: u32| a.rotate_left(i);
+        let ror = |a: u32, i: u32| a.rotate_right(i);
+        let mul = |a: u32, b: u32| a.wrapping_mul(b);
+        let sum = |a: u32, b: u32, c: u32| {
+            let prod = (a as u64).wrapping_mul((if b == 0 { c } else { b }) as u64);
+            let hi = (prod >> 32) as u32;
+            let lo = prod as u32;
+            let diff = hi.wrapping_sub(lo);
+            if diff == 0 { a } else { diff }
+        };
+
+        let init = add(mul(MAGIC, seed as u32), 1) ^ data[0];
+        let mut buf = vec![init; 16];
+
+        for i in 1..=1008 {
+            let ii   = i as u32;
+            let prev = data[ii.saturating_sub(2) as usize];
+            let cur  = data[i - 1];
+
+            buf[0] = add(buf[0], sum(sub(1007, ii), cur, ii));
+            buf[1] = sum(buf[1], cur, ii);
+            buf[2] = buf[2] ^ cur;
+            buf[3] = add(buf[3], sum(add(cur, 5), MAGIC, ii));
+            buf[4] = add(buf[4], ror(cur, prev & 0x1F));
+            buf[5] = add(buf[5], rol(cur, prev >> 27));
+            buf[6] = if cur < buf[6] {
+                add(buf[3], buf[6]) ^ add(cur, ii)
+            } else {
+                add(buf[4], cur) ^ buf[6]
+            };
+            buf[7] = sum(buf[7], rol(cur, prev & 0x1F), ii);
+            buf[8] = sum(buf[8], ror(cur, prev >> 27), ii);
+            buf[9] = if prev < cur {
+                sum(buf[9], cur, ii)
+            } else {
+                add(buf[9], cur)
+            };
+
+            if i == 1008 { break; }
+
+            let next = data[i];
+
+            buf[10] = sum(add(buf[10], cur), next, ii);
+            buf[11] = sum(buf[11] ^ cur, next, ii);
+            buf[12] = add(buf[12], buf[8] ^ cur);
+            buf[13] = add(buf[13], add(ror(cur, cur & 0x1F), ror(next, next & 0x1F)));
+            buf[14] = sum(sum(buf[14], ror(cur, prev & 0x1F), ii), ror(next, cur & 0x1F), ii);
+            buf[15] = sum(sum(buf[15], rol(cur, prev >> 27), ii), rol(next, cur >> 27), ii);
+        }
+
+        let mut result = vec![buf[0]; 4];
+
+        for i in 0..16 {
+            let ii = i as u32;
+            let cur = buf[i];
+
+            result[0] = add(result[0], ror(cur, cur & 0x1F));
+            result[1] = if cur < result[0] {
+                add(result[1], cur)
+            } else {
+                sum(result[1], cur, ii)
+            };
+            result[2] = if ((cur & 0x02) >> 1) == (cur & 0x01) {
+                add(result[2], cur)
+            } else {
+                sum(result[2], cur, ii)
+            };
+            result[3] = if (cur & 0x01) == 0x01 {
+                result[3] ^ cur
+            } else {
+                sum(result[3], cur, ii)
+            };
+        }
+
+        let result_sum = sum(result[0], result[1], 16);
+        let result_xor = result[2] ^ result[3];
+
+        // final checksum
+        (((result_sum & 0xFFFF) as u64) << 32) | (result_xor as u64)
     }
 
     fn update_control_write(&mut self) {

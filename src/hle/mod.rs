@@ -299,7 +299,7 @@ impl Hle {
     }
 
     pub fn process_display_list(&mut self, dl_start: u32, dl_length: u32, ucode_address: u32) {
-        info!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
+        trace!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
 
         if let HleRspSoftwareVersion::Uninitialized = self.software_version {
             if !self.detect_software_version(ucode_address) { 
@@ -326,12 +326,12 @@ impl Hle {
         // finalize current render pass
         self.finalize_render_pass();
 
-        println!("found {} matrices", self.matrices.len());
-        println!("found {} vertices", self.vertices.len());
-        println!("found {} indices", self.indices.len());
-        println!("found {} render passes", self.render_passes.len());
-        println!("found {} draw calls", self.num_draws);
-        println!("found {} tris", self.num_tris);
+        debug!(target: "HLE", "found {} matrices", self.matrices.len());
+        debug!(target: "HLE", "found {} vertices", self.vertices.len());
+        debug!(target: "HLE", "found {} indices", self.indices.len());
+        debug!(target: "HLE", "found {} render passes", self.render_passes.len());
+        debug!(target: "HLE", "found {} draw calls", self.num_draws);
+        debug!(target: "HLE", "found {} tris", self.num_tris);
 
         // depth buffers are cleared by being used as color images, so remove them from being
         // created as actual color targets
