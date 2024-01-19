@@ -1724,10 +1724,6 @@ impl Cpu {
             match self.current_instruction_pc & 0xFFFF_FFFF {
                 0x8000_0228 => { info!(target: "CPU", "IPL3 computed CRC1: ${:016X}, PIF computed CRC1: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[7]); },
                 0x8000_0234 => { info!(target: "CPU", "IPL3 computed CRC2: ${:016X}, PIF computed CRC2: ${:016X} (if these don't match, the game won't start)", self.gpr[self.inst.rt], self.gpr[16]); },
-                // for LoZ OoT
-                0x8000_28C4 => { if (self.gpr[self.inst.rt] & 0x08) == 0 { info!(target: "CPU", "MI interrupt code = ${:08X}", self.gpr[self.inst.rt]); } },
-                // for GoldenEye
-                0x7001_0464 => { if (self.gpr[self.inst.rt] & 0x08) == 0 { info!(target: "CPU", "MI interrupt code = ${:08X}", self.gpr[self.inst.rt]); } },
                 _ => {},
             }
         }

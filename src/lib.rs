@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub mod audio;
 pub mod avx512f_wrapper;
 pub mod cop1;
 pub mod cpu;

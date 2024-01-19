@@ -279,7 +279,7 @@ impl Rsp {
                             // All other tasks types are LLE'd
                             _ => {
                                 if task_type < 8 {
-                                    trace!(target: "RSP", "found task type {}", task_type);
+                                    debug!(target: "RSP", "found task type {}", task_type);
                                 }
                             },
                         }

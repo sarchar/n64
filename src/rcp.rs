@@ -7,6 +7,7 @@ use tracing::{debug, error, trace, info};
 
 use crate::*;
 
+use crate::audio::AudioInterface;
 use crate::mips::MipsInterface;
 use crate::peripheral::PeripheralInterface;
 use crate::pifrom::PifRom;
@@ -44,6 +45,7 @@ impl fmt::Debug for DmaInfo {
 /// Contains the on-board RSP, RDP and manages the system bus
 pub struct Rcp {
     // bus objects
+    ai: AudioInterface,
     pub mi: MipsInterface,
     pi: PeripheralInterface,
     pub ri: RdramInterface,
@@ -84,6 +86,7 @@ impl Rcp {
         let rsp = Rsp::new(comms.clone(), rdp.clone());
 
         Rcp {
+            ai : AudioInterface::new(comms.clone()),
             pi : pi,
             rdp: LockedAddressable::new(rdp), // wrap rdp in a LockedAddressable so that match_addressable can return the rdp
             ri : RdramInterface::new(comms.clone()),
@@ -175,10 +178,7 @@ impl Rcp {
                     4 => (Some(&mut self.vi), offset & 0x000F_FFFF),
 
                     // AI 0x0450_0000-0x045F_FFFF
-                    5 => {
-                        error!(target: "RCP", "unimplemented AI {mode}");
-                        (None, 0)
-                    },
+                    5 => (Some(&mut self.ai), offset & 0x000F_FFFF),
                     
                     // PI 0x0460_0000-0x046F_FFFF
                     6 => (Some(&mut self.pi), offset & 0x7FFF_FFFF),

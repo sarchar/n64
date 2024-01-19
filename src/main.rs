@@ -39,9 +39,9 @@ fn main() {
     let default_filter = filter::Targets::new()
                             .with_target("rustyline", tracing_core::Level::ERROR)
                             //.with_target("RCP", tracing_core::Level::TRACE)
-                            //.with_target("RDP", tracing_core::Level::TRACE)
+                            .with_target("RDP", tracing_core::Level::TRACE)
                             //.with_target("VI", tracing_core::Level::DEBUG)
-                            //.with_target("RSP", tracing_core::Level::DEBUG)
+                            .with_target("RSP", tracing_core::Level::DEBUG)
                             //.with_target("JOY", tracing_core::Level::DEBUG)
                             //.with_target("MI", tracing_core::Level::DEBUG)
                             //.with_target("DMA", tracing_core::Level::TRACE)
@@ -50,6 +50,7 @@ fn main() {
                             .with_target("wgpu_hal", tracing_core::Level::WARN)
                             .with_target("wgpu_core", tracing_core::Level::WARN)
                             .with_target("GUI", tracing_core::Level::DEBUG)
+                            .with_target("AI", tracing_core::Level::TRACE)
                             .with_default(Level::INFO);
 
     // create a reload layer so logging levels can be modified
