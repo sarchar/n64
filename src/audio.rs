@@ -40,10 +40,23 @@ impl AudioInterface {
 
 impl Addressable for AudioInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        trace!(target: "AI", "read32 address=${:08X}", offset);
-        todo!("address=${:08X}", offset);
+        info!(target: "AI", "read32 address=${:08X}", offset);
 
-        //Ok(0)
+        match offset {
+            // AI_LENGTH
+            0x0_0004 => {
+                Ok(2048)
+            },
+
+            // AI_STATUS
+            0x0_000C => {
+                Ok(0x8000_0000 | (self.dma_enable as u32) << 25)
+            },
+
+            _ => {
+                todo!();
+            },
+        }
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {

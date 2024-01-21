@@ -206,7 +206,7 @@ struct TextureData {
 impl Default for TextureState {
     fn default() -> Self {
         Self {
-            tmem: [127u8; 4*1024],
+            tmem: [0u8; 4*1024],
             data: Vec::new(),
             s_scale: 0.0, t_scale: 0.0, mipmaps: 0, tile: 0,
             enabled: false, format: 0, size: 0, width: 0,
@@ -410,19 +410,20 @@ impl Hle {
         //self.send_hle_render_command(HleRenderCommand::TextureData { tmem: (&self.tex.tmem).to_owned() });
 
         // find the maximum length of all the texture fetches
-        let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
+        //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
+
         // I specifically know the first 36x33 texels are a 33x33 texture
         // a 512x??? would have 14 tiles across, needing 21 tiles down or 693 pixels
         // I guess a 512x1024 texture should hold enough texels?
-        const tex_width: usize = 512;
-        const tex_height: usize = 1024;
-        const bytes_per_texel: usize = 4;
+        let tex_width: usize = 512;
+        let _tex_height: usize = 1024;
+        let bytes_per_texel: usize = 4;
         //let tex: [u8; bytes_per_texel*tex_width*tex_height] = [0u8; 4*512*1024];
-        const tile_width: usize = 32;
-        const tile_height: usize = 32;
-        const tiles_across: usize = tex_width / tile_width;
-        const row_stride: usize = tex_width * tile_height * bytes_per_texel;
-        const column_stride: usize = tile_width * bytes_per_texel;
+        let tile_width: usize = 33;
+        let tile_height: usize = 33;
+        let tiles_across: usize = tex_width / tile_width;
+        let row_stride: usize = tex_width * tile_height * bytes_per_texel;
+        let column_stride: usize = tile_width * bytes_per_texel;
         for tdi in 0..self.tex.data.len() {
             let td = &self.tex.data[tdi];
 
@@ -778,6 +779,10 @@ impl Hle {
                 //println!("{:?}", self.current_viewport);
             },
 
+            10 => { // G_MV_LIGHT
+                trace!(target: "HLE", "{} gsSPLight...?", self.command_prefix);
+            },
+
             14 => { // G_MV_MATRIX
                 todo!();
             },
@@ -1046,25 +1051,23 @@ impl Hle {
             let current_tile = self.tex.tile;
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
             let loaded_block_index = (self.tex.data.len() - 1) as u32;
-            let loaded_block = &self.tex.data[loaded_block_index as usize];
             // loaded_block_index tells us the UL corner where this vertices texcoords are to be mapped
-            // the texture is a 512x1024 image with 32x32 tiles in it
-            let tile_width = 32;
-            let tile_height = 32;
+            // the texture is a 512x1024 image with 33x33 tiles in it
+            let tile_width = 33;
+            let tile_height = 33;
             let tex_width = 512;
             let tiles_across = tex_width / tile_width;
             let ty = loaded_block_index / tiles_across;
             let tx = loaded_block_index % tiles_across;
             let start_y = ty * tile_height;
             let start_x = tx * tile_width;
-            vtx.tex_coords[0] = start_x as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
-            vtx.tex_coords[1] = start_y as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
+            // adjust start coordinate to be the pixel in the larger 512x1024 image
+            // and convert to be the center of the pixel
+            vtx.tex_coords[0] = start_x as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0) + 0.5;
+            vtx.tex_coords[1] = start_y as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1) + 0.5;
             // scale to 0..1 on the 512x1024 image
             vtx.tex_coords[0] /= 512.0;
-            vtx.tex_coords[1] = 1.0 - (vtx.tex_coords[1] / 1024.0);
-            // put the coordinate into the "center" of the texel
-            //vtx.tex_coords[0] += (1.0 / 512.0) / 2.0;
-            //vtx.tex_coords[1] += (1.0 / 1024.0) / 2.0;
+            vtx.tex_coords[1] /= 1024.0;
         }   
 
         let index = self.vertices.len();
@@ -1082,11 +1085,11 @@ impl Hle {
         //let v1 = self.vertex_stack[v1 as usize];
         //let v2 = self.vertex_stack[v2 as usize];
         // transform coordinates
-        let (iv, v0) = self.make_final_vertex(v0 as usize).unwrap();
+        let (_iv, v0) = self.make_final_vertex(v0 as usize).unwrap();
         //println!("iv0: {:?}", iv);
-        let (iv, v1) = self.make_final_vertex(v1 as usize).unwrap();
+        let (_iv, v1) = self.make_final_vertex(v1 as usize).unwrap();
         //println!("iv1: {:?}", iv);
-        let (iv, v2) = self.make_final_vertex(v2 as usize).unwrap();
+        let (_iv, v2) = self.make_final_vertex(v2 as usize).unwrap();
         //println!("iv2: {:?}", iv);
         let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
         tl.num_indices += 3;
@@ -1103,23 +1106,23 @@ impl Hle {
         let v12 = ((self.command >>  1) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP2Triangle({}, {}, {}, 0, {}, {}, {}, 0)", self.command_prefix, v00, v01, v02, v10, v11, v12);
         // translate to global vertex stack
-        let v00 = self.vertex_stack[v00 as usize];
-        let v01 = self.vertex_stack[v01 as usize];
-        let v02 = self.vertex_stack[v02 as usize];
-        let v10 = self.vertex_stack[v10 as usize];
-        let v11 = self.vertex_stack[v11 as usize];
-        let v12 = self.vertex_stack[v12 as usize];
+        let (_, v00) = self.make_final_vertex(v00 as usize).unwrap();
+        let (_, v01) = self.make_final_vertex(v01 as usize).unwrap();
+        let (_, v02) = self.make_final_vertex(v02 as usize).unwrap();
+        let (_, v10) = self.make_final_vertex(v10 as usize).unwrap();
+        let (_, v11) = self.make_final_vertex(v11 as usize).unwrap();
+        let (_, v12) = self.make_final_vertex(v12 as usize).unwrap();
         let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
         tl.num_indices += 6;
         self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
         self.num_tris += 2;
-        todo!();
     }
 
     fn handle_texrect(&mut self) { // G_TEXRECT
         let cmd1 = self.next_display_list_command();
         let cmd2 = self.next_display_list_command();
         self.command_words += 4;
+
         let x1   = ((self.command >> 44) & 0xFFF) as u16;
         let y1   = ((self.command >> 32) & 0xFFF) as u16;
         let tile = ((self.command >> 24) & 0x0F) as u8;
@@ -1185,8 +1188,8 @@ impl Hle {
         }
 
         // swizzle every 4 texels on odd rows
-        for y in (1..32).step_by(2) {
-            for x in (0..32).step_by(4) {
+        for y in (1..33).step_by(2) {
+            for x in (0..33).step_by(4) {
                 let c0 = data[(y * 36 + x + 0) * 2..][..2].to_owned();
                 let c1 = data[(y * 36 + x + 1) * 2..][..2].to_owned();
                 let c2 = data[(y * 36 + x + 2) * 2..][..2].to_owned();
@@ -1203,7 +1206,6 @@ impl Hle {
         }
 
         let to_f32 = |i| (i as f32) / (4.0 * 1024.0);
-        let data_index = self.tex.data.len();
         self.tex.data.push(TextureData {
             tmem_address: self.tex.address,
             format      : self.tex.format,
@@ -1424,10 +1426,10 @@ impl Hle {
         let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
         let cur_pos = self.vertices.len() as u16; // save start index
         // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));

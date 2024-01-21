@@ -2,6 +2,7 @@
 use std::mem;
 use std::sync::mpsc;
 
+#[allow(unused_imports)]
 use tracing::{debug, error, info};
 
 use crate::*;

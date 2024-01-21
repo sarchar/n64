@@ -28,10 +28,10 @@ struct Vertex {
 
 // Y texture coordinate is inverted to flip the resulting image
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
+    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[
@@ -395,7 +395,7 @@ impl App for Game {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
