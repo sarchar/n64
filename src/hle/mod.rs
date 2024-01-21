@@ -435,12 +435,12 @@ impl Hle {
             for y in 0..tile_height {
                 for x in 0..tile_width {
                     let offset = (y * tex_width + x) * bytes_per_texel;
-                    let doff = (y * 36 + x) * 2;
-                    let c = ((td.data[doff] as u16) << 8) | td.data[doff+1] as u16;
-                    self.texdata[base + offset + 0] = (((c >> 11) & 0x1f) << 3) as u8;
-                    self.texdata[base + offset + 1] = (((c >>  6) & 0x1f) << 3) as u8;
-                    self.texdata[base + offset + 2] = (((c >>  1) & 0x1f) << 3) as u8;
-                    self.texdata[base + offset + 3] = if (c & 0x01) == 1 { 255 } else { 0 };
+                    let data_offset = (y * 36 + x) * 2;
+                    let texel = ((td.data[data_offset] as u16) << 8) | td.data[data_offset+1] as u16;
+                    self.texdata[base+offset+0] = (((texel >> 11) & 0x1f) as u8) << 3;
+                    self.texdata[base+offset+1] = (((texel >>  6) & 0x1f) as u8) << 3;
+                    self.texdata[base+offset+2] = (((texel >>  1) & 0x1f) as u8) << 3;
+                    self.texdata[base+offset+3] = if (texel & 0x01) == 1 { 255 } else { 0 };
                 }
             }
         }
@@ -1182,6 +1182,24 @@ impl Hle {
         let mut data = Vec::new();
         for v in self.load_from_rdram(self.tex.address, size) {
             data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        // swizzle every 4 texels on odd rows
+        for y in (1..32).step_by(2) {
+            for x in (0..32).step_by(4) {
+                let c0 = data[(y * 36 + x + 0) * 2..][..2].to_owned();
+                let c1 = data[(y * 36 + x + 1) * 2..][..2].to_owned();
+                let c2 = data[(y * 36 + x + 2) * 2..][..2].to_owned();
+                let c3 = data[(y * 36 + x + 3) * 2..][..2].to_owned();
+                data[((y * 36) + x + 0) * 2 + 0] = c2[0];
+                data[((y * 36) + x + 0) * 2 + 1] = c2[1];
+                data[((y * 36) + x + 1) * 2 + 0] = c3[0];
+                data[((y * 36) + x + 1) * 2 + 1] = c3[1];
+                data[((y * 36) + x + 2) * 2 + 0] = c0[0];
+                data[((y * 36) + x + 2) * 2 + 1] = c0[1];
+                data[((y * 36) + x + 3) * 2 + 0] = c1[0];
+                data[((y * 36) + x + 3) * 2 + 1] = c1[1];
+            }
         }
 
         let to_f32 = |i| (i as f32) / (4.0 * 1024.0);
