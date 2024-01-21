@@ -28,10 +28,10 @@ struct Vertex {
 
 // Y texture coordinate is inverted to flip the resulting image
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
+    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[
@@ -140,6 +140,7 @@ pub struct Game {
 
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    diffuse_texture: wgpu::Texture,
     diffuse_bind_group: wgpu::BindGroup,
 
     mvp_buffer: wgpu::Buffer,
@@ -251,7 +252,7 @@ impl App for Game {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: appwnd.surface_config().format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -327,14 +328,14 @@ impl App for Game {
             }
         );
 
-        let diffuse_bytes = include_bytes!("happy-tree.png");
-        let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
-        let diffuse_rgba  = diffuse_image.to_rgba8();
-        let diffuse_dim   = diffuse_image.dimensions();
+        //let diffuse_bytes = include_bytes!("happy-tree.png");
+        //let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
+        //let diffuse_rgba  = diffuse_image.to_rgba8();
+        //let diffuse_dim   = diffuse_image.dimensions();
 
         let texture_size = wgpu::Extent3d {
-            width: diffuse_dim.0,
-            height: diffuse_dim.1,
+            width: 512, //diffuse_dim.0,
+            height: 1024, //diffuse_dim.1,
             depth_or_array_layers: 1,
         };
 
@@ -351,21 +352,21 @@ impl App for Game {
             }
         );
 
-        appwnd.queue().write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &diffuse_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &diffuse_rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * diffuse_dim.0),
-                rows_per_image: Some(diffuse_dim.1),
-            },
-            texture_size,
-        );
+        //appwnd.queue().write_texture(
+        //    wgpu::ImageCopyTexture {
+        //        texture: &diffuse_texture,
+        //        mip_level: 0,
+        //        origin: wgpu::Origin3d::ZERO,
+        //        aspect: wgpu::TextureAspect::All,
+        //    },
+        //    &diffuse_rgba,
+        //    wgpu::ImageDataLayout {
+        //        offset: 0,
+        //        bytes_per_row: Some(4 * texture_size.width),
+        //        rows_per_image: Some(teture_size.height),
+        //    },
+        //    texture_size,
+        //);
 
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Game Texture Bind Group"),
@@ -394,7 +395,7 @@ impl App for Game {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -586,6 +587,8 @@ impl App for Game {
 
             vertex_buffer: vertex_buffer,
             index_buffer: index_buffer,
+
+            diffuse_texture: diffuse_texture,
             diffuse_bind_group: diffuse_bind_group,
 
             mvp_buffer: mvp_buffer,
@@ -758,22 +761,28 @@ impl App for Game {
                         if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
                             let start = (video_buffer >> 2) as usize;
                             let mut image_data = vec![0u8; width*height*4];
-                            for i in 0..(width*height) {
-                                match format {
-                                    2 => {
-                                        let shift = 16 - ((i & 1) << 4);
-                                        let pix = (rdram[start + (i >> 1)] >> shift) as u16;
-                                        let r = ((pix >> 11) & 0x1F) as u8;
-                                        let g = ((pix >>  6) & 0x1F) as u8;
-                                        let b = ((pix >>  1) & 0x1F) as u8;
-                                        let a = (pix & 0x01) as u8;
-                                        image_data[i*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
-                                    },
-                                    3 => { 
-                                        let pix = rdram[start+i] | 0xff;
-                                        image_data[i*4..][..4].copy_from_slice(&pix.to_be_bytes());
-                                    },
-                                    _ => break,
+                            for y in 0..height {
+                                for x in 0..width {
+                                    // invert Y because the texcoords of the quad render are inverted
+                                    let i = (y * width) + x;
+                                    let iy = ((height - y - 1) * width) + x;
+
+                                    match format {
+                                        2 => {
+                                            let shift = 16 - ((i & 1) << 4);
+                                            let pix = (rdram[start + (i >> 1)] >> shift) as u16;
+                                            let r = ((pix >> 11) & 0x1F) as u8;
+                                            let g = ((pix >>  6) & 0x1F) as u8;
+                                            let b = ((pix >>  1) & 0x1F) as u8;
+                                            let a = (pix & 0x01) as u8;
+                                            image_data[iy*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
+                                        },
+                                        3 => { 
+                                            let pix = rdram[start+i] | 0xff;
+                                            image_data[iy*4..][..4].copy_from_slice(&pix.to_be_bytes());
+                                        },
+                                        _ => break,
+                                    }
                                 }
                             }
 
@@ -836,7 +845,7 @@ impl App for Game {
     fn render_ui(&mut self, _appwnd: &AppWindow, ui: &imgui::Ui) {
         let window = ui.window("Stats");
         window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
-              .position([0.0, 0.0], imgui::Condition::Once)
+              .position([0.0, 0.0], imgui::Condition::FirstUseEver)
               .build(|| {
                   ui.text(format!("UI   FPS: {}", self.ui_fps));
                   ui.text(format!("GAME FPS: {}", self.game_fps));
@@ -1029,6 +1038,47 @@ impl Game {
 
                     let matrices = &vcopy;
                     appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(matrices));
+                },
+
+                HleRenderCommand::TextureData { tmem } => {
+                    // assume tmem is 16bpp rgba, convert to 32bpp rgba
+                    // tmem is 64x32
+                    //let mut buf = Vec::new();
+                    //for y in 0..1024 {
+                    //    for x in 0..512 {
+                    //        let idx = ((y * 512) + x) * 2;
+                    //        let c = &tmem[idx..idx+2];
+
+                    //        let r = ((c[0] >> 3) & 0x1F) as u8;
+                    //        let g = (((c[0] & 0x07) << 2) | ((c[1] & 0xC0) >> 6)) as u8;
+                    //        let b = ((c[1] >> 1) & 0x1F) as u8;
+                    //        let a = if (c[1] & 0x01) == 1 { 255 } else { 0 };
+                    //        buf.push(r << 3);
+                    //        buf.push(g << 3);
+                    //        buf.push(b << 3);
+                    //        buf.push(a);
+                    //    }
+                    //}
+
+                    appwnd.queue().write_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: &self.diffuse_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytemuck::cast_slice(&tmem),
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * 512),
+                            rows_per_image: Some(1024),
+                        },
+                        wgpu::Extent3d {
+                            width: 512,
+                            height: 1024,
+                            depth_or_array_layers: 1,
+                        },
+                    );
                 },
 
                 HleRenderCommand::RenderPass(rp) => {

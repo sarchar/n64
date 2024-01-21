@@ -219,7 +219,7 @@ pub trait App {
 }
 
 pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1024, 768, true).await;
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);

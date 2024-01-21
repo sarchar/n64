@@ -214,7 +214,10 @@ impl Addressable for VideoInterface {
             0x0_000C => self.interrupt_line,
 
             // VI_V_CURRENT
-            0x0_0010 => self.current_line,
+            0x0_0010 => {
+                trace!(target: "VI", "current_line = {}", self.current_line);
+                self.current_line * 2
+            },
 
             // VI_BURST
             0x0_0014 => self.burst,

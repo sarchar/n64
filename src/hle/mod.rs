@@ -31,6 +31,7 @@ pub enum HleRenderCommand {
     VertexData(Vec<Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
+    TextureData { tmem: Vec<u8> },
     RenderPass(RenderPassState),
     Sync,
 }
@@ -116,9 +117,11 @@ pub struct Hle {
     dl_stack: Vec<DLStackEntry>,
     segments: [u32; 16],
 
-    // F3DZEX has storage for 32 vertices
-    vertices: Vec<Vertex>,
-    vertex_stack: [u16; 32],
+    // we have a temporary space for vertices that have not had their texcoords transformed yet
+    // these vertices won't be transfered to the renderer if they never get used in a draw call
+    vertices_internal: Vec<Vertex>,          // non-transformed, not rendered
+    vertices: Vec<Vertex>,                   // post texture transform, rendered
+    vertex_stack: [u16; 32],                 // F3DZEX has storage for 32 vertices
     indices: Vec<u16>,
 
     matrices: Vec<Matrix4<f32>>,             // all the unique matrices in the DL
@@ -136,8 +139,14 @@ pub struct Hle {
     render_passes: Vec<RenderPassState>,
     num_draws: u32,
     num_tris: u32,
+    num_texels: u32,
+    total_texture_data: u32,
 
     fill_color: u32,
+
+    // texture state
+    tex: TextureState,
+    texdata: Vec<u8>,
 
     command_table: [DLCommand; 256],
     command_address: u32,
@@ -147,12 +156,75 @@ pub struct Hle {
     command_prefix: String,
 }
 
+struct TextureState {
+    tmem   : [u8; 4*1024], // 4KiB of TMEM
+    data   : Vec<TextureData>,
+
+    // gSPTexture
+    s_scale: f32,  // s coordinate texture scale
+    t_scale: f32,  // t coordinate texture scale
+    mipmaps: u8,   // number of mipmap levels
+    tile   : u8,   // currently selected tile in TMEM
+    enabled: bool, // enable/disable texturing on the current primitive
+
+    // gDPSetTextureImage
+    format : u8,   // G_IM_FMT_*
+    size   : u8,   // G_IM_SIZ_*
+    width  : u16,  // 1..4096
+    address: u32,  // physical address in DRAM
+
+    // gDPSetTile
+    rdp_tiles: [RdpTileState; 8],
+}
+
+#[derive(Default,Copy,Clone)]
+struct RdpTileState {
+    format : u8,  // G_IM_FMT_*
+    size   : u8,  // G_IM_SIZ_*
+    line   : u16, // number of qwords per image row
+    tmem   : u16, // location of texture in tmem in qwords (actual address is tmem * sizeof(u64))
+    palette: u8,  // selected palette
+    clamp_s: u8,  // s,t clamp
+    clamp_t: u8,
+    mask_s : u8,  // s,t bit mask
+    mask_t : u8, 
+    shift_s: u8,  // s,t shift after perspective correction
+    shift_t: u8,
+    ul     : (f32, f32), // upper-left coordinate
+    lr     : (f32, f32), // lower-right coordinate, for wrapping
+}
+
+struct TextureData {
+    tmem_address: u32,        // address at which this texture data was loaded into tmem
+    format      : u8,         // G_IM_FMT_*
+    size        : u8,         // G_IM_SIZ_*
+    data        : Vec<u8>,    // actual texture data
+    data_size   : u32,        // could theoretically be less than data if not aligned to 64 bits
+    ul          : (f32, f32), // top left coordinate of texture
+}
+
+impl Default for TextureState {
+    fn default() -> Self {
+        Self {
+            tmem: [127u8; 4*1024],
+            data: Vec::new(),
+            s_scale: 0.0, t_scale: 0.0, mipmaps: 0, tile: 0,
+            enabled: false, format: 0, size: 0, width: 0,
+            address: 0, 
+            rdp_tiles: [RdpTileState::default(); 8],
+        }
+    }
+}
+
 const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let's use it too?
 
 type DLCommand = fn(&mut Hle) -> ();
 
 impl Hle {
     pub fn new(comms: SystemCommunication, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
+        let mut texdata = Vec::new();
+        texdata.resize(4*512*1024, 0);
+
         Self {
             comms: comms,
 
@@ -163,6 +235,7 @@ impl Hle {
             dl_stack: vec![],
             segments: [0u32; 16],
 
+            vertices_internal: vec![],
             vertices: vec![],
             vertex_stack: [0; 32],
             indices: vec![],
@@ -180,8 +253,13 @@ impl Hle {
             render_passes: vec![],
             num_draws: 0,
             num_tris: 0,
+            num_texels: 0,
+            total_texture_data: 0,
 
             fill_color: 0,
+
+            tex: TextureState::default(),
+            texdata: texdata,
 
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
@@ -195,6 +273,7 @@ impl Hle {
     fn reset_display_list(&mut self) {
         self.dl_stack.clear();
         self.segments = [0u32; 16];
+        self.vertices_internal.clear();
         self.vertices.clear();
         self.vertex_stack = [0; 32];
         self.indices.clear();
@@ -209,7 +288,10 @@ impl Hle {
         self.render_passes.clear();
         self.num_draws = 0;
         self.num_tris = 0;
+        self.num_texels = 0;
+        self.total_texture_data = 0;
         self.fill_color = 0;
+        self.tex = TextureState::default();
 
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
@@ -323,15 +405,62 @@ impl Hle {
             self.process_display_list_command(addr, cmd);
         }
 
+        // render the tmem for now
+        self.render_tmem();
+        //self.send_hle_render_command(HleRenderCommand::TextureData { tmem: (&self.tex.tmem).to_owned() });
+
+        // find the maximum length of all the texture fetches
+        let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
+        // I specifically know the first 36x33 texels are a 33x33 texture
+        // a 512x??? would have 14 tiles across, needing 21 tiles down or 693 pixels
+        // I guess a 512x1024 texture should hold enough texels?
+        const tex_width: usize = 512;
+        const tex_height: usize = 1024;
+        const bytes_per_texel: usize = 4;
+        //let tex: [u8; bytes_per_texel*tex_width*tex_height] = [0u8; 4*512*1024];
+        const tile_width: usize = 32;
+        const tile_height: usize = 32;
+        const tiles_across: usize = tex_width / tile_width;
+        const row_stride: usize = tex_width * tile_height * bytes_per_texel;
+        const column_stride: usize = tile_width * bytes_per_texel;
+        for tdi in 0..self.tex.data.len() {
+            let td = &self.tex.data[tdi];
+
+            // convert tdi into a base address in texdata
+            // tdi / tiles_across is how many tiles down
+            // tdi % tiles_across is how many tiles across
+            let base = (tdi / tiles_across) * row_stride + (tdi % tiles_across) * column_stride;
+
+            // plot a 32x32 tile into texdata out of the 36x33 image
+            for y in 0..tile_height {
+                for x in 0..tile_width {
+                    let offset = (y * tex_width + x) * bytes_per_texel;
+                    let doff = (y * 36 + x) * 2;
+                    let c = ((td.data[doff] as u16) << 8) | td.data[doff+1] as u16;
+                    self.texdata[base + offset + 0] = (((c >> 11) & 0x1f) << 3) as u8;
+                    self.texdata[base + offset + 1] = (((c >>  6) & 0x1f) << 3) as u8;
+                    self.texdata[base + offset + 2] = (((c >>  1) & 0x1f) << 3) as u8;
+                    self.texdata[base + offset + 3] = if (c & 0x01) == 1 { 255 } else { 0 };
+                }
+            }
+        }
+        self.send_hle_render_command(HleRenderCommand::TextureData { tmem: self.texdata.clone() });
+
         // finalize current render pass
         self.finalize_render_pass();
 
-        debug!(target: "HLE", "found {} matrices", self.matrices.len());
-        debug!(target: "HLE", "found {} vertices", self.vertices.len());
-        debug!(target: "HLE", "found {} indices", self.indices.len());
-        debug!(target: "HLE", "found {} render passes", self.render_passes.len());
-        debug!(target: "HLE", "found {} draw calls", self.num_draws);
-        debug!(target: "HLE", "found {} tris", self.num_tris);
+        debug!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls,\
+                               {} total tris, {} texture reads, {} texels ({} bytes), ", 
+               self.matrices.len(), self.vertices.len(), self.indices.len(), self.render_passes.len(), self.num_draws, 
+               self.num_tris, self.tex.data.len(), self.num_texels, self.total_texture_data);
+
+
+        // if there's nothing to draw, just Sync with the renderer and return
+        if self.render_passes.len() == 0 {
+            debug!(target: "HLE", "no render passes created, nothing to do");
+            self.send_hle_render_command(HleRenderCommand::Sync);
+            return;
+        }
 
         // depth buffers are cleared by being used as color images, so remove them from being
         // created as actual color targets
@@ -696,9 +825,24 @@ impl Hle {
         let ts    = self.command as u16;
         let ss    = (self.command >> 16) as u16;
         let on    = ((self.command >> 33) & 0x7F) != 0;
-        let tile  = ((self.command >> 40) & 0x07) as u8;
+        let tile  = (self.command >> 40) & 0x07;
         let level = (self.command >> 43) & 0x07;
         trace!(target: "HLE", "{} gsSPTexture(0x{:04X}, 0x{:04X}, {}, {}, {})", self.command_prefix, ss, ts, level, tile, on);
+
+        if on {
+            self.tex.enabled = true;
+            self.tex.s_scale = (ss as f32) / 65536.0;
+            self.tex.t_scale = (ts as f32) / 65536.0;
+            self.tex.mipmaps = (level + 1) as u8;
+            self.tex.tile    = tile as u8;
+            //println!("texture scale set to ({}, {})", self.tex.s_scale, self.tex.t_scale);
+        } else {
+            self.tex.enabled = false;
+            self.tex.s_scale = 0.0;
+            self.tex.t_scale = 0.0;
+            self.tex.mipmaps = 0;
+            self.tex.tile    = 0;
+        }
     }
 
     fn handle_vtx(&mut self) { // G_VTX
@@ -730,25 +874,27 @@ impl Hle {
                     ((data[1] >> 16) as i16) as f32
                 ],
                 tex_coords: [
-                    // TODO double check scale on texcoords
-                    ((data[2] >> 16) as i16) as f32 / 65536.0, 
-                    ( data[2]        as i16) as f32 / 65536.0,
+                    // s,t are S10.5 format, and are scaled by the current s,t scale factors
+                    // many games set s and t scale to 0.5, so this coordinate effectively becomes
+                    // S9.6, and ranges -512..511
+                    self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
+                    self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
                 ],
                 color: [
                     ((data[3] >> 24) as u8) as f32 / 255.0, 
                     ((data[3] >> 16) as u8) as f32 / 255.0, 
                     ((data[3] >>  8) as u8) as f32 / 255.0, 
-                    ( data[3]        as u8) as f32 / 255.0
+                    if self.tex.enabled { 0.0 } else { ( data[3] as u8) as f32 / 255.0 },
                 ],
             };
 
             //println!("v{}: {:?}", i+vbidx, vtx);
-            let cur_pos = self.vertices.len() as u16;
-            self.vertices.push(vtx);
+
+            // place the vertex in the internal buffer, and set the stack to refer to it
+            let cur_pos = self.vertices_internal.len() as u16;
+            self.vertices_internal.push(vtx);
             self.vertex_stack[(i + vbidx) as usize] = cur_pos;
         }
-
-        //self.send_hle_render_command(HleRenderCommand::VertexData(v, vbidx as usize));
     }
         
     fn current_render_pass(&mut self) -> &mut RenderPassState {
@@ -758,7 +904,9 @@ impl Hle {
     fn next_render_pass(&mut self) {
         // don't create a new render pass if this one isn't rendering anything, however, keep the current state
         if self.render_passes.len() > 0 {
-            if self.render_passes.last().unwrap().draw_list.last().unwrap().num_indices == 0 {
+            // if there's no draw_list or the one there is empty, this render pass can still be
+            // used and doesn't need to be finalized
+            if !self.render_passes.last().unwrap().draw_list.last().is_some_and(|v| v.num_indices != 0) {
                 return;
             }
 
@@ -789,6 +937,12 @@ impl Hle {
         if self.current_render_pass().draw_list.last().unwrap().num_indices == 0 {
             self.current_render_pass().draw_list.pop().unwrap();
             self.num_draws -= 1;
+        }
+
+        // if there are no draw_calls, drop this render pass
+        if self.current_render_pass().draw_list.len() == 0 {
+            self.render_passes.pop().unwrap();
+            return;
         }
 
         let (color_buffer, depth_buffer) = {
@@ -884,15 +1038,56 @@ impl Hle {
         self.num_draws += 1;
     }
 
+    // return a transformed vertex along with the index into self.indices where it is placed
+    fn make_final_vertex(&mut self, stack_index: usize) -> Option<(&Vertex, u16)> {
+        let vi = self.vertex_stack.get(stack_index)?;
+        let mut vtx = self.vertices_internal.get(*vi as usize)?.clone();
+        if self.tex.enabled {
+            let current_tile = self.tex.tile;
+            let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
+            let loaded_block_index = (self.tex.data.len() - 1) as u32;
+            let loaded_block = &self.tex.data[loaded_block_index as usize];
+            // loaded_block_index tells us the UL corner where this vertices texcoords are to be mapped
+            // the texture is a 512x1024 image with 32x32 tiles in it
+            let tile_width = 32;
+            let tile_height = 32;
+            let tex_width = 512;
+            let tiles_across = tex_width / tile_width;
+            let ty = loaded_block_index / tiles_across;
+            let tx = loaded_block_index % tiles_across;
+            let start_y = ty * tile_height;
+            let start_x = tx * tile_width;
+            vtx.tex_coords[0] = start_x as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
+            vtx.tex_coords[1] = start_y as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
+            // scale to 0..1 on the 512x1024 image
+            vtx.tex_coords[0] /= 512.0;
+            vtx.tex_coords[1] = 1.0 - (vtx.tex_coords[1] / 1024.0);
+            // put the coordinate into the "center" of the texel
+            //vtx.tex_coords[0] += (1.0 / 512.0) / 2.0;
+            //vtx.tex_coords[1] += (1.0 / 1024.0) / 2.0;
+        }   
+
+        let index = self.vertices.len();
+        self.vertices.push(vtx);
+        Some((self.vertices.get(index).unwrap(), index as u16))
+    }
+
     fn handle_tri1(&mut self) { // G_TRI1
         let v0 = ((self.command >> 49) & 0x1F) as u16;
         let v1 = ((self.command >> 41) & 0x1F) as u16;
         let v2 = ((self.command >> 33) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP1Triangle({}, {}, {})", self.command_prefix, v0, v1, v2);
-        // translate to global vertex index
-        let v0 = self.vertex_stack[v0 as usize];
-        let v1 = self.vertex_stack[v1 as usize];
-        let v2 = self.vertex_stack[v2 as usize];
+        // get the index into the internal vertices array
+        //let v0 = self.vertex_stack[v0 as usize];
+        //let v1 = self.vertex_stack[v1 as usize];
+        //let v2 = self.vertex_stack[v2 as usize];
+        // transform coordinates
+        let (iv, v0) = self.make_final_vertex(v0 as usize).unwrap();
+        //println!("iv0: {:?}", iv);
+        let (iv, v1) = self.make_final_vertex(v1 as usize).unwrap();
+        //println!("iv1: {:?}", iv);
+        let (iv, v2) = self.make_final_vertex(v2 as usize).unwrap();
+        //println!("iv2: {:?}", iv);
         let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
         tl.num_indices += 3;
         self.indices.extend_from_slice(&[v0, v1, v2]);
@@ -918,6 +1113,7 @@ impl Hle {
         tl.num_indices += 6;
         self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
         self.num_tris += 2;
+        todo!();
     }
 
     fn handle_texrect(&mut self) { // G_TEXRECT
@@ -945,21 +1141,62 @@ impl Hle {
     }
 
     fn handle_settilesize(&mut self) { // G_SETTILESIZE
-        let x0 = ((self.command >> 44) & 0xFFF) as u16;
-        let y0 = ((self.command >> 32) & 0xFFF) as u16;
-        let tile = ((self.command >> 24) & 0x0F) as u8;
-        let x1 = ((self.command >> 12) & 0xFFF) as u16;
-        let y1 = ((self.command >>  0) & 0xFFF) as u16;
-        trace!(target: "HLE", "{} gsDPSetTileSize({}, {}, {}, {}, {})", self.command_prefix, tile, x0, y0, x1, y1);
+        let uls = ((self.command >> 44) & 0xFFF) as u16;
+        let ult = ((self.command >> 32) & 0xFFF) as u16;
+        let tile = ((self.command >> 24) & 0x07) as u8;
+        let lrs = ((self.command >> 12) & 0xFFF) as u16;
+        let lrt = ((self.command >>  0) & 0xFFF) as u16;
+
+        // ul and lr coordinates are 10.2
+        let rdp_tile = &mut self.tex.rdp_tiles[tile as usize];
+        rdp_tile.ul = ((uls as f32) / 4.0, (ult as f32) / 4.0);
+        rdp_tile.lr = ((lrs as f32) / 4.0, (lrt as f32) / 4.0);
+
+        trace!(target: "HLE", "{} gsDPSetTileSize({}, {} [{}], {} [{}], {} [{}], {} [{}])", 
+               self.command_prefix, tile, uls, rdp_tile.ul.0, ult, rdp_tile.ul.1, lrs, rdp_tile.lr.0, lrt, rdp_tile.lr.1);
     }
 
     fn handle_loadblock(&mut self) { // G_LOADBLOCK
-        let x0     = ((self.command >> 44) & 0xFFF) as u16;
-        let y0     = ((self.command >> 32) & 0xFFF) as u16;
-        let tile   = ((self.command >> 24) & 0x0F) as u8;
-        let texels = ((self.command >> 12) & 0xFFF) as u16;
+        let uls    = ((self.command >> 44) & 0xFFF) as u16;
+        let ult    = ((self.command >> 32) & 0xFFF) as u16;
+        let tile   = ((self.command >> 24) & 0x07) as u8;
+        let texels = (((self.command >> 12) & 0xFFF) as u32) + 1;
         let dxt    = ((self.command >>  0) & 0xFFF) as u16;
-        trace!(target: "HLE", "{} gsDPLoadBlock({}, {}, {}, {}, {})", self.command_prefix, tile, x0, y0, texels, dxt);
+        trace!(target: "HLE", "{} gsDPLoadBlock(tile={}, uls={}, ult={}, texels={}, dxt={})", self.command_prefix, tile, uls, ult, texels - 1, dxt);
+
+        if dxt != 0 { 
+            warn!("non-zero dxt={} is unsupported", dxt);
+        }
+
+        // size of data to load
+        let size = match self.tex.size {
+            0 => texels >> 1, // 4b
+            1 => texels,      // 8b
+            2 => texels * 2,  // 16b
+            3 => texels * 4,  // 32b
+            5 => todo!("SIZ_DD?"), // DD
+            _ => panic!("invalid texture size"), // invalid
+        };
+
+        // read data and convert to array of u8
+        let mut data = Vec::new();
+        for v in self.load_from_rdram(self.tex.address, size) {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let to_f32 = |i| (i as f32) / (4.0 * 1024.0);
+        let data_index = self.tex.data.len();
+        self.tex.data.push(TextureData {
+            tmem_address: self.tex.address,
+            format      : self.tex.format,
+            size        : self.tex.size,
+            data        : data,
+            data_size   : size,
+            ul          : (to_f32(uls), to_f32(ult)),
+        });
+
+        self.num_texels += texels as u32;
+        self.total_texture_data += size;
     }
 
     fn handle_loadtile(&mut self) { // G_LOADTILE
@@ -972,7 +1209,43 @@ impl Hle {
     }
 
     fn handle_settile(&mut self) { // G_SETTILE
-        trace!(target: "HLE", "{} gsDPSetTile(...)", self.command_prefix);
+        let fmt     = (self.command >> 53) & 0x07;
+        let sz      = (self.command >> 51) & 0x03;
+        let line    = (self.command >> 41) & 0x1FF;
+        let tmem    = (self.command >> 32) & 0x1FF;
+        let tile    = ((self.command >> 24) & 0x07) as usize;
+        let pal     = (self.command >> 20) & 0x0F;
+        let clamp_t = (self.command >> 18) & 0x03;
+        let mask_t  = (self.command >> 14) & 0x0F;
+        let shift_t = (self.command >> 10) & 0x0F;
+        let clamp_s = (self.command >>  8) & 0x03;
+        let mask_s  = (self.command >>  4) & 0x0F;
+        let shift_s = (self.command >>  0) & 0x0F;
+
+        let fmtstr = match fmt {
+            0 => "G_IM_FMT_RGBA", 1 => "G_IM_FMT_YUV", 2 => "G_IM_FMT_CI", 3 => "G_IM_FMT_IA",
+            4 => "G_IM_FMT_I", _ => "G_IM_FMT_unknown",
+        };
+
+        let szstr = match sz {
+            0 => "G_IM_SIZ_4b", 1 => "G_IM_SIZ_8b", 2 => "G_IM_SIZ_16b", 3 => "G_IM_SIZ_32b",
+            5 => "G_IM_SIZ_DD", _ => "G_IM_SIZ_unknown",
+        };
+
+        trace!(target: "HLE", "{} gsDPSetTile({}, {}, line={}, tmem=0x{:03X}, tile={}, pal={}, cmT={}, maskT={}, shiftT={}, cmS={}, maskS={}, shiftS={})",
+                    self.command_prefix, fmtstr, szstr, line, tmem, tile, pal, clamp_t, mask_t, shift_t, clamp_s, mask_s, shift_s);
+
+        self.tex.rdp_tiles[tile].format  = fmt     as u8;
+        self.tex.rdp_tiles[tile].size    = sz      as u8;
+        self.tex.rdp_tiles[tile].line    = line    as u16;
+        self.tex.rdp_tiles[tile].tmem    = tmem    as u16;
+        self.tex.rdp_tiles[tile].palette = pal     as u8;
+        self.tex.rdp_tiles[tile].clamp_s = clamp_s as u8;
+        self.tex.rdp_tiles[tile].clamp_t = clamp_t as u8;
+        self.tex.rdp_tiles[tile].mask_s  = mask_s  as u8;
+        self.tex.rdp_tiles[tile].mask_t  = mask_t  as u8;
+        self.tex.rdp_tiles[tile].shift_s = shift_s as u8;
+        self.tex.rdp_tiles[tile].shift_t = shift_t as u8;
     }
 
     fn handle_geometrymode(&mut self) { // G_GEOMETRYMODE
@@ -1108,6 +1381,43 @@ impl Hle {
         self.num_tris += 2;
     }
 
+    fn render_tmem(&mut self) {
+        let vw = 320.0;
+        let vh = 240.0;
+        let x0 = 0.0;
+        let y0 = 0.0;
+        let w = 80.0;
+        let h = 60.0;
+
+        // tmem is 4096 bytes, and with rgba 16b we can have a max texture size of 64x32.
+        //.// put a 32x16 red square in the topleft of tmem
+        //.let c = 0xF801;
+        //.for i in 0..16 {
+        //.    for j in 0..32 {
+        //.        let idx = (i * 64 + j) * 2;
+        //.        self.tex.tmem[idx+0] = (c >> 8) as u8;
+        //.        self.tex.tmem[idx+1] = (c >> 0) as u8;
+        //.    }
+        //.}
+
+
+        // map (0,vx) -> (-1,1)
+        // so (rx/vx * 2) - 1
+        let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
+        let cur_pos = self.vertices.len() as u16; // save start index
+        // color alpha of 0 means render from texture
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BL
+
+        // start or change the current draw list to use matrix 0 (our ortho projection)
+        let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
+        tl.num_indices += 6;
+        self.indices.extend_from_slice(&[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
+        self.num_tris += 2;
+    }
+
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
         let r = (self.command >> 24) as u8;
         let g = (self.command >> 16) as u8;
@@ -1117,7 +1427,7 @@ impl Hle {
     }
 
     fn handle_setfillcolor(&mut self) { // G_SETFILLCOLOR
-        assert!((self.command >> 16) as u16 == (self.command & 0xFFFF) as u16); // Someday some code will fill a rect with alternating colors
+        //assert!((self.command >> 16) as u16 == (self.command & 0xFFFF) as u16); // Someday some code will fill a rect with alternating colors
         self.fill_color = self.command as u32;
         trace!(target: "HLE", "{} gsDPSetFillColor(0x{:08X})", self.command_prefix, self.fill_color);
     }
@@ -1153,8 +1463,31 @@ impl Hle {
     }
 
     fn handle_settimg(&mut self) { // G_SETTIMG
-        let addr = self.command as u32;
-        trace!(target: "HLE", "{} gsDPSetTextureImage(..., 0x{:08X})", self.command_prefix, addr);
+        let fmt   = (self.command >> 53) & 0x07;
+        let sz    = (self.command >> 51) & 0x03;
+        let width = ((self.command >> 32) & 0x0FFF) + 1;
+        let addr  = self.command as u32;
+
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+            let segment = ((addr >> 24) & 0x0F) as usize;
+            self.segments[segment] + (addr & 0x00FF_FFFF)
+        };
+
+        let fmtstr = match fmt {
+            0 => "G_IM_FMT_RGBA", 1 => "G_IM_FMT_YUV", 2 => "G_IM_FMT_CI", 3 => "G_IM_FMT_IA",
+            4 => "G_IM_FMT_I", _ => "G_IM_FMT_unknown",
+        };
+
+        let szstr = match sz {
+            0 => "G_IM_SIZ_4b", 1 => "G_IM_SIZ_8b", 2 => "G_IM_SIZ_16b", 3 => "G_IM_SIZ_32b",
+            5 => "G_IM_SIZ_DD", _ => "G_IM_SIZ_unknown",
+        };
+
+        trace!(target: "HLE", "{} gsDPSetTextureImage({}, {}, width={}, 0x{:08X} [0x{:08X}])", self.command_prefix, fmtstr, szstr, width, addr, translated_addr);
+        self.tex.format  = fmt as u8;
+        self.tex.size    = sz as u8;
+        self.tex.width   = width as u16;
+        self.tex.address = translated_addr;
     }
 
     fn handle_setzimg(&mut self) { // G_SETZIMG

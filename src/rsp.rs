@@ -194,7 +194,7 @@ impl Rsp {
             c.broke_tx = Some(broke_tx);
         }
 
-        let mut hle = if let Some(ref hle_command_buffer) = self.comms.hle_command_buffer {
+        let mut hle: Option<Hle> = if let Some(ref hle_command_buffer) = self.comms.hle_command_buffer {
             Some(Hle::new(self.comms.clone(), hle_command_buffer.clone()))
         } else {
             None
