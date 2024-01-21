@@ -30,6 +30,10 @@ $ cargo run --release -- n64-systemtest.z64 -D
 
 ![image](https://github.com/sarchar/n64/assets/4928176/c6a6b774-afde-40d6-9acd-8f0157002369)
 
+* "morphdemo.n64" from NuSystems
+
+![image](https://github.com/sarchar/n64/assets/4928176/d135b1d4-824a-4b0a-984d-405da7c4213f)
+
 * "squaredemo.n64" from [n64-sdk-demo](https://github.com/jsdf/n64-sdk-demo)
 
 ![image](https://github.com/sarchar/n64/assets/4928176/a22fb087-a33c-444c-8526-a21a2d031a2e)
