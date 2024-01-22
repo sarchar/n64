@@ -154,6 +154,7 @@ pub struct Hle {
     mapped_texture_alloc_x: u32,
     mapped_texture_alloc_y: u32,
     mapped_texture_alloc_max_h: u32,
+    mapped_texture_dirty: bool,
 
     command_table: [DLCommand; 256],
     command_address: u32,
@@ -165,6 +166,9 @@ pub struct Hle {
 
 struct TextureState {
     tmem: [u32; 1024], // 4KiB of TMEM
+
+    // texture map cache
+    mapped_texture_cache: HashMap<u64, (u32, u32)>,
 
     // gSPTexture
     s_scale: f32,  // s coordinate texture scale
@@ -202,15 +206,30 @@ struct RdpTileState {
     mapped_coordinates: Option<(u32, u32)>,
 }
 
-impl Default for TextureState {
-    fn default() -> Self {
+impl TextureState {
+    fn new() -> Self {
         Self {
             tmem: [0u32; 1024],
+            mapped_texture_cache: HashMap::new(),
             s_scale: 0.0, t_scale: 0.0, mipmaps: 0, tile: 0,
             enabled: false, format: 0, size: 0, width: 0,
             address: 0, 
             rdp_tiles: [RdpTileState::default(); 8],
         }
+    }
+
+    fn reset(&mut self) {
+        // basically, leave tmem and texture cache alone
+        self.s_scale = 0.0;
+        self.t_scale = 0.0;
+        self.mipmaps = 0;
+        self.tile = 0;
+        self.enabled = false;
+        self.format = 0;
+        self.size = 0;
+        self.width = 0;
+        self.address = 0;
+        self.rdp_tiles = [RdpTileState::default(); 8];
     }
 }
 
@@ -258,7 +277,7 @@ impl Hle {
 
             fill_color: 0,
 
-            tex: TextureState::default(),
+            tex: TextureState::new(),
 
             mapped_texture_data: texdata,
             mapped_texture_width: texwidth as u32,
@@ -266,6 +285,7 @@ impl Hle {
             mapped_texture_alloc_x: 0,
             mapped_texture_alloc_y: 0,
             mapped_texture_alloc_max_h: 0,
+            mapped_texture_dirty: false,
 
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
@@ -297,10 +317,8 @@ impl Hle {
         self.num_texels = 0;
         self.total_texture_data = 0;
         self.fill_color = 0;
-        self.tex = TextureState::default();
-        self.mapped_texture_alloc_x = 0;
-        self.mapped_texture_alloc_y = 0;
-        self.mapped_texture_alloc_max_h = 0;
+        self.tex.reset();
+        self.mapped_texture_dirty = false;
 
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
@@ -473,7 +491,10 @@ impl Hle {
         //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
 
         // Yay, a 4MB copy every frame. This needs to change to Arc<>
-        self.send_hle_render_command(HleRenderCommand::TextureData { tmem: self.mapped_texture_data.clone() });
+        if self.mapped_texture_dirty {
+            self.send_hle_render_command(HleRenderCommand::TextureData { tmem: self.mapped_texture_data.clone() });
+            self.mapped_texture_dirty = false;
+        }
 
         // finalize current render pass
         self.finalize_render_pass();
@@ -1099,11 +1120,10 @@ impl Hle {
             if let Some((mx, my)) = rdp_tile.mapped_coordinates {
                 // texture coordinate needs to be shifted by the tile's upper left position,
                 // and also shifted to the location in the mapped texture
-                // and then placed into the center of the pixel for filtering
-                vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0) + 0.5;
-                vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1) + 0.5;
+                vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
+                vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
-                // then, scale to 0..1 on the mapped texture
+                // scale to 0..1 on the mapped texture
                 vtx.tex_coords[0] /= self.mapped_texture_width as f32;
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
             }
@@ -1142,6 +1162,8 @@ impl Hle {
         if height > self.mapped_texture_alloc_max_h {
             self.mapped_texture_alloc_max_h = height;
         }
+
+        self.mapped_texture_dirty = true;
 
         (rx, ry)
     }
@@ -1198,6 +1220,20 @@ impl Hle {
         // add 1 to the specified width/height to account for sampler filtering
         let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) + 1.75) as u32;
         let texture_height = ((current_tile.lr.1 - current_tile.ul.1) + 1.75) as u32;
+
+        // calculate CRC of texture data
+        let mut crc: u64 = 0;
+        for i in 0..(line_bytes * texture_height) {
+            crc += self.tex.tmem[((((current_tile.tmem as u32) << 3) + i) >> 2) as usize] as u64;
+        }
+
+        if let Some((mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
+            let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
+            current_tile.mapped_coordinates = Some((*mx, *my));
+            return;
+        }
+
+        println!("new texture found");
         let (mx, my) = self.allocate_mapped_texture_space(texture_width, texture_height);
 
         // now we need to copy the texture from tmem to mapped texture space, converting
@@ -1223,6 +1259,7 @@ impl Hle {
         // mapped tile needs to be used to transform upcoming texture coordinates
         let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
         current_tile.mapped_coordinates = Some((mx, my));
+        self.tex.mapped_texture_cache.insert(crc, (mx, my));
     }
 
     fn handle_tri1(&mut self) { // G_TRI1
