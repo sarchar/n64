@@ -7,7 +7,6 @@ use std::time::Instant;
 use tracing::{trace, debug, error, info, warn};
 
 use winit::event::VirtualKeyCode;
-use image::GenericImageView;
 use wgpu::util::DeviceExt;
 use cgmath::prelude::*;
 
@@ -334,7 +333,7 @@ impl App for Game {
         //let diffuse_dim   = diffuse_image.dimensions();
 
         let texture_size = wgpu::Extent3d {
-            width: 512, //diffuse_dim.0,
+            width: 1024, //diffuse_dim.0,
             height: 1024, //diffuse_dim.1,
             depth_or_array_layers: 1,
         };
@@ -395,9 +394,9 @@ impl App for Game {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -1070,11 +1069,11 @@ impl Game {
                         bytemuck::cast_slice(&tmem),
                         wgpu::ImageDataLayout {
                             offset: 0,
-                            bytes_per_row: Some(4 * 512),
+                            bytes_per_row: Some(4 * 1024),
                             rows_per_image: Some(1024),
                         },
                         wgpu::Extent3d {
-                            width: 512,
+                            width: 1024,
                             height: 1024,
                             depth_or_array_layers: 1,
                         },
