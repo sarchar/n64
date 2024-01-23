@@ -1216,17 +1216,21 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
+                    // swap on odd lines
+                    let sx = if (y & 0x01) == 0x01 { x ^ 1 } else { x };
+
                     // offset based on x,y of texture data
-                    let offset = (y * line_bytes) + (x * 4);
+                    let offset = (y * line_bytes) + (sx * 4);
+
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
                     let address = (tmem_address << 3) + offset;
-                    self.tex.tmem[(address >> 2) as usize]
+
+                    // combine colors from high and low
+                    let a = self.tex.tmem[(address >> 2) as usize + 0];
+                    let b = self.tex.tmem[(address >> 2) as usize + 2];
+                    (a & 0xFFFF0000) | (b >> 16)
                 };
-                let r = (src >> 24) as u8;
-                let g = (src >> 16) as u8;
-                let b = (src >>  8) as u8;
-                let a = (src >>  0) as u8;
-                plot(self, x, y, &[r, g, b, a]);
+                plot(self, x, y, &src.to_be_bytes());
             }
         }
     }
@@ -1405,7 +1409,6 @@ impl Hle {
                                     tile, uls, to_f32(uls), ult, to_f32(ult), texels - 1, dxt);
 
         if uls != 0 || ult != 0 { warn!(target: "HLE", "TODO: non-zero uls/t coordinate"); }
-        if dxt != 0             { warn!(target: "HLE", "TODO: non-zero dxt={}", dxt); }
 
         // size of data to load
         let data_size = match self.tex.size {
@@ -1419,11 +1422,69 @@ impl Hle {
 
         let selected_tile = &self.tex.rdp_tiles[tile as usize];
 
-        // write texture to tmem address indicated by the selected tile
+        // load all texels from rdram in one go
         let padded_size = (data_size + 7) & !7;
         let data = self.load_from_rdram(self.tex.address, padded_size);
-        let dst = &mut self.tex.tmem[(selected_tile.tmem >> 1) as usize..][..(padded_size >> 2) as usize];
-        dst.copy_from_slice(&data);
+
+        // copy line by line, incrementing a counter by dxt, and every time the whole value portion
+        // of the counter rolls over, increment the line number
+        // if dxt is nonzero, we know how tall the texture is, otherwise the texture has been pre-swizzled
+        // TODO it would be nice to not swizzle at all since it costs performance, but some load
+        // blocks with dxt=0 transfer preswizzled data. I could mark address selected_tile.tmem as
+        // swizzed or not, but a program could use a tmem address that's inside the data that's
+        // loaded here.
+        let dst = &mut self.tex.tmem[(selected_tile.tmem >> 1) as usize..]; // destination in tmem
+        let mut dest_offset   = 0 as usize;
+        let mut source_offset = 0 as usize;
+
+        let dxt               = (dxt as f32) / 2048.0; // 1.11
+        let mut counter       = 0.0f32;
+        let mut whole_part    = counter as u32;
+        let mut line_number   = 0u32;
+
+        for i in 0..(data_size / 8) { // number of 64-bit words to copy
+            // counter is incremented for every 64-bits of texture read, or 2 u32s
+            let v = &data[source_offset..][..2];
+            source_offset += 2;
+
+            match selected_tile.size {
+                2 => { // 16b
+                    // rows are 4 texels long
+                    if (line_number & 0x01) == 0 {
+                        dst[dest_offset..][..2].copy_from_slice(&v);
+                    } else {
+                        dst[dest_offset..][..2].copy_from_slice(&[v[1], v[0]]);
+                    }
+                    dest_offset += 2;
+                },
+                3 => { // 32b
+                    // 32b mode stores these texels as kinda separated. RG and BA are split into low and high half of tmem
+                    // rows are 6-texels long with 2 more texels unused, so 128-bits
+                    // and on odd rows, we have unused space
+                    // TODO this is not correct and it's not terribly important right now, so I'm
+                    // putting it on hold for now. 
+                    if (line_number & 0x01) == 0 {
+                        // red and green from the two texels into the low half
+                        dst[dest_offset+0] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        // blue and alpha from the two texels into the high half
+                        dst[dest_offset^2] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
+                    } else {
+                        // swizzled
+                        dst[(dest_offset^1)+0] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        dst[(dest_offset^1)+2] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                    }
+
+                    dest_offset += if (i % 1) == 0 { 1 } else { 3 };
+                },
+                _ => todo!("swizzle LOADBLOCK for other sizes"),
+            };
+
+            counter += dxt;
+            if whole_part != (counter as u32) {
+                whole_part = counter as u32;
+                line_number += 1;
+            }
+        }
 
         self.num_texels += texels;
         self.total_texture_data += padded_size;
@@ -1531,7 +1592,7 @@ impl Hle {
         let length = (self.command >> 32) & 0xFF;
         let data = self.command as u32;
 
-        trace!(target: "HLE", "{} gsSPSetOtherModeH(...)", self.command_prefix);
+        trace!(target: "HLE", "{} gsSPSetOtherModeH(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
 
         let length = length + 1;
         let shift = 32 - length - shift;
