@@ -73,7 +73,11 @@ pub struct Vertex {
     pub position  : [f32; 3],
     pub tex_coords: [f32; 2],
     pub color     : [f32; 4],
+    pub flags     : u32,
 }
+
+const VERTEX_FLAG_TEXTURED     : u32 = 1u32 << 0;
+const VERTEX_FLAG_LINEAR_FILTER: u32 = 1u32 << 1;
 
 #[allow(non_camel_case_types)]
 pub type F3DZEX2_Matrix = [[i32; 4]; 4];
@@ -116,6 +120,9 @@ pub struct Hle {
 
     dl_stack: Vec<DLStackEntry>,
     segments: [u32; 16],
+
+    // RDP Other Modes
+    other_modes: OtherModes,
 
     // we have a temporary space for vertices that have not had their texcoords transformed yet
     // these vertices won't be transfered to the renderer if they never get used in a draw call
@@ -253,6 +260,8 @@ impl Hle {
 
             dl_stack: vec![],
             segments: [0u32; 16],
+
+            other_modes: OtherModes::default(),
 
             vertices_internal: vec![],
             vertices: vec![],
@@ -593,7 +602,7 @@ impl Hle {
     fn load_string(&mut self, mut start: u32, block_size: u32) -> String {
         let mut v: Vec<u8> = Vec::with_capacity(block_size as usize);
 
-        if (start & 0x07) != 0 {
+        if (start & 0x03) != 0 {
             warn!(target: "HLE", "load_string on unaligned address ${:08X}", start);
         }
 
@@ -955,8 +964,9 @@ impl Hle {
                     ((data[3] >> 24) as u8) as f32 / 255.0, 
                     ((data[3] >> 16) as u8) as f32 / 255.0, 
                     ((data[3] >>  8) as u8) as f32 / 255.0, 
-                    if self.tex.enabled { 0.0 } else { ( data[3] as u8) as f32 / 255.0 },
+                    ( data[3]        as u8) as f32 / 255.0,
                 ],
+                flags: 0,
             };
 
             //println!("v{}: {:?}", i+vbidx, vtx);
@@ -1127,6 +1137,11 @@ impl Hle {
                 vtx.tex_coords[0] /= self.mapped_texture_width as f32;
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
             }
+
+            vtx.flags |= VERTEX_FLAG_TEXTURED;
+            if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
+                vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+            }
         }   
 
         let index = self.vertices.len();
@@ -1194,6 +1209,28 @@ impl Hle {
         }
     }
 
+    fn map_tmem_rgba_32b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F)
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // offset based on x,y of texture data
+                    let offset = (y * line_bytes) + (x * 4);
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let address = (tmem_address << 3) + offset;
+                    self.tex.tmem[(address >> 2) as usize]
+                };
+                let r = (src >> 24) as u8;
+                let g = (src >> 16) as u8;
+                let b = (src >>  8) as u8;
+                let a = (src >>  0) as u8;
+                plot(self, x, y, &[r, g, b, a]);
+            }
+        }
+    }
+
     fn map_current_texture(&mut self) {
         // when rendering, tile should be set to mipmap level 0
         let current_tile_index = self.tex.tile;
@@ -1233,7 +1270,6 @@ impl Hle {
             return;
         }
 
-        println!("new texture found");
         let (mx, my) = self.allocate_mapped_texture_space(texture_width, texture_height);
 
         // now we need to copy the texture from tmem to mapped texture space, converting
@@ -1249,6 +1285,11 @@ impl Hle {
         match (current_tile.format, current_tile.size) {
             (0, 2) => { // RGBA_16b
                 self.map_tmem_rgba_16b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (0, 3) => { // RGBA_32b
+                // TODO ideally this would just be a direct memcpy, so we need unswizzled data in tmem
+                self.map_tmem_rgba_32b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
             
             _ => {
@@ -1470,11 +1511,6 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPFullSync()", self.command_prefix);
     }
 
-    fn handle_rdpsetothermode(&mut self) { // G_(RDP)SETOTHERMODE
-        let hi = ((self.command >> 32) & 0x00FF_FFFF) as u32;
-        let lo = self.command as u32;
-        trace!(target: "HLE", "{} gsDPSetOtherMode(0x{:08X}, 0x{:08X})", self.command_prefix, hi, lo);
-    }
 
     fn handle_loadlut(&mut self) { // G_LOADTLUT
         let tile  = ((self.command >> 24) & 0x0F) as u8;
@@ -1482,12 +1518,38 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPLoadTLUTCmd({}, {})", self.command_prefix, tile, count);
     }
 
+    fn handle_rdpsetothermode(&mut self) { // G_(RDP)SETOTHERMODE
+        let hi = ((self.command >> 32) & 0x00FF_FFFF) as u32;
+        let lo = self.command as u32;
+        trace!(target: "HLE", "{} gsDPSetOtherMode(0x{:08X}, 0x{:08X})", self.command_prefix, hi, lo);
+        self.other_modes.hi = hi;
+        self.other_modes.lo = lo;
+    }
+
     fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
+        let shift = (self.command >> 40) & 0xFF;
+        let length = (self.command >> 32) & 0xFF;
+        let data = self.command as u32;
+
         trace!(target: "HLE", "{} gsSPSetOtherModeH(...)", self.command_prefix);
+
+        let length = length + 1;
+        let shift = 32 - length - shift;
+        self.other_modes.hi &= ((1 << length) - 1) << shift;
+        self.other_modes.hi |= data;
     }
 
     fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
-        trace!(target: "HLE", "{} gsSPSetOtherModeL(...)", self.command_prefix);
+        let shift = (self.command >> 40) & 0xFF;
+        let length = (self.command >> 32) & 0xFF;
+        let data = self.command as u32;
+
+        trace!(target: "HLE", "{} gsSPSetOtherModeL(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
+
+        let length = length + 1;
+        let shift = 32 - length - shift;
+        self.other_modes.lo &= ((1 << length) - 1) << shift;
+        self.other_modes.lo |= data;
     }
 
     fn handle_setprimdepth(&mut self) { // G_SETPRIMDEPTH
@@ -1563,10 +1625,10 @@ impl Hle {
         // so (rx/vx * 2) - 1
         let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
         let cur_pos = self.vertices.len() as u16; // save start index
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
@@ -1589,10 +1651,10 @@ impl Hle {
         let cur_pos = self.vertices.len() as u16; // save start index
 
         // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
@@ -1750,5 +1812,108 @@ impl Hle {
         //let mut size: u32 = 0;
         //let op = (cmd >> 56) & 0xFF;
         //match op {
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum AlphaDither {
+    Pattern,
+    NotPattern,
+    Noise,
+    Disable
+}
+
+#[derive(Debug, PartialEq)]
+enum TextureFilter {
+    Point,
+    Average,
+    Bilinear,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum AlphaCompare {
+    None,
+    Threshold,
+    Dither
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum ZSourceSelect {
+    Pixel,
+    Primitive
+}
+
+#[derive(Debug)]
+struct OtherModes {
+    lo: u32,
+    hi: u32,
+}
+
+impl Default for OtherModes {
+    fn default() -> Self {
+        Self {
+            lo: 0,
+            hi: 0,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl OtherModes {
+    // HI
+    const ALPHA_DITHER_SHIFT   : u32 = 4;
+    const ALPHA_DITHER_MASK    : u32 = 0x03;
+    const TEXTURE_FILTER_SHIFT : u32 = 12;
+    const TEXTURE_FILTER_MASK  : u32 = 0x03;
+
+    // LO
+    const ALPHA_COMPARE_SHIFT  : u32 = 0;
+    const ALPHA_COMPARE_MASK   : u32 = 0x03;
+    const Z_SOURCE_SELECT_SHIFT: u32 = 2;
+    const Z_SOURCE_SELECT_MASK : u32 = 0x01;
+
+    fn get_alpha_compare(&self) -> AlphaCompare {
+        match (self.lo >> Self::ALPHA_COMPARE_SHIFT) & Self::ALPHA_COMPARE_MASK {
+            0 => AlphaCompare::None,
+            1 => AlphaCompare::Threshold,
+            3 => AlphaCompare::Dither,
+            x => {
+                warn!(target: "HLE", "invalid alpha compare mode {}", x);
+                AlphaCompare::None
+            }
+        }
+    }
+
+    fn get_z_source_select(&self) -> ZSourceSelect {
+        match (self.lo >> Self::Z_SOURCE_SELECT_SHIFT) & Self::Z_SOURCE_SELECT_MASK {
+            0 => ZSourceSelect::Pixel,
+            1 => ZSourceSelect::Primitive,
+            _ => panic!("invalid"),
+        }
+    }
+
+    fn get_alpha_dither(&self) -> AlphaDither {
+        match (self.lo >> Self::ALPHA_DITHER_SHIFT) & Self::ALPHA_DITHER_MASK {
+			0 => AlphaDither::Pattern,
+			1 => AlphaDither::NotPattern,
+			2 => AlphaDither::Noise,
+			3 => AlphaDither::Disable,
+			_ => panic!("invalid"),
+		}
+	}
+
+    fn get_texture_filter(&self) -> TextureFilter {
+        match (self.lo >> Self::TEXTURE_FILTER_SHIFT) & Self::TEXTURE_FILTER_MASK {
+            0 => TextureFilter::Point,
+            2 => TextureFilter::Bilinear,
+            3 => TextureFilter::Average,
+            x => {
+                warn!(target: "HLE", "invalid texture filter mode {}", x);
+                TextureFilter::Point
+            }
+        }
     }
 }

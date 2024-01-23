@@ -483,6 +483,43 @@ impl Rsp {
                 }
             },
 
+            // SP_DMA_WRITE_LENGTH
+            0x4_000C => {
+                //debug!(target: "RSP", "DMA write length set to ${:04X}", value);
+                let mut shared_state = self.shared_state.write().unwrap();
+                shared_state.dma_write_length = value;
+
+                let length = ((value & 0x0FFF) | 0x07) + 1;
+                let count  = ((value >> 12) & 0xFF) + 1;
+                let skip   = (value >> 20) & 0xFFF;
+                shared_state.dma_total_size = count * length + (count - 1) * skip;
+
+                let dma_info = DmaInfo {
+                    initiator     : "RSP-WRITE",
+                    source_address: shared_state.dma_cache | 0x0400_0000,
+                    dest_address  : shared_state.dma_dram,
+                    count         : count,
+                    length        : length,
+                    dest_stride   : skip,
+                    completed     : Some(self.dma_completed_tx.clone()),
+                    ..Default::default()
+                };
+
+                if shared_state.dma_busy {
+                    if shared_state.dma_full.is_none() {
+                        shared_state.dma_full = Some(dma_info);
+                    }
+                } else {
+                    // update the addresses as if the dma has been completed
+                    shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
+                    shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
+                    shared_state.dma_current_read_length  = 0xFF8;
+                    shared_state.dma_current_write_length = 0xFF8;
+                    shared_state.dma_busy = true;
+                    self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                }
+            },
+
             // SP_STATUS 
             0x4_0010 => {
                 //debug!(target: "RSP", "write SP_STATUS value=${:08X}", value);

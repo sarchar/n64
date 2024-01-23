@@ -23,14 +23,15 @@ struct Vertex {
     position  : [f32; 3],
     tex_coords: [f32; 2],
     color     : [f32; 4],
+    flags     : u32,
 }
 
 // Y texture coordinate is inverted to flip the resulting image
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], }, // BR
+    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BR
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[
@@ -40,7 +41,7 @@ const GAME_TEXTURE_INDICES: &[u16] = &[
 
 impl Vertex {
     fn _new() -> Self {
-        Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], }
+        Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], flags: 0, }
     }
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -63,12 +64,18 @@ impl Vertex {
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x4,
                 },
+                wgpu::VertexAttribute { // flags
+                    offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Uint32,
+                },
             ]
         }
     }
 
     fn size() -> usize {
-        std::mem::size_of::<[f32; 9]>() as usize
+        (std::mem::size_of::<[f32; 9]>() 
+         + std::mem::size_of::<u32>()) as usize
     }
 
     fn _offset_of(index: usize) -> wgpu::BufferAddress {
@@ -386,17 +393,44 @@ impl App for Game {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { // TextureView
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // Sampler
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
             ],
         });
 
-        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let diffuse_texture_view_linear = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mag_filter    : wgpu::FilterMode::Linear,
+            min_filter    : wgpu::FilterMode::Linear,
+            mipmap_filter : wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let diffuse_texture_view_nearest = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter    : wgpu::FilterMode::Nearest,
+            min_filter    : wgpu::FilterMode::Nearest,
+            mipmap_filter : wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -406,11 +440,19 @@ impl App for Game {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view_linear),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view_nearest),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler_nearest),
                 },
             ],
         });
@@ -762,9 +804,8 @@ impl App for Game {
                             let mut image_data = vec![0u8; width*height*4];
                             for y in 0..height {
                                 for x in 0..width {
-                                    // invert Y because the texcoords of the quad render are inverted
                                     let i = (y * width) + x;
-                                    let iy = ((height - y - 1) * width) + x;
+                                    let iy = (y * width) + x;
 
                                     match format {
                                         2 => {
@@ -1011,9 +1052,10 @@ impl Game {
                     let mut vcopy = Vec::new();
                     for vdata in v.iter() {
                         let vnew = Vertex {
-                            position: vdata.position,
+                            position  : vdata.position,
                             tex_coords: vdata.tex_coords,
-                            color: vdata.color,
+                            color     : vdata.color,
+                            flags     : vdata.flags,
                         };
                         vcopy.push(vnew);
                     }
@@ -1040,25 +1082,6 @@ impl Game {
                 },
 
                 HleRenderCommand::TextureData { tmem } => {
-                    // assume tmem is 16bpp rgba, convert to 32bpp rgba
-                    // tmem is 64x32
-                    //let mut buf = Vec::new();
-                    //for y in 0..1024 {
-                    //    for x in 0..512 {
-                    //        let idx = ((y * 512) + x) * 2;
-                    //        let c = &tmem[idx..idx+2];
-
-                    //        let r = ((c[0] >> 3) & 0x1F) as u8;
-                    //        let g = (((c[0] & 0x07) << 2) | ((c[1] & 0xC0) >> 6)) as u8;
-                    //        let b = ((c[1] >> 1) & 0x1F) as u8;
-                    //        let a = if (c[1] & 0x01) == 1 { 255 } else { 0 };
-                    //        buf.push(r << 3);
-                    //        buf.push(g << 3);
-                    //        buf.push(b << 3);
-                    //        buf.push(a);
-                    //    }
-                    //}
-
                     appwnd.queue().write_texture(
                         wgpu::ImageCopyTexture {
                             texture: &self.diffuse_texture,

@@ -70,7 +70,7 @@ impl Addressable for RdramInterface {
             0x0400_000C => {
                 // TODO
                 debug!(target: "RDRAM", "read RI_SELECT");
-                Ok(0)
+                Ok(0x14)
             },
 
             // RI_REFRESH
@@ -78,6 +78,7 @@ impl Addressable for RdramInterface {
                 debug!(target: "RDRAM", "read RI_REFRESH");
                 Ok(0)
             },
+
             _ => panic!("RDRAM: unhandled read32 ${:08X}", offset),
         }
     }
@@ -152,13 +153,19 @@ impl Addressable for RdramInterface {
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
         if offset < 0x0080_0000 {
-            let access = self.ram.write().unwrap();
+            let access = self.ram.read().unwrap();
             let ram = access.as_ref().unwrap();
 
             // why doesn't std::vec have copy_into(offset, source_slice)?
             let (_, right) = ram.split_at(offset >> 2);
             let (left, _) = right.split_at((length >> 2) as usize);
             Ok(left.to_owned())
+        } else if offset < 0x03FF_FFFF {
+            // some bytes in 0-8KiB every 512KiB apparently contains non-zero values, everything else is zero
+            if (offset & 0x0007_FFFF) < 0x0000_2000 {
+                warn!(target: "RI", "weird DMA out of RDRAM");
+            }
+            Ok(vec![0u32; (length >> 2) as usize])
         } else {
             todo!("not likely");
         }

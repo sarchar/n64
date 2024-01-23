@@ -1640,7 +1640,7 @@ impl Cpu {
         if (address & 0x01) != 0 {
             self.address_exception(address, false)?;
         } else {
-            self.gpr[self.inst.rt] = (self.read_u16((address & !0x01) as usize)? as i16) as u64;
+            self.gpr[self.inst.rt] = (self.read_u16(address as usize)? as i16) as u64;
         }
 
         Ok(())
@@ -1925,10 +1925,7 @@ impl Cpu {
         address.physical_address &= !0x07;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u64_phys(address)?  // this read "simulates" the cache miss and fetch and 
-                                          // doesn't happen for uncached addresses
-        } else { panic!("test"); /*0*/ };
+        let mem = self.read_u64_phys(address)?;
 
         // combine register and mem
         let shift = offset << 3;
@@ -1961,10 +1958,7 @@ impl Cpu {
         address.physical_address &= !0x07;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
-            self.read_u64_phys(address)? // this read "simulates" the cache miss and fetch and 
-                                         // doesn't happen for uncached addresses
-        } else { panic!("test"); /*0*/ };
+        let mem = self.read_u64_phys(address)?;
 
         // combine register and mem
         let shift = 56 - (offset << 3);

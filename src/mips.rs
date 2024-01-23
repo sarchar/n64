@@ -3,7 +3,7 @@ use std::mem;
 use std::sync::mpsc;
 
 #[allow(unused_imports)]
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::*;
 
@@ -162,6 +162,11 @@ impl Addressable for MipsInterface {
                     self.repeat_count = None;
                 }
 
+            },
+
+            // MI_INTERRUPT
+            0x0_0008 => {
+                warn!(target: "MI", "ignoring write to MI_INTERRUPT");
             },
 
             0x0_000C => {
