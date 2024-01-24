@@ -48,7 +48,7 @@ pub struct Rsp {
     core: Arc<Mutex<RspCpuCore>>,
     shared_state: Arc<RwLock<RspSharedState>>,
 
-    wakeup_tx: Option<mpsc::Sender<()>>,
+    wakeup_tx: Option<mpsc::Sender<u32>>,
     broke_rx: Option<mpsc::Receiver<bool>>,
 
     // access to RspCpuCore memory
@@ -64,6 +64,7 @@ pub struct Rsp {
 
 #[derive(Debug, Default)]
 pub struct RspSharedState {
+    exited: bool,
     intbreak: bool,
     halted_self: bool,
 
@@ -201,9 +202,11 @@ impl Rsp {
             None
         };
 
+        self.shared_state.write().unwrap().exited = false;
+
         thread::spawn(move || {
             let mut _started_time = std::time::Instant::now();
-            loop {
+            'main_loop: loop {
                 let mut c = core.lock().unwrap();
 
                 // halted can only be set while we don't have a lock, so check here
@@ -214,7 +217,13 @@ impl Rsp {
                     drop(c);
 
                     // wait forever for a signal
-                    let _ = wakeup_rx.recv().unwrap();
+                    match wakeup_rx.recv().unwrap() {
+                        0 => {}, // normal wakeup
+                        1 => {   // exit thread
+                            break 'main_loop;
+                        }
+                        _ => panic!("invalid"),
+                    }
 
                     // running!
                     let mut c = core.lock().unwrap();
@@ -297,7 +306,58 @@ impl Rsp {
                     }
                 }
             }
+
+            // main loop has exited, mark exit on the shared state
+            let c = core.lock().unwrap();
+            let mut shared_state = c.shared_state.write().unwrap();
+            shared_state.exited = true;
         });
+    }
+
+    pub fn stop(&mut self) {
+        info!(target: "RSP", "stop");
+
+        // send the exit signal to the running thread
+        self.wakeup_tx.as_mut().unwrap().send(1).unwrap(); // 1 = exit code
+
+        loop {
+            // repeatedly halt the CPU since it could be receiving wakeups
+            // so run and check until the thread has exited
+            let mut c = self.core.lock().unwrap();
+            if !c.halted {
+                c.halted = true;
+                c.halted_self = false;
+            }
+
+            let shared_state = self.shared_state.read().unwrap();
+            if shared_state.exited {
+                break;
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        info!(target: "RSP", "reset");
+
+        if !self.shared_state.read().unwrap().exited {
+            warn!(target: "RSP", "reset without calling stop()");
+        }
+
+        // clear all messages
+        if let Some(broke_rx) = &self.broke_rx {
+            while broke_rx.try_recv().is_ok() {}
+        }
+        while self.dma_completed_rx.try_recv().is_ok() {}
+
+        // set current state to halted
+        self.halted = true;
+        self.broke = false;
+
+        // reset shared state
+        *self.shared_state.write().unwrap() = RspSharedState::default();
+
+        // reset rsp core
+        let _ = self.core.lock().unwrap().reset();
     }
 
     pub fn step(&mut self) {
@@ -575,7 +635,7 @@ impl Rsp {
 
                     // send wakeup signal
                     if let Some(wakeup_tx) = &self.wakeup_tx {
-                        wakeup_tx.send(()).unwrap();
+                        wakeup_tx.send(0).unwrap(); // 0 = wakeup and execute
                     }
                 }
 
@@ -885,7 +945,7 @@ impl RspCpuCore {
             broke_tx: None,
             dma_completed_tx: dma_completed_tx,
 
-            halted: false,
+            halted: true,
             halted_self: false,
             broke: false,
 
@@ -942,8 +1002,21 @@ impl RspCpuCore {
     }
 
     fn reset(&mut self) -> Result<(), ReadWriteFault> {
-        self.pc     = 0;
-        self.halted = true;
+        self.pc                 = 0;
+        self.halted             = true;
+        self.halted_self        = false;
+        self.is_delay_slot      = false;
+        self.next_is_delay_slot = false;
+        self.gpr                = [0u32; 32];
+        self.ccr                = [0u32; 4];
+        self.rcp_high           = false;
+        self.rcp_input          = 0;
+        self.div_result         = 0;
+        self.num_steps          = 0;
+        self.process_task       = false;
+
+        self.v    = [unsafe { _mm_setzero_si128() }; 32];
+        self.vacc = _wmm512_setzero_si512();
 
         self.prefetch()
     }

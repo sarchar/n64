@@ -30,6 +30,14 @@ impl AudioInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "AI", "reset");
+        self.dram_address = 0;
+        self.transfer_length = 0;
+        self.dma_enable = false;
+        self.first_transfer = true;
+    }
+
     pub fn step(&mut self) {
         if self.first_transfer && self.transfer_length > 0 {
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_AI, InterruptUpdateMode::SetInterrupt)).unwrap();

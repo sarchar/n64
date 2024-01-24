@@ -30,6 +30,14 @@ impl Rdp {
             status: 0,
         }
     }
+
+    pub fn reset(&mut self) {
+        info!(target: "RDP", "reset");
+        self.start = 0;
+        self.start_latch = 0;
+        self.end = 0;
+        self.status = 0;
+    }
 }
 
 impl Addressable for Rdp {

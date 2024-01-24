@@ -32,6 +32,8 @@ pub struct PifRom {
     boot_rom: Vec<u8>,    
     ram: Vec<u32>,
     command_finished: bool,
+    seed: u32,
+    _cic_type: CicType,
 }
 
 impl PifRom {
@@ -58,7 +60,16 @@ impl PifRom {
             boot_rom: boot_rom,
             ram: ram,
             command_finished: false,
+            seed: seed,
+            _cic_type: cic_type,
         }
+    }
+
+    pub fn reset(&mut self) {
+        info!(target: "PIF-ROM", "reset");
+        self.command_finished = false;
+
+        self.ram[9] = (self.seed << 8) | self.seed;
     }
 
     // Calculate the hash used by IPL2 to verify the ROM.  The hash depends on the seed value,

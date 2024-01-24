@@ -1119,11 +1119,12 @@ impl Hle {
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
             }
 
-            vtx.flags = 0;
-            //vtx.flags |= VERTEX_FLAG_TEXTURED;
-            //if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
-            //    vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
-            //}
+            //set to 0 to see OoT console logo screen
+            //vtx.flags = 0;
+            vtx.flags |= VERTEX_FLAG_TEXTURED;
+            if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
+                vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+            }
         }   
 
         let index = self.vertices.len();

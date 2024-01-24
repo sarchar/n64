@@ -70,6 +70,21 @@ impl PeripheralInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "PI", "reset");
+        self.dram_addr    = 0;
+        self.cart_addr    = 0;
+        self.dma_status   = 0;
+        self.io_busy      = 0;
+        self.debug_buffer = vec![0; 0xFFE0];
+        self.debug_string = String::new();
+        self.is_magic     = 0;
+        self.is_write_pos = 0;
+        self.cartridge_rom_write = None;
+        
+        while self.dma_completed_rx.try_recv().is_ok() {}
+    }
+
     pub fn step(&mut self) {
         // if dma is running, check for dma completed
         if let Ok(_) = self.dma_completed_rx.try_recv() {

@@ -142,6 +142,74 @@ impl VideoInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "VI", "reset");
+
+        self.resolution_changed = 0;
+        self.cycle_count = 0;
+
+        // VI_CTRL
+        self.dedither_filter_enable = 0;
+        self.pixel_advance = 0;
+        self.kill_we = 0;
+        self.aa_mode = 0;
+        self.test_mode = 0;
+        self.serrate = 0;
+        self.vbus_clock_enable = 0;
+        self.divot_enable = 0;
+        self.gamma_enable = 0;
+        self.gamma_dither_enable = 0;
+        self.pixel_type = 0;
+        self.comms.vi_format.store(self.pixel_type as u32, Ordering::SeqCst);
+
+        // VI_ORIGIN
+        self.origin = 0;
+        self.comms.vi_origin.store(self.origin, Ordering::SeqCst);
+
+        // VI_WIDTH
+        self.frame_buffer_width = 0;
+        self.comms.vi_width.store(self.frame_buffer_width, Ordering::SeqCst);
+
+        // VI_V_INTR
+        self.interrupt_line = 0x3FF;
+
+        // VI_V_CURRENT
+        self.current_line = 0;
+
+        // VI_BURST
+        self.burst = 0x01;
+
+        // VI_V_SYNC
+        self.vsync = 0;
+
+        // VI_H_SYNC;
+        self.leap_pattern = 0;
+        self.hsync = 2047;
+
+        // VI_H_SYNC_LEAP
+        self.leap_a = 3182; // for PAL (not used on NTSC)
+        self.leap_b = 3183; // for PAL
+
+        // VI_H_VIDEO
+        self.h_start = 0;
+        self.h_end = 0;
+
+        // VI_V_VIDEO
+        self.v_start = 0;
+        self.v_end = 0;
+
+        // VI_V_BURST
+        self.v_burst = 0;
+
+        // VI_X_SCALE
+        self.x_offset = 0;
+        self.x_scale = 0;
+
+        // VI_Y_SCALE
+        self.y_offset = 0;
+        self.y_scale = 0;
+    }
+
     fn _is_ntsc(&self) -> bool {
         self.burst == NTSC_BURST
     }

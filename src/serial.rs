@@ -37,6 +37,14 @@ impl SerialInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "SI", "reset");
+        while self.dma_completed_rx.try_recv().is_ok() {}
+        self.interrupt_flag = false;
+        self.dram_address = 0;
+        self.pif.reset();
+    }
+
     pub fn step(&mut self) {
         if let Ok(_) = self.dma_completed_rx.try_recv() {
             self.interrupt_flag = true;

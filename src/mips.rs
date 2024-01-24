@@ -56,6 +56,16 @@ impl MipsInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "MI", "reset");
+        self.interrupt_mask = 0;
+        self.interrupt = 0;
+        self.trigger_int = 0;
+        self.repeat_count = None;
+        
+        while self.interrupt_update_rx.try_recv().is_ok() {}
+    }
+
     pub fn get_update_channel(&mut self) -> mpsc::Sender<InterruptUpdate> {
         self.interrupt_update_tx.clone()
     }

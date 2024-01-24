@@ -26,6 +26,13 @@ impl RdramInterface {
         }
     }
 
+    pub fn reset(&mut self) {
+        info!(target: "RDRAM", "reset");
+
+        // clear RAM?
+        self.repeat_count = None;
+    }
+
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         debug!(target: "RDRAM", "read_register offset=${:08X}", offset);
         Ok(0)

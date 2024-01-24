@@ -99,6 +99,10 @@ impl<T> LockedAddressable<T> {
             addressable: v,
         }
     }
+
+    fn lock(&mut self) -> std::sync::LockResult<std::sync::MutexGuard<'_, T>> {
+        self.addressable.lock()
+    }
 }
 
 impl<T: Addressable> Addressable for LockedAddressable<T> {
@@ -141,6 +145,9 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 pub struct SystemCommunication {
     pub hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>,
 
+    // reset signal
+    pub reset_signal: Arc<AtomicU32>,
+    
     // total cpu cycle count
     pub total_cpu_steps: Arc<RelaxedCounter>,
 
@@ -169,6 +176,7 @@ impl SystemCommunication {
     pub fn new(hle_command_buffer: Option<hle::HleCommandBuffer>) -> Self {
         Self {
             hle_command_buffer: hle_command_buffer.map_or(None, |v| Some(Arc::new(v))),
+            reset_signal      : Arc::new(AtomicU32::new(0)),
             total_cpu_steps   : Arc::new(RelaxedCounter::new(0)),
             vi_origin         : Arc::new(AtomicU32::new(0)),
             vi_width          : Arc::new(AtomicU32::new(0)),
@@ -213,8 +221,17 @@ impl System {
     }
 
     pub fn reset(&mut self) {
-        //self.rcp.reset();
+        self.rcp.borrow_mut().stop(); // stop the RCP
+
+        // reset everything
         let _ = self.cpu.reset();
+        self.rcp.borrow_mut().reset();
+
+        // restart the RCP
+        self.rcp.borrow_mut().start();
+    }
+
+    pub fn soft_reset(&mut self) {
     }
 
     #[inline(always)]
@@ -227,6 +244,17 @@ impl System {
         }
 
         self.comms.check_interrupts.store(0, Ordering::SeqCst);
+
+        // handle reset
+        match self.comms.reset_signal.load(Ordering::SeqCst) {
+            1 => {
+                self.comms.reset_signal.store(0, Ordering::SeqCst);
+                self.reset();
+                return Ok(());
+            },
+            2 => todo!(),
+            _ => {},
+        };
 
         let trigger_int = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();

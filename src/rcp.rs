@@ -103,6 +103,27 @@ impl Rcp {
         self.rsp.start();
     }
 
+    pub fn stop(&mut self) {
+        info!(target: "RCP", "stop");
+        // stop rsp and rdp
+        self.rsp.stop();
+        //self.rdp.stop();
+    }
+
+    pub fn reset(&mut self) {
+        info!(target: "RCP", "reset");
+        self.rsp.reset(); // still stop RSP
+        self.rdp.lock().unwrap().reset();
+        self.pi.reset();
+        self.ai.reset();
+        self.ri.reset();
+        self.si.reset();
+        self.vi.reset();
+        self.mi.reset();
+
+        while self.start_dma_rx.try_recv().is_ok() { }
+    }
+
     pub fn step(&mut self, cpu_cycles_elapsed: u64) {
         self.rsp.step();
         self.pi.step();

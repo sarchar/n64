@@ -707,6 +707,18 @@ impl App for Game {
             }
         }
 
+        // Reset
+        if appwnd.input().key_pressed(VirtualKeyCode::F11) {
+            let soft_reset = appwnd.input().key_held(VirtualKeyCode::LControl);
+
+            // send reset 1 for hard reset, 2 for soft reset
+            // then break out any cpu step cycle
+            self.comms.reset_signal.store(if soft_reset { 2 } else { 1 }, Ordering::SeqCst);
+            self.comms.check_interrupts.store(1, Ordering::SeqCst);
+
+            // TODO reset rendering states
+        }
+
         //let input = appwnd.input();
         //self.is_forward_pressed  = input.key_held(VirtualKeyCode::W) || input.key_held(VirtualKeyCode::Up);
         //self.is_backward_pressed = input.key_held(VirtualKeyCode::S) || input.key_held(VirtualKeyCode::Down);
