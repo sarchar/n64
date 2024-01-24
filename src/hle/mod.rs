@@ -748,7 +748,8 @@ impl Hle {
         let num = ((self.command & 0xFFFF_FFFF) >> 6) as u32; // num / 64
 
         trace!(target: "HLE", "{} gsSPPopMatrixN(G_MTX_MODELVIEW, {})", self.command_prefix, num);
-        for _ in 0..num { self.matrix_stack.pop(); }
+        let new_size = self.matrix_stack.len().saturating_sub(num as usize);
+        self.matrix_stack.truncate(new_size);
 
         // PopMatrix doesn't change the current matrix state
         // don't: self.next_triangle_list(None)

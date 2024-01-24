@@ -233,11 +233,15 @@ impl Cpu {
             }
         };
         
-        let _ = cpu.reset();
+        let _ = cpu.reset(false);
         cpu
     }
 
-    pub fn reset(&mut self) -> Result<(), InstructionFault> {
+    pub fn reset(&mut self, is_soft: bool) -> Result<(), InstructionFault> {
+        // set Cop0_EPC to the current PC
+        self.cp0gpr[Cop0_EPC] = self.current_instruction_pc;
+
+        // all resets are vectored to the same address
         self.pc = 0xFFFF_FFFF_BFC0_0000;
 
         // COP0
@@ -246,7 +250,7 @@ impl Cpu {
         self.cp0gpr[Cop0_Random] = 0x1F; // set to the upper bound (31) on reset
         self.cp0gpr[Cop0_PRId] = 0x0B22;
         self.cp0gpr[Cop0_Config] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
-        self.cp0gpr[Cop0_Status] = 0x200004; // BEV=1, ERL=1, SR=0 (SR will need to be 1 on soft reset), IE=0
+        self.cp0gpr[Cop0_Status] = (1 << 22) | (1 << 2) | if is_soft { 1 << 20 } else { 0 }; // BEV=1, ERL=1, SR=0 (SR will be 1 on soft reset), IE=0
 
         // fetch next_instruction before starting the loop
         self.prefetch()?;

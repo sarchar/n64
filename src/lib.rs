@@ -224,7 +224,7 @@ impl System {
         self.rcp.borrow_mut().stop(); // stop the RCP
 
         // reset everything
-        let _ = self.cpu.reset();
+        let _ = self.cpu.reset(false);
         self.rcp.borrow_mut().reset();
 
         // restart the RCP
@@ -232,6 +232,7 @@ impl System {
     }
 
     pub fn soft_reset(&mut self) {
+        let _ = self.cpu.reset(true);
     }
 
     #[inline(always)]
@@ -252,7 +253,11 @@ impl System {
                 self.reset();
                 return Ok(());
             },
-            2 => todo!(),
+            2 => {
+                self.comms.reset_signal.store(0, Ordering::SeqCst);
+                self.soft_reset();
+                return Ok(());
+            },
             _ => {},
         };
 

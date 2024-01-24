@@ -1083,9 +1083,11 @@ impl Game {
                     self.vertex_buffer_writes += vcopy.len() as u32;
                 },
 
-                HleRenderCommand::IndexData(v) => {
-                    let indices = &v;
-                    appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
+                HleRenderCommand::IndexData(mut v) => {
+                    if ((std::mem::size_of::<u16>() * v.len()) as u64 % wgpu::COPY_BUFFER_ALIGNMENT) != 0 {
+                        v.push(0);
+                    }
+                    appwnd.queue().write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&v));
                 },
 
                 HleRenderCommand::MatrixData(v) => {
@@ -1095,8 +1097,7 @@ impl Game {
                         vcopy.push(vnew);
                     }
 
-                    let matrices = &vcopy;
-                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(matrices));
+                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&vcopy));
                 },
 
                 HleRenderCommand::TextureData { tmem } => {
