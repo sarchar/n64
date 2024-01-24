@@ -44,7 +44,7 @@ fn main() {
                             //.with_target("RSP", tracing_core::Level::DEBUG)
                             //.with_target("JOY", tracing_core::Level::DEBUG)
                             //.with_target("MI", tracing_core::Level::DEBUG)
-                            .with_target("DMA", tracing_core::Level::TRACE)
+                            //.with_target("DMA", tracing_core::Level::TRACE)
                             .with_target("HLE", tracing_core::Level::TRACE)
                             //.with_target("PIF-RAM", tracing_core::Level::TRACE)
                             .with_target("wgpu_hal", tracing_core::Level::WARN)

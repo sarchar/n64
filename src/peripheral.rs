@@ -167,7 +167,7 @@ impl PeripheralInterface {
             0x0_000C => {
                 debug!(target: "PI", "write PI_WR_LEN value=${:08X}", value);
 
-                assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000); // right now only cartridge rom is valid for dma
+                assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000, "PI DMA initiated from ${:08X}", self.cart_addr); // right now only cartridge rom is valid for dma
 
                 // TODO the logic determining DMA completions might not be correct, but it's fine for now.
 
@@ -242,6 +242,30 @@ impl PeripheralInterface {
             // PI_BSD_DOM1_RLS
             0x0_0020 => {
                 debug!(target: "PI", "write PI_BSD_DOM1_RLS");
+                WriteReturnSignal::None
+            },
+
+            // PI_BSD_DOM2_LAT
+            0x0_0024 => {
+                debug!(target: "PI", "write PI_BSD_DOM2_LAT");
+                WriteReturnSignal::None
+            },
+
+            // PI_BSD_DOM2_PWD
+            0x0_0028 => {
+                debug!(target: "PI", "write PI_BSD_DOM2_PWD");
+                WriteReturnSignal::None
+            },
+
+            // PI_BSD_DOM2_PGS
+            0x0_002C => {
+                debug!(target: "PI", "write PI_BSD_DOM2_PGS");
+                WriteReturnSignal::None
+            },
+
+            // PI_BSD_DOM2_RLS
+            0x0_0030 => {
+                debug!(target: "PI", "write PI_BSD_DOM2_RLS");
                 WriteReturnSignal::None
             },
 

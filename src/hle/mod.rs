@@ -70,7 +70,7 @@ pub struct F3DZEX2_Vertex {
 
 #[derive(Copy,Clone,Default,Debug)]
 pub struct Vertex {
-    pub position  : [f32; 3],
+    pub position  : [f32; 4],
     pub tex_coords: [f32; 2],
     pub color     : [f32; 4],
     pub flags     : u32,
@@ -150,6 +150,9 @@ pub struct Hle {
     total_texture_data: u32,
 
     fill_color: u32,
+
+    // TEMP HACK only let a clear happen once
+    clear_color_happened: bool,
 
     // texture state
     tex: TextureState,
@@ -286,6 +289,8 @@ impl Hle {
 
             fill_color: 0,
 
+            clear_color_happened: false,
+
             tex: TextureState::new(),
 
             mapped_texture_data: texdata,
@@ -326,13 +331,14 @@ impl Hle {
         self.num_texels = 0;
         self.total_texture_data = 0;
         self.fill_color = 0;
+        self.clear_color_happened = false;
         self.tex.reset();
         self.mapped_texture_dirty = false;
 
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
 
-        // always have a render pass open
+        // always have a render pass and draw list started
         self.next_render_pass();
         self.next_triangle_list(None);
     }
@@ -353,7 +359,8 @@ impl Hle {
             0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
 
             0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
-            0x21F91874 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT
+            0x21F91874 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT Debug
+            0x5D3099F1 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT Release
             0xC901CE73 => HleRspSoftwareVersion::F3DEX2, // More demos?
             0x21F91834 => HleRspSoftwareVersion::F3DEX2, // Paper Mario, (NuSys?), 
 
@@ -706,54 +713,13 @@ impl Hle {
         //println!("data: {mtx_data:?}");
         //println!("matrix: {cgmat:?}");
 
-        //.for row in 0..4 {
-        //.    match row {
-        //.        0   => print!(" / "),
-        //.        1|2 => print!("|  "),
-        //.        3   => print!(" \\ "),
-        //.        _   => {},
-        //.    }
-
-        //.    for col in 0..4 {
-        //.        let idx16 = row*4+col;
-        //.        let idx   = idx16 >> 1;
-        //.        //let y     = idx >> 3;
-        //.        //let x     = (idx >> 1) & 0x03;
-        //.        let shift = 16 - ((idx16 & 1) << 4);
-
-        //.        let intpart = (mtx_data[idx] >> shift) as i16;
-        //.        let fracpart = (mtx_data[8 + idx] >> shift) as u16;
-
-        //.        print!("{:04x}.{:04x} ", intpart, fracpart);
-        //.        mtx[row][col] = ((intpart as i32) << 16) | (fracpart as i32);
-        //.    }
-
-        //.    match row {
-        //.        0   => print!("\\   /"),
-        //.        1|2 => print!(" | | "),
-        //.        3   => print!("/   \\"),
-        //.        _   => {},
-        //.    }
-
-        //.    for col in 0..4 {
-        //.        let e = mtx[row][col];
-        //.        let f = (e >> 16) as f32 + ((e as u16) as f32) / 65536.0;
-        //.        fmtx[row][col] = f;
-        //.        print!("{:8.4}", cgmat[row][col]);
-        //.    }
-
-        //.    match row {
-        //.        0   => println!(" \\"),
-        //.        1|2 => println!("  |"),
-        //.        3   => println!(" /   "),
-        //.        _   => {},
-        //.    }
-
-        //.}
-
         if proj {
             //println!("proj: {cgmat:?}");
-            self.current_projection_matrix = cgmat * OPENGL_TO_WGPU_MATRIX;
+            if mul {
+                self.current_projection_matrix = cgmat * self.current_projection_matrix;
+            } else {
+                self.current_projection_matrix = cgmat * OPENGL_TO_WGPU_MATRIX;
+            }
         } else {
             let count = self.matrix_stack.len();
             if mul && count > 0 {
@@ -791,6 +757,12 @@ impl Hle {
             6 => { // G_MW_SEGMENT
                 trace!(target: "HLE", "{} gsSPSegment({}, 0x{:08X})", self.command_prefix, offset >> 2, data);
                 self.segments[(offset >> 2) as usize] = data;
+            },
+
+            14 => { // G_MW_PERSPNORM
+                trace!(target: "HLE", "{} gsSPPerspNormalize(0x{:08X})", self.command_prefix, data);
+                // Perspective Normalization is ignored in HLE. While there are precision issues
+                // with f32, we don't need the fixed point correction
             },
 
             _ => {
@@ -951,7 +923,8 @@ impl Hle {
                 position: [
                     ((data[0] >> 16) as i16) as f32, 
                     ( data[0]        as i16) as f32, 
-                    ((data[1] >> 16) as i16) as f32
+                    ((data[1] >> 16) as i16) as f32,
+                    1.0,
                 ],
                 tex_coords: [
                     // s,t are S10.5 format, and are scaled by the current s,t scale factors
@@ -1021,11 +994,13 @@ impl Hle {
         }
 
         // if there are no draw_calls, drop this render pass
+        // this could happen at the end of a frame, but not from next_render_pass()
         if self.current_render_pass().draw_list.len() == 0 {
             self.render_passes.pop().unwrap();
             return;
         }
 
+        // check to see if the render targets are cleared with full screen tris
         let (color_buffer, depth_buffer) = {
             let rp = self.current_render_pass();
             (rp.color_buffer, rp.depth_buffer)
@@ -1033,7 +1008,12 @@ impl Hle {
 
         if let Some(color_addr) = color_buffer {
             let clear_color = self.clear_images.remove(&color_addr);
-            self.current_render_pass().clear_color = clear_color;
+            if !self.clear_color_happened {
+                self.current_render_pass().clear_color = clear_color;
+                if clear_color.is_some() {
+                    self.clear_color_happened = true;
+                }
+            }
         }
 
         if let Some(depth_addr) = depth_buffer {
@@ -1120,9 +1100,8 @@ impl Hle {
     }
 
     // return a transformed vertex along with the index into self.indices where it is placed
-    fn make_final_vertex(&mut self, stack_index: usize) -> Option<(&Vertex, u16)> {
-        let vi = self.vertex_stack.get(stack_index)?;
-        let mut vtx = self.vertices_internal.get(*vi as usize)?.clone();
+    fn make_final_vertex(&mut self, vertex_index: usize) -> Option<(&Vertex, u16)> {
+        let mut vtx = self.vertices_internal.get(vertex_index)?.clone();
         if self.tex.enabled {
             let current_tile = self.tex.tile;
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
@@ -1138,10 +1117,11 @@ impl Hle {
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
             }
 
-            vtx.flags |= VERTEX_FLAG_TEXTURED;
-            if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
-                vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
-            }
+            vtx.flags = 0;
+            //vtx.flags |= VERTEX_FLAG_TEXTURED;
+            //if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
+            //    vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+            //}
         }   
 
         let index = self.vertices.len();
@@ -1317,12 +1297,15 @@ impl Hle {
         self.map_current_texture();
 
         // transform texture coordinates
-        let (_iv, v0) = self.make_final_vertex(v0 as usize).unwrap();
-        //println!("iv0: {:?}", iv);
-        let (_iv, v1) = self.make_final_vertex(v1 as usize).unwrap();
-        //println!("iv1: {:?}", iv);
-        let (_iv, v2) = self.make_final_vertex(v2 as usize).unwrap();
-        //println!("iv2: {:?}", iv);
+        let vi = self.vertex_stack.get(v0 as usize).unwrap();
+        let (_iv, v0) = self.make_final_vertex(*vi as usize).unwrap();
+        //println!("iv0: {:?}", _iv);
+        let vi = self.vertex_stack.get(v1 as usize).unwrap();
+        let (_iv, v1) = self.make_final_vertex(*vi as usize).unwrap();
+        //println!("iv1: {:?}", _iv);
+        let vi = self.vertex_stack.get(v2 as usize).unwrap();
+        let (_iv, v2) = self.make_final_vertex(*vi as usize).unwrap();
+        //println!("iv2: {:?}", _iv);
 
         // place indices into draw list
         let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
@@ -1344,12 +1327,18 @@ impl Hle {
         self.map_current_texture();
 
         // translate to global vertex stack
-        let (_, v00) = self.make_final_vertex(v00 as usize).unwrap();
-        let (_, v01) = self.make_final_vertex(v01 as usize).unwrap();
-        let (_, v02) = self.make_final_vertex(v02 as usize).unwrap();
-        let (_, v10) = self.make_final_vertex(v10 as usize).unwrap();
-        let (_, v11) = self.make_final_vertex(v11 as usize).unwrap();
-        let (_, v12) = self.make_final_vertex(v12 as usize).unwrap();
+        let vi = self.vertex_stack.get(v00 as usize).unwrap();
+        let (_, v00) = self.make_final_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v01 as usize).unwrap();
+        let (_, v01) = self.make_final_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v02 as usize).unwrap();
+        let (_, v02) = self.make_final_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v10 as usize).unwrap();
+        let (_, v10) = self.make_final_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v11 as usize).unwrap();
+        let (_, v11) = self.make_final_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v12 as usize).unwrap();
+        let (_, v12) = self.make_final_vertex(*vi as usize).unwrap();
 
         let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
         tl.num_indices += 6;
@@ -1362,24 +1351,87 @@ impl Hle {
         let cmd2 = self.next_display_list_command();
         self.command_words += 4;
 
-        let x1   = ((self.command >> 44) & 0xFFF) as u16;
-        let y1   = ((self.command >> 32) & 0xFFF) as u16;
-        let tile = ((self.command >> 24) & 0x0F) as u8;
-        let x0   = ((self.command >> 12) & 0xFFF) as u16;
-        let y0   = ((self.command >>  0) & 0xFFF) as u16;
-        let s0   = (cmd1 >> 16) as u16;
-        let t0   = (cmd1 >>  0) as u16;
-        let dsdx = (cmd2 >> 16) as u16;
-        let dtdy = (cmd2 >>  0) as u16;
-        trace!(target: "HLE", "{} gsSPTextureRectangle({}, {}, {}, {}, {}, {}, {}, {}, {})", self.command_prefix, x0, y0, x1, y1, tile, s0, t0, dsdx, dtdy);
-        //self.send_hle_render_command(HleRenderCommand::FillRectangle {
-        //    x: x0 as f32,
-        //    y: y0 as f32,
-        //    w: (x1 - x0) as f32 + 1.0,
-        //    h: (y1 - y0) as f32 + 1.0,
-        //    c: [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
-        //        ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0],
-        //});
+        let lrx  = ((self.command >> 44) & 0xFFF) as u16;
+        let lry  = ((self.command >> 32) & 0xFFF) as u16;
+        let tile = ((self.command >> 24) & 0x07) as u8;
+        let ulx  = ((self.command >> 12) & 0xFFF) as u16;
+        let uly  = ((self.command >>  0) & 0xFFF) as u16;
+        let uls  = (cmd1 >> 16) as i16;
+        let ult  = (cmd1 >>  0) as i16;
+        let dsdx = (cmd2 >> 16) as i16;
+        let dtdy = (cmd2 >>  0) as i16;
+        trace!(target: "HLE", "{} gsSPTextureRectangle({}, {}, {}, {}, {}, {}, {}, {}, {})", self.command_prefix, ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy);
+
+        let (vw, vh) = match self.current_viewport.clone() {
+            Some(HleRenderCommand::Viewport { w: vw, h: vh, .. }) => (vw, vh),
+            _ => {
+                // no viewport set?
+                warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
+                return;
+            },
+        };
+
+        // convert values to fp
+        let ulx  = (ulx  as f32) / 4.0;
+        let uly  = (uly  as f32) / 4.0;
+        let lrx  = (lrx  as f32) / 4.0;
+        let lry  = (lry  as f32) / 4.0;
+        let uls  = (uls  as f32) / 32.0;
+        let ult  = (ult  as f32) / 32.0;
+        let dsdx = (dsdx as f32) / 1024.0;
+        let dtdy = (dtdy as f32) / 1024.0;
+
+        let w    = lrx - ulx;
+        let h    = lry - uly;
+        let sw   = w * dsdx;
+        let th   = h * dtdy;
+
+        self.map_current_texture();
+
+        let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
+        let cur_pos = self.vertices_internal.len() as u16; // save start index
+        self.vertices_internal.push(Vertex { // TL
+            position  : [scale(ulx, vw), scale(uly, vh), 0.0, 1.0], 
+            tex_coords: [uls, ult], 
+            color     : [1.0, 0.0, 0.0, 1.0], 
+            flags     : 0, 
+        });
+        self.vertices_internal.push(Vertex { // TR
+            position  : [scale(ulx+w, vw), scale(uly, vh), 0.0, 1.0], 
+            tex_coords: [uls+sw, ult], 
+            color     : [0.0, 1.0, 0.0, 1.0], 
+            flags     : 0, 
+        });
+        self.vertices_internal.push(Vertex { // BL
+            position  : [scale(ulx, vw), scale(uly+h, vh), 0.0, 1.0], 
+            tex_coords: [uls, ult+th], 
+            color     : [0.0, 0.0, 1.0, 1.0], 
+            flags     : 0, 
+        });
+        self.vertices_internal.push(Vertex { // BR
+            position  : [scale(ulx+w, vw), scale(uly+h, vh), 0.0, 1.0], 
+            tex_coords: [uls+sw, ult+th], 
+            color     : [1.0, 0.0, 1.0, 1.0], 
+            flags     : 0, 
+        });
+
+        // make final vertex will only apply texture correction if self.tex.enabled is true
+        // and apparently it doesn't need to be set to call g*SPTextureRectangle
+        let old_enabled = self.tex.enabled;
+        self.tex.enabled = true;
+
+        let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
+        let (_, v1) = self.make_final_vertex((cur_pos+1) as usize).unwrap();
+        let (_, v2) = self.make_final_vertex((cur_pos+2) as usize).unwrap();
+        let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
+
+        self.tex.enabled = old_enabled;
+
+        // start or change the current draw list to use matrix 0 (our ortho projection)
+        let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
+        tl.num_indices += 6;
+        self.indices.extend_from_slice(&[v0, v1, v2, v1, v2, v3]);
+        self.num_tris += 2;
     }
 
     fn handle_settilesize(&mut self) { // G_SETTILESIZE
@@ -1496,12 +1548,85 @@ impl Hle {
     }
 
     fn handle_loadtile(&mut self) { // G_LOADTILE
-        let s0     = ((self.command >> 44) & 0xFFF) as u16;
-        let t0     = ((self.command >> 32) & 0xFFF) as u16;
-        let tile   = ((self.command >> 24) & 0x0F) as u8;
-        let s1     = ((self.command >> 12) & 0xFFF) as u16;
-        let t1     = ((self.command >>  0) & 0xFFF) as u16;
-        trace!(target: "HLE", "{} gsDPLoadTile({}, {}, {}, {}, {})", self.command_prefix, tile, s0, t0, s1, t1);
+        let uls  = ((self.command >> 44) & 0xFFF) as u16;
+        let ult  = ((self.command >> 32) & 0xFFF) as u16;
+        let tile = ((self.command >> 24) & 0x07) as u8;
+        let lrs  = ((self.command >> 12) & 0xFFF) as u16;
+        let lrt  = ((self.command >>  0) & 0xFFF) as u16;
+        trace!(target: "HLE", "{} gsDPLoadTile({}, {}, {}, {}, {})", self.command_prefix, tile, uls, ult, lrs, lrt);
+
+        let valid = true;//uls == 0;
+
+        // convert to fp
+        let uls  = (uls as f32) / 4.0;
+        let ult  = (ult as f32) / 4.0;
+        let lrs  = (lrs as f32) / 4.0;
+        let lrt  = (lrt as f32) / 4.0;
+
+        let tile_width = lrs - uls + 1.0;
+        let tile_height = lrt - ult + 1.0;
+
+        let rdp_tile    = self.tex.rdp_tiles[tile as usize];
+        let tile_size   = rdp_tile.size;
+        let adjust_size = |texels: u32| match tile_size {
+            0 => texels >> 1, // 4b
+            1 => texels     , // 8b
+            2 => texels << 1, // 16b
+            3 => texels << 2, // 32b
+            5 => todo!("SIZ_DD"),
+            _ => { error!(target: "HLE", "invalid texture size"); 0 },
+        };
+
+        // load enough data to cover the entire tile, despite loading too much data
+        // it may be (seems) better than locking rdram once for ever row
+        let image_bytes_per_row = adjust_size(self.tex.width as u32); // width of the texture in DRAM
+        let tile_bytes_per_row  = rdp_tile.line as u32 * 8; // width of the tile to load rounded up to 64-bits
+
+        //println!("image_bytes_per_row={} tile_bytes_per_row={} uls={} ult={} lrs={} lrt={} tile_width={} tile_height={}", 
+        //         image_bytes_per_row, tile_bytes_per_row, uls, ult, lrs, lrt, tile_width, tile_height);
+
+        // start address = base + (y * texture_width + x) * bpp
+        let start_dram = self.tex.address + (ult as u32) * image_bytes_per_row + adjust_size(uls as u32);
+
+        // load enough data to contain the entire tile
+        let load_size = (tile_height as u32 - 1) * image_bytes_per_row + tile_bytes_per_row;
+        let image_data = if valid {
+            self.load_from_rdram(start_dram, load_size)
+        } else {
+            vec![0xF8010001; (load_size >> 2) as usize]
+        };
+
+        let dst = &mut self.tex.tmem[(rdp_tile.tmem << 1) as usize..]; // .tmem is in 64-bit words, tmem[] is 32-bit
+
+        // loop over the rows and swizzle as necessary
+        let mut source_offset = 0;
+        let mut dest_offset   = 0;
+        for y in 0..(tile_height as usize) {
+            let tile_words_per_row = (tile_bytes_per_row >> 2) as usize;
+            let mut row = image_data[source_offset..][..tile_words_per_row].to_owned();
+            // increment by one row in DRAM
+            source_offset += (image_bytes_per_row >> 2) as usize;
+
+            // swizzle odd rows. NOTE TODO this is only "correct" for RGBA 16b
+            if (y & 0x01) == 1 { 
+                for r in row.chunks_mut(2) {
+                    r.swap(0, 1);
+                }
+            }
+
+            dst[dest_offset..][..tile_words_per_row].copy_from_slice(&row);
+            // increment by one row in TMEM
+            dest_offset += tile_words_per_row;
+        }
+
+        let texels = (tile_width * tile_height) as u32;
+        self.num_texels += texels;
+        self.total_texture_data += adjust_size(texels);
+
+        // have to clear all mapped coordinates since textures are changing
+        for rdp_tile in &mut self.tex.rdp_tiles {
+            rdp_tile.mapped_coordinates = None;
+        }
     }
 
     fn handle_settile(&mut self) { // G_SETTILE
@@ -1686,10 +1811,10 @@ impl Hle {
         // so (rx/vx * 2) - 1
         let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
         let cur_pos = self.vertices.len() as u16; // save start index
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
@@ -1712,10 +1837,10 @@ impl Hle {
         let cur_pos = self.vertices.len() as u16; // save start index
 
         // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));

@@ -69,6 +69,7 @@ impl PifRom {
             x @ 0x45CC73EE317A => { return (CicType::Nus6101, x, seed); }, // only Star Fox 64
             x @ 0xA536C0F1D859 => { return (if is_pal { CicType::Nus7101 } else { CicType::Nus6102 }, x, seed); }, // Looootttssss of games.
             x @ 0x44160EC5D9AF => { return (CicType::Nus7102, x, seed); },
+            x @ 0xDB9CAEFB5196 => { return (if is_pal { CicType::Nus7101 } else { CicType::Nus6102 }, x, seed); }, // NuSystems demos?
             _ => {},
         };
 

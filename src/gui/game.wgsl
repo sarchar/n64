@@ -9,7 +9,7 @@ struct CameraUniform {
 var<uniform> camera: CameraUniform;
 
 struct VertexInput {
-    @location(0) position: vec3<f32>,
+    @location(0) position: vec4<f32>,
     @location(1) tex_coords: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) flags: u32,
@@ -31,7 +31,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     out.tex_coords    = vec2<f32>(in.tex_coords.x, in.tex_coords.y);
-    out.clip_position = vec4<f32>(in.position, 1.0) * camera.view_proj;
+    out.clip_position = in.position * camera.view_proj;
     out.color         = in.color;
     out.flags         = in.flags;
 

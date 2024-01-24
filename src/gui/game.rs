@@ -20,7 +20,7 @@ use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position  : [f32; 3],
+    position  : [f32; 4],
     tex_coords: [f32; 2],
     color     : [f32; 4],
     flags     : u32,
@@ -28,10 +28,10 @@ struct Vertex {
 
 // Y texture coordinate is inverted to flip the resulting image
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BR
+    Vertex { position: [-1.0,  1.0, 0.0, 1.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0, 1.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0, 1.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BR
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[
@@ -41,7 +41,7 @@ const GAME_TEXTURE_INDICES: &[u16] = &[
 
 impl Vertex {
     fn _new() -> Self {
-        Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], flags: 0, }
+        Vertex { position: [0.0, 0.0, 0.0, 1.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], flags: 0, }
     }
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -52,20 +52,20 @@ impl Vertex {
                 wgpu::VertexAttribute { // position
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // tex_coords
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute { // color
-                    offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // flags
-                    offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Uint32,
                 },
@@ -74,7 +74,7 @@ impl Vertex {
     }
 
     fn size() -> usize {
-        (std::mem::size_of::<[f32; 9]>() 
+        (std::mem::size_of::<[f32; 10]>() 
          + std::mem::size_of::<u32>()) as usize
     }
 
@@ -1150,6 +1150,7 @@ impl Game {
                         });
 
                         render_pass.set_pipeline(pipeline);
+                        render_pass.set_viewport(0.0, 0.0, 1280.0, 960.0, 0.0, 1.0);
                         render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
