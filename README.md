@@ -30,6 +30,10 @@ $ cargo run --release -- n64-systemtest.z64 -D
 
 ![image](https://github.com/sarchar/n64/assets/4928176/c6a6b774-afde-40d6-9acd-8f0157002369)
 
+* Ocarina of Time:
+
+![image](https://github.com/sarchar/n64/assets/4928176/8f1530c1-3c2d-4e38-9e03-1d80040e2a5e)
+
 * "morphdemo.n64" from NuSystems
 
 ![image](https://github.com/sarchar/n64/assets/4928176/d135b1d4-824a-4b0a-984d-405da7c4213f)
