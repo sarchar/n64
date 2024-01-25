@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use atomic_counter::{AtomicCounter, RelaxedCounter};
+
 pub mod audio;
 pub mod avx512f_wrapper;
 pub mod cop1;
@@ -139,6 +141,9 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 pub struct SystemCommunication {
     pub hle_command_buffer: Option<Arc<hle::HleCommandBuffer>>,
 
+    // total cpu cycle count
+    pub total_cpu_steps: Arc<RelaxedCounter>,
+
     // current render framebuffer
     pub vi_origin: Arc<AtomicU32>,
     // framebuffer width
@@ -161,6 +166,7 @@ impl SystemCommunication {
     pub fn new(hle_command_buffer: Option<hle::HleCommandBuffer>) -> Self {
         Self {
             hle_command_buffer: hle_command_buffer.map_or(None, |v| Some(Arc::new(v))),
+            total_cpu_steps   : Arc::new(RelaxedCounter::new(0)),
             vi_origin         : Arc::new(AtomicU32::new(0)),
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
@@ -213,6 +219,7 @@ impl System {
         while i < cpu_cycles && self.comms.check_interrupts.load(Ordering::SeqCst) == 0 {
             self.cpu.step()?; // TODO should probably still call rcp.step() if this returns an error?
             i += 1;
+            self.comms.total_cpu_steps.inc();
         }
 
         self.comms.check_interrupts.store(0, Ordering::SeqCst);

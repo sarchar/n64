@@ -22,6 +22,7 @@ pub struct PeripheralInterface {
 
     cartridge_rom: Vec<u32>,
     cartridge_rom_write: Option<u32>,
+    cartridge_rom_write_time: u64,
 
     dma_completed_rx: mpsc::Receiver<DmaInfo>,
     dma_completed_tx: mpsc::Sender<DmaInfo>,
@@ -55,6 +56,7 @@ impl PeripheralInterface {
 
             cartridge_rom: word_rom,
             cartridge_rom_write: None,
+            cartridge_rom_write_time: 0,
 
             dma_completed_rx: dma_completed_rx,
             dma_completed_tx: dma_completed_tx,
@@ -84,7 +86,6 @@ impl PeripheralInterface {
             0x0_0010 => {
                 debug!(target: "PI", "read PI_STATUS");
 
-                // return dma in progress at least once
                 let ret = self.dma_status | self.io_busy;
 
                 if self.io_busy != 0 {
@@ -308,15 +309,22 @@ impl Addressable for PeripheralInterface {
             let cartridge_rom_offset = offset & 0x0FFF_FFFF;
             //debug!(target: "CART", "read32 offset=${:08X}", cartridge_rom_offset);
 
-            if let Some(value) = self.cartridge_rom_write {
-                self.cartridge_rom_write = None;
-                Ok(value)
+            match self.cartridge_rom_write {
+                Some(value) => {
+                    let delta = (self.comms.total_cpu_steps.get() as u64) - self.cartridge_rom_write_time;
+                    self.cartridge_rom_write = None;
+                    if delta < 50 { // TODO I don't konw the correct value for this write decay, but 
+                                    // 50 is working on n64-systemtests
+                        return Ok(value)
+                    }
+                },
+                _ => {},
+            }
+
+            if cartridge_rom_offset >= self.cartridge_rom.len() * 4 {
+                Ok(0x00000000)
             } else {
-                if cartridge_rom_offset >= self.cartridge_rom.len() * 4 {
-                    Ok(0x00000000)
-                } else {
-                    Ok(self.cartridge_rom[(cartridge_rom_offset >> 2) as usize])
-                }
+                Ok(self.cartridge_rom[(cartridge_rom_offset >> 2) as usize])
             }
         } else {
             debug!(target: "PI", "open bus read at ${:08X}", offset);
@@ -407,10 +415,15 @@ impl Addressable for PeripheralInterface {
             Ok(WriteReturnSignal::None)
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 {
             //debug!(target: "PI", "wrote to ROM value=${:08X} offset=${:08X}", value, offset);
-            if let None = self.cartridge_rom_write {
-                self.cartridge_rom_write = Some(value);
-                // set the IO busy flag of PI_STATUS on cart write
-                self.io_busy = 0x02;
+            match self.cartridge_rom_write {
+                // if cartridge_rom_write isn't set, note the first write to cart
+                None => {
+                    self.cartridge_rom_write = Some(value);
+                    self.cartridge_rom_write_time = self.comms.total_cpu_steps.get() as u64;
+                    // set the IO busy flag of PI_STATUS on cart write
+                    self.io_busy = 0x02;
+                },
+                _ => {},
             }
             Ok(WriteReturnSignal::None)
         } else {
