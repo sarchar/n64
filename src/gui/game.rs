@@ -791,6 +791,7 @@ impl App for Game {
                         let height = if width == 320 { 240 } else if width == 640 { 480 } else { warn!(target: "RENDER", "unknown render size {}", width); return; } as usize;
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
 
+
                         if self.raw_render_texture.is_none() {
                             let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
                             self.raw_render_texture = Some(texture);
@@ -801,6 +802,11 @@ impl App for Game {
                         // would be nice if I could copy RGB555 into a texture, but this copy seems acceptable for now
                         if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
                             let start = (video_buffer >> 2) as usize;
+
+                            let bpp = if format == 2 { 2 } else if format == 3 { 4 } else { todo!() };
+                            let size = ((width * height * bpp) >> 2) as usize;
+                            if start + size >= rdram.len() { return; }
+
                             let mut image_data = vec![0u8; width*height*4];
                             for y in 0..height {
                                 for x in 0..width {
