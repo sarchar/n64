@@ -65,6 +65,7 @@ pub struct Rsp {
 #[derive(Debug, Default)]
 pub struct RspSharedState {
     intbreak: bool,
+    halted_self: bool,
 
     dma_cache: u32,
     dma_dram: u32,
@@ -286,7 +287,7 @@ impl Rsp {
                     }
                 } else {
                     // run for some cycles or until break
-                    for _ in 0..20 {
+                    for _ in 0..40 {
                         let _ = c.step(); // TODO handle errors
 
                         if c.broke || c.halted_self { 
@@ -361,17 +362,26 @@ impl Rsp {
 
             // SP_STATUS
             0x4_0010 => {
-                //debug!(target: "RSP", "read SP_STATUS");
+                trace!(target: "RSP", "read SP_STATUS at {}", self.comms.total_cpu_steps.get() as u64);
 
                 // update self.broke
                 let _ = self.is_broke();
 
                 // update self.halted on self-halting RSP
                 if !self.halted {
-                    let mut core = self.core.lock().unwrap();
-                    if core.halted_self {
+                    let shared_state = self.shared_state.read().unwrap();
+                    if shared_state.halted_self {
+                        drop(shared_state);
                         self.halted = true;
-                        core.halted_self = false;
+                        // clear both shared_state and core states
+                        {
+                            let mut shared_state = self.shared_state.write().unwrap();
+                            shared_state.halted_self = false;
+                        }
+                        {
+                            let mut core = self.core.lock().unwrap();
+                            core.halted_self = false;
+                        }
                     }
                 }
 
@@ -577,6 +587,8 @@ impl Rsp {
                     let mut c = self.core.lock().unwrap();
                     c.halted = true;
                     c.halted_self = false;
+                    let mut shared_state = self.shared_state.write().unwrap();
+                    shared_state.halted_self = false;
                     self.halted = true;
                 }
 
@@ -932,7 +944,6 @@ impl RspCpuCore {
     fn reset(&mut self) -> Result<(), ReadWriteFault> {
         self.pc     = 0;
         self.halted = true;
-        self.halted_self = false;
 
         self.prefetch()
     }
@@ -1576,6 +1587,8 @@ impl RspCpuCore {
                             info!(target: "RSP", "RSP halted self!");
                             self.halted = true;
                             self.halted_self = true;
+                            let mut shared_state = self.shared_state.write().unwrap();
+                            shared_state.halted_self = true;
                             val &= !0x02;
                         }
 
