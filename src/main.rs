@@ -39,7 +39,7 @@ fn main() {
     let default_filter = filter::Targets::new()
                             .with_target("rustyline", tracing_core::Level::ERROR)
                             //.with_target("RCP", tracing_core::Level::TRACE)
-                            .with_target("RDP", tracing_core::Level::TRACE)
+                            //.with_target("RDP", tracing_core::Level::TRACE)
                             //.with_target("VI", tracing_core::Level::TRACE)
                             //.with_target("RSP", tracing_core::Level::DEBUG)
                             //.with_target("JOY", tracing_core::Level::DEBUG)
