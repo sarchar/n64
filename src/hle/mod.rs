@@ -1929,7 +1929,7 @@ impl Hle {
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
             self.segments[segment] + (addr & 0x00FF_FFFF)
-        };
+        } & 0x07FF_FFFF;
 
         trace!(target: "HLE", "{} gsDPSetDepthImage(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
 
@@ -1954,7 +1954,7 @@ impl Hle {
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
             self.segments[segment] + (addr & 0x00FF_FFFF)
-        };
+        } & 0x07FF_FFFF;
 
         trace!(target: "HLE", "{} gsDPSetColorImage({}, {}, {}, 0x{:08X} [0x{:08X}])", self.command_prefix, fmt, bpp, width, addr, translated_addr);
 
