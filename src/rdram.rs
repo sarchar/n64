@@ -6,7 +6,9 @@ use crate::*;
 pub struct RdramInterface {
     ram: Arc<RwLock<Option<Vec<u32>>>>,
     ram_len: usize,
-    repeat_count: Option<u32>
+    repeat_count: Option<u32>,
+
+    ri_select: u32,
 }
 
 impl RdramInterface {
@@ -23,6 +25,7 @@ impl RdramInterface {
             ram: ram,
             ram_len: ram_len,
             repeat_count: None,
+            ri_select: 0x14,
         }
     }
 
@@ -77,7 +80,10 @@ impl Addressable for RdramInterface {
             0x0400_000C => {
                 // TODO
                 debug!(target: "RDRAM", "read RI_SELECT");
-                Ok(0x14)
+                let mut access = self.ram.write().unwrap();
+                let ram = access.as_mut().unwrap();
+                ram[(0x318 >> 2) as usize] = 0x0080_0000; // HACK! set ram_size!
+                Ok(self.ri_select)
             },
 
             // RI_REFRESH
@@ -143,7 +149,7 @@ impl Addressable for RdramInterface {
             // RI_SELECT
             0x0400_000C => {
                 debug!(target: "RDRAM", "write RI_SELECT value=${:08X}", value);
-                assert!(value == 0x14);
+                self.ri_select = value;
             },
 
             // RI_REFRESH
