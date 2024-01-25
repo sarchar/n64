@@ -3,7 +3,7 @@ use std::mem;
 use std::sync::mpsc;
 
 #[allow(unused_imports)]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 
 use crate::*;
 
@@ -93,7 +93,7 @@ impl MipsInterface {
 
                     InterruptUpdateMode::SetInterrupt => {
                         // if interrupt is enabled and not currently set, cause interrupt to trigger
-                        if (self.interrupt_mask & bit) != 0 && (self.interrupt & bit) == 0 {
+                        if (self.interrupt_mask & bit) != 0 {
                             self.trigger_int |= bit;
                         }
                         self.interrupt |= bit;
@@ -122,26 +122,25 @@ impl MipsInterface {
 
 impl Addressable for MipsInterface {
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        debug!(target: "MI", "read32 offset=${:08X}", offset);
+        trace!(target: "MI", "read32 offset=${:08X}", offset);
 
         let result = match offset {
             // MI_VERSION
             // https://n64brew.dev/wiki/MIPS_Interface#0x0430_0004_-_MI_VERSION
             0x0_0004 => {
-                debug!(target: "MI", "version read");
+                //trace!(target: "MI", "version read");
                 0x0202_0102
             },
 
             // MI_INTERRUPT
             0x0_0008 => {
-                debug!(target: "MI", "interrupt cause read");
                 self.update_interrupts();
                 self.interrupt
             },
 
             // MI_MASK
             0x0_000C => {
-                debug!(target: "MI", "MI_MASK read");
+                //trace!(target: "MI", "MI_MASK read (mask=${:08X})", self.interrupt_mask);
                 self.update_interrupts();
                 self.interrupt_mask
             }
@@ -156,11 +155,11 @@ impl Addressable for MipsInterface {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        debug!(target: "MI", "write32 value=${:08X} offset=${:08X}", value, offset);
+        trace!(target: "MI", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         match offset {
             0x0_0000 => { 
-                debug!(target: "MI", "write MI_MODE value=${:08X}", value);
+                trace!(target: "MI", "write MI_MODE value=${:08X}", value);
 
                 // RDP interrupt is cleared by writing to MI
                 if (value & 0x800) != 0 {
@@ -184,7 +183,7 @@ impl Addressable for MipsInterface {
             },
 
             0x0_000C => {
-                //info!(target: "MI", "write MI_MASK value=${:08X}", value);
+                trace!(target: "MI", "write MI_MASK value=${:08X}", value);
 
                 for mask in [IMask_DP, IMask_PI, IMask_VI, IMask_AI, IMask_SI, IMask_SP] {
                     // Set mask
