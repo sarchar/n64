@@ -13,7 +13,7 @@ use cgmath::prelude::*;
 use crate::*;
 use gui::{App, AppWindow};
 
-use n64::SystemCommunication;
+use n64::{SystemCommunication, ButtonState};
 use n64::hle::{HleRenderCommand, HleCommandBuffer};
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
@@ -118,6 +118,9 @@ enum ViewMode {
 
 pub struct Game {
     comms: SystemCommunication,
+
+    check_inputs: bool,
+
     hle_command_buffer: Arc<HleCommandBuffer>,
 
     view_mode: ViewMode,
@@ -165,9 +168,6 @@ pub struct Game {
     game_frame_count: u64,
     game_last_fps_time: Instant,
     game_fps: f64,
-
-    vertex_buffer_writes: u32,
-    index_buffer_writes: u32,
 }
 
 impl App for Game {
@@ -600,6 +600,8 @@ impl App for Game {
         let hle_command_buffer = std::mem::replace(&mut comms.hle_command_buffer, None).unwrap();
         Self {
             comms: comms,
+            check_inputs: true, 
+
             hle_command_buffer: hle_command_buffer,
 
             view_mode: ViewMode::Game,
@@ -647,9 +649,6 @@ impl App for Game {
             game_frame_count: 0,
             game_last_fps_time: Instant::now(),
             game_fps: 0.0,
-
-            vertex_buffer_writes: 0,
-            index_buffer_writes: 0,
         }
     }
 
@@ -717,6 +716,11 @@ impl App for Game {
             self.comms.check_interrupts.store(1, Ordering::SeqCst);
 
             // TODO reset rendering states
+        }
+
+        if self.check_inputs {
+            self.update_game_inputs(appwnd);
+            self.check_inputs = false;
         }
 
         //let input = appwnd.input();
@@ -913,6 +917,23 @@ impl App for Game {
 }
 
 impl Game {
+    fn update_game_inputs(&mut self, appwnd: &AppWindow) {
+        let set_state = |state: &mut ButtonState, is_pressed: bool| {
+            let pressed  = (!state.pressed && !state.held) &&  is_pressed;
+            let held     = ( state.pressed ||  state.held) &&  is_pressed;
+            let released = ( state.pressed ||  state.held) && !is_pressed;
+            *state = ButtonState {
+                held    : held,
+                pressed : pressed,
+                released: released
+            };
+        };
+
+        let controllers = &mut self.comms.controllers.write().unwrap();
+        set_state(&mut controllers[0].a, appwnd.gamepad_ispressed(0, gilrs::Button::South) || appwnd.input().key_held(VirtualKeyCode::C));
+        set_state(&mut controllers[0].b, appwnd.gamepad_ispressed(0, gilrs::Button::West)  || appwnd.input().key_held(VirtualKeyCode::X));
+    }
+
     fn create_color_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {
         let device = appwnd.device();
 
@@ -1080,7 +1101,6 @@ impl Game {
 
                     let vertices = &vcopy;
                     appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
-                    self.vertex_buffer_writes += vcopy.len() as u32;
                 },
 
                 HleRenderCommand::IndexData(mut v) => {
@@ -1192,11 +1212,8 @@ impl Game {
                         self.game_last_fps_time = Instant::now();
                     }
 
+                    self.check_inputs = true;
                     self.reset_render_state();
-
-                    trace!(target: "RENDER", "vertex buffer writes: {}, index buffer writes: {}", self.vertex_buffer_writes, self.index_buffer_writes);
-                    self.vertex_buffer_writes = 0;
-                    self.index_buffer_writes = 0;
 
                     // trigger RDP interrupt to signal render is done
                     if let Some(mi) = &self.comms.mi_interrupts_tx {

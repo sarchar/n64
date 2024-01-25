@@ -92,7 +92,7 @@ impl Addressable for Rdp {
             },
 
             _ => {
-                error!(target: "RDP", "invalid or unimplemented RDP read from offset=${:08X}", offset);
+                //error!(target: "RDP", "invalid or unimplemented RDP read from offset=${:08X}", offset);
                 Ok(0)
             },
         }

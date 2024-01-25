@@ -42,11 +42,13 @@ fn main() {
                             //.with_target("RDP", tracing_core::Level::TRACE)
                             //.with_target("VI", tracing_core::Level::TRACE)
                             //.with_target("RSP", tracing_core::Level::DEBUG)
-                            //.with_target("JOY", tracing_core::Level::DEBUG)
+                            //.with_target("JOY", tracing_core::Level::TRACE)
+                            //.with_target("PIF", tracing_core::Level::TRACE)
                             //.with_target("MI", tracing_core::Level::DEBUG)
                             //.with_target("DMA", tracing_core::Level::TRACE)
-                            .with_target("HLE", tracing_core::Level::TRACE)
-                            //.with_target("PIF-RAM", tracing_core::Level::TRACE)
+                            //.with_target("HLE", tracing_core::Level::TRACE)
+                            //.with_target("SI", tracing_core::Level::TRACE)
+                            //.with_target("PIF-ROM", tracing_core::Level::TRACE)
                             .with_target("wgpu_hal", tracing_core::Level::WARN)
                             .with_target("wgpu_core", tracing_core::Level::WARN)
                             .with_target("GUI", tracing_core::Level::DEBUG)
@@ -119,7 +121,24 @@ fn main() {
                 let comms = SystemCommunication::new(None);
                 make_system(comms).run();
             } else {
-                pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system)));
+                let gilrs = match gilrs::GilrsBuilder::new().set_update_state(false).build() {
+                    Ok(g) => {
+                        info!(target: "GUI", "Gilrs initialized");
+                        g
+                    },
+
+                    Err(gilrs::Error::NotImplemented(g)) => {
+                        error!(target: "GUI", "gilrs doesn't support current platform");
+                        g
+                    },
+
+                    Err(e) => {
+                        error!(target: "GUI", "gilrs failed to create context: {}", e);
+                        std::process::exit(-1);
+                    },
+                };
+
+                pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system), gilrs));
             }
         }
     }

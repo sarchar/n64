@@ -13,6 +13,8 @@ use winit_input_helper::WinitInputHelper;
 use imgui::*;
 use imgui_wgpu::{Renderer, RendererConfig};
 
+use gilrs::ev::filter::Filter;
+
 use crate::*;
 use n64::SystemCommunication;
 use n64::hle::HleCommandBuffer;
@@ -35,10 +37,12 @@ pub struct AppWindow {
     window      : Window,
     input_helper: WinitInputHelper,
     wgpu        : WgpuInfo,
+    gilrs       : gilrs::Gilrs,
+    connected_gamepads: [Option<gilrs::GamepadId>; 4],
 }
 
 impl AppWindow {
-    async fn new(title: &str, width: u32, height: u32, allow_vulkan: bool) -> Self {
+    async fn new(title: &str, width: u32, height: u32, allow_vulkan: bool, gilrs: gilrs::Gilrs) -> Self {
         let event_loop = EventLoop::new();
 
         // Create the platform window with winit
@@ -105,6 +109,8 @@ impl AppWindow {
             size        : window_size,
             window      : window,
             input_helper: WinitInputHelper::new(),
+            gilrs       : gilrs,
+            connected_gamepads: [None; 4],
 
             wgpu        : WgpuInfo {
                 //instance      : instance,
@@ -156,6 +162,34 @@ impl AppWindow {
         self.window.scale_factor()
     }
 
+    fn gamepad_connected(&mut self, gamepad_id: gilrs::GamepadId) {
+        for i in 0..self.connected_gamepads.len() {
+            if self.connected_gamepads[i].is_none() {
+                let gp = self.gilrs.gamepad(gamepad_id);
+                println!("found device [{}] -- attached to game port {}", gp.name(), i+1);
+                self.connected_gamepads[i] = Some(gamepad_id);
+                return;
+            }
+        }
+    }
+
+    fn gamepad_disconnected(&mut self, gamepad_id: gilrs::GamepadId) {
+        todo!("gamepad {:?} disconnected", gamepad_id);
+    }
+
+    fn gamepad_ispressed(&self, port: u8, button: gilrs::ev::Button) -> bool {
+        match self.connected_gamepads[port as usize] {
+            None => false,
+            Some(gpid) => {
+                let gp = self.gilrs.gamepad(gpid);
+                if !gp.is_connected() { return false; }
+                let res = gp.is_pressed(button);
+                //println!("checking {button:?}, res = {}", res);
+                res
+            }
+        }
+    }
+
     fn run<F>(mut appwnd: AppWindow, mut user_update: F)
     where 
         F: FnMut(&mut AppWindow, Event<()>) -> () + 'static
@@ -170,6 +204,31 @@ impl AppWindow {
                 if appwnd.input_helper.quit() {
                     *control_flow = ControlFlow::Exit;
                     return;
+                }
+            }
+
+            let repeat_filter = gilrs::ev::filter::Repeat::new();
+            while let Some(ev) = appwnd.gilrs.next_event().filter_ev(&repeat_filter, &mut appwnd.gilrs) {
+                appwnd.gilrs.update(&ev); // update controller states inside gilrs
+
+                match ev.event {
+                    gilrs::EventType::Connected => {
+                        appwnd.gamepad_connected(ev.id);
+                    },
+                    gilrs::EventType::Disconnected => {
+                        appwnd.gamepad_disconnected(ev.id);
+                    },
+                    _ => {},
+
+                    //gilrs::EventType::ButtonPressed(btn, code) => {
+                    //    println!("button pressed: btn={btn:?} code=${code:?}");
+                    //},
+                    //gilrs::EventType::ButtonReleased(btn, code) => {
+                    //    println!("button release: btn={btn:?} code=${code:?}");
+                    //},
+                    //_ => {
+                    //    println!("unhandled event {:?}", ev);
+                    //}
                 }
             }
 
@@ -218,8 +277,8 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true).await;
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, gilrs: gilrs::Gilrs) {
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, false, gilrs).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);

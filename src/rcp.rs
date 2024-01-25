@@ -77,7 +77,7 @@ impl Rcp {
         let mut pi = PeripheralInterface::new(comms.clone(), cartridge_rom);
 
         // the PIF-ROM needs to know what CIC chip the cartridge is using, so we pass it along
-        let pif = PifRom::new(boot_rom, &mut pi);
+        let pif = PifRom::new(comms.clone(), boot_rom, &mut pi);
 
         // create the RDP
         let rdp = Arc::new(Mutex::new(Rdp::new(comms.clone())));

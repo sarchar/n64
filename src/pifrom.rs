@@ -29,15 +29,18 @@ enum CicType {
 /// boot_rom is big endian data
 /// Essentially part of the PeripheralInterface but the PIF-ROM and features abstracted out
 pub struct PifRom {
+    comms: SystemCommunication,
+
     boot_rom: Vec<u8>,    
     ram: Vec<u32>,
+    joybus_ram_copy: Vec<u32>,
     command_finished: bool,
     seed: u32,
     _cic_type: CicType,
 }
 
 impl PifRom {
-    pub fn new(boot_rom: Vec<u8>, pi: &mut peripheral::PeripheralInterface) -> PifRom {
+    pub fn new(comms: SystemCommunication, boot_rom: Vec<u8>, pi: &mut peripheral::PeripheralInterface) -> PifRom {
         let mut ram = vec![0u32; 16]; // 64 byte RAM
 
         // Get the country code of the rom
@@ -57,8 +60,11 @@ impl PifRom {
         ram[9] = (seed << 8) | seed;
 
         PifRom {
+            comms: comms,
+
             boot_rom: boot_rom,
             ram: ram,
+            joybus_ram_copy: vec![0u32; 16],
             command_finished: false,
             seed: seed,
             _cic_type: cic_type,
@@ -211,7 +217,8 @@ impl PifRom {
 
         //panic!("PIF: write command port");
         if (value & 0x01) != 0 {
-            self.do_joybus();
+            let ramcpy = self.ram.to_owned();
+            self.joybus_ram_copy.copy_from_slice(&ramcpy);
         } else if (value & 0xFE) != 0 {
             if (value & 0x10) != 0 {
                 debug!(target: "PIF", "disable PIF-ROM access");
@@ -243,6 +250,10 @@ impl PifRom {
         const JOYBUS_COMMAND_READ: u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
         const JOYBUS_COMMAND_RESET: u8 = 0xFF;
+
+        // copy over current ram with the joybus memory copy
+        let ramcpy = self.joybus_ram_copy.to_owned();
+        self.ram.copy_from_slice(&ramcpy);
 
         'cmd_loop: while i < 64 {
             let cmd_start = 0x7C0 + i;
@@ -285,7 +296,7 @@ impl PifRom {
                     let cmd = self.read_u8(cmd_start + COMMAND_OFFSET).unwrap();
                     match cmd {
                         JOYBUS_COMMAND_RESET | JOYBUS_COMMAND_ID => {
-                            debug!(target: "JOY", "{}: JOYBUS_COMMAND_ID channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            trace!(target: "JOY", "{}: JOYBUS_COMMAND_ID channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
                             if cmd_length != 1 || res_length != 3 {
                                 error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
                                 break 'cmd_loop;
@@ -308,18 +319,22 @@ impl PifRom {
                         },
 
                         JOYBUS_COMMAND_READ => { // read button state
-                            debug!(target: "JOY", "{}: JOYBUS_COMMAND_READ channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            trace!(target: "JOY", "{}: JOYBUS_COMMAND_READ channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
                             if cmd_length != 1 || res_length != 4 {
                                 error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
                                 break 'cmd_loop;
                             }
 
                             if channel == 0 {
+                                // copy ControllerState from comms channel
+                                let cs = self.comms.controllers.read().unwrap()[0];
+
                                 // four bytes indicate buttons and two axes
-                                self.write_u8_correct(0x00, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
-                                self.write_u8_correct(0x00, res_addr + 1).unwrap(); // lTrTcUcDcLcR
-                                self.write_u8_correct(0x00, res_addr + 2).unwrap(); // x-axis
-                                self.write_u8_correct(0x00, res_addr + 3).unwrap(); // y-axis
+                                let b0 = ((cs.a.is_down() as u8) << 7) | ((cs.b.is_down() as u8) << 6);
+                                self.write_u8_correct(  b0 as u32, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
+                                self.write_u8_correct(0x00u32    , res_addr + 1).unwrap(); // lTrTcUcDcLcR
+                                self.write_u8_correct(0x00u32    , res_addr + 2).unwrap(); // x-axis
+                                self.write_u8_correct(0x00u32    , res_addr + 3).unwrap(); // y-axis
                             } else {
                                 self.write_u8_correct(0x00, res_addr + 0).unwrap();
                                 self.write_u8_correct(0x00, res_addr + 1).unwrap();
@@ -395,7 +410,7 @@ impl Addressable for PifRom {
         } else {
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
-                //info!(target: "PIF-RAM", "read offset=${:08X}", offset);
+                //info!(target: "PIF-ROM", "read offset=${:08X}", offset);
                 Ok(self.ram[ram_offset as usize])
             } else {
                 panic!("unhandled PIF read offset=${:08X}", offset)
@@ -407,7 +422,7 @@ impl Addressable for PifRom {
         if offset >= 0x7C0 { // ignore writes to ROM
             let ram_offset = offset.wrapping_sub(0x7C0) >> 2;
             if ram_offset < 16 {
-                trace!(target: "PIF-RAM", "write value=${:08X} offset=${:08X}", value, offset);
+                trace!(target: "PIF-ROM", "write value=${:08X} offset=${:08X}", value, offset);
                 self.ram[ram_offset as usize] = value;
 
                 if ram_offset == 0x0F {
@@ -437,7 +452,7 @@ impl Addressable for PifRom {
     fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
         if address != 0x7C0 || block.len() != 16 { todo!(); } // non-standard DMA
 
-        //println!("DMA into PIF-RAM:");
+        //println!("DMA into PIF-ROM:");
         //for j in 0..4 {
         //    print!("  ${:02X}: ", j*16);
         //    for i in 0..16 {
@@ -457,6 +472,8 @@ impl Addressable for PifRom {
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
         if offset != 0x7C0 || length != 64 { todo!(); }
+
+        self.do_joybus();
 
         Ok(self.ram.to_owned())
     }

@@ -1370,7 +1370,7 @@ impl Hle {
             Some(HleRenderCommand::Viewport { w: vw, h: vh, .. }) => (vw, vh),
             _ => {
                 // no viewport set?
-                warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
+                //warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
                 return;
             },
         };

@@ -170,6 +170,9 @@ pub struct SystemCommunication {
 
     // direct access to RDRAM as a speed optimization (rather than going through all the RCP code)
     pub rdram: Arc<RwLock<Option<Vec<u32>>>>,
+
+    // current controller states
+    pub controllers: Arc<RwLock<Vec<ControllerState>>>,
 }
 
 impl SystemCommunication {
@@ -186,6 +189,7 @@ impl SystemCommunication {
             rdp_full_sync     : Arc::new(AtomicU32::new(0)),
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
+            controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
         }
     }
 }
@@ -280,4 +284,25 @@ impl System {
 
 }
 
+#[derive(Default, Debug, Copy, Clone)]
+pub struct ButtonState {
+    pub held    : bool,
+    pub pressed : bool,
+    pub released: bool,
+}
 
+impl ButtonState {
+    fn is_down(&self) -> bool {
+        self.pressed || self.held
+    }
+
+    fn is_up(&self) -> bool {
+        !self.is_down()
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone)]
+pub struct ControllerState {
+    pub b: ButtonState,
+    pub a: ButtonState,
+}

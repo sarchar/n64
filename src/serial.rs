@@ -144,7 +144,7 @@ impl Addressable for SerialInterface {
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        //trace!(target: "SI", "write32 value=${:08X}, offset=${:08X}", value, offset);
+        trace!(target: "SI", "write32 value=${:08X}, offset=${:08X}", value, offset);
 
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
