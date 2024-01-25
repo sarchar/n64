@@ -164,11 +164,48 @@ impl PeripheralInterface {
                 WriteReturnSignal::None
             },
 
+            // PI_RD_LEN
+            0x0_0008 => {
+                debug!(target: "PI", "write PI_RD_LEN value=${:08X}", value);
+
+                //info!(target: "PI", "DMA INTO PI from DRAM=${:08X} DEST=${:08X}", self.dram_addr, self.cart_addr);
+
+                // see if previous dma has completed
+                if (self.dma_status & 0x01) != 0 {
+                    if let Ok(_) = self.dma_completed_rx.try_recv() {
+                        self.dma_status = 0x08;
+                    }
+                }
+
+                if (self.dma_status & 0x01) == 0 { // don't initiate another DMA if one is in progress
+                    if self.cart_addr >= 0x0800_0000 && self.cart_addr < 0x1000_0000 {
+                        let start = self.cart_addr & !0xF000_0000;
+                        let end = start + value + 1;
+
+                        let dma_info = DmaInfo {
+                            initiator     : "PI-SRAM",
+                            source_address: self.dram_addr,
+                            dest_address  : self.cart_addr,
+                            count         : 1,
+                            length        : ((end - start) + 7) & !7,
+                            completed     : Some(self.dma_completed_tx.clone()),
+                            ..Default::default()
+                        };
+
+                        self.dma_status |= 0x01;
+                        self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                    }
+                }
+
+                WriteReturnSignal::None
+            },
+
             // PI_WR_LEN
             0x0_000C => {
                 debug!(target: "PI", "write PI_WR_LEN value=${:08X}", value);
 
-                assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000, "PI DMA initiated from ${:08X}", self.cart_addr); // right now only cartridge rom is valid for dma
+                assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000 ||
+                        (self.cart_addr & 0xF800_0000) == 0x0800_0000, "PI DMA initiated from ${:08X}", self.cart_addr); // right now only cartridge rom is valid for dma
 
                 // TODO the logic determining DMA completions might not be correct, but it's fine for now.
 
@@ -180,14 +217,12 @@ impl PeripheralInterface {
                 }
 
                 if (self.dma_status & 0x01) == 0 { // don't initiate another DMA if one is in progress
-                    let start = self.cart_addr & !0xF000_0000;
-                    let mut end = start + value + 1;
-                    if (start as usize) <= self.cartridge_rom.len() * 4 {
-                        // truncate dma
-                        end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
+                    if self.cart_addr < 0x1000_0000 {
+                        let start = self.cart_addr & !0xF000_0000;
+                        let end = start + value + 1;
 
                         let dma_info = DmaInfo {
-                            initiator     : "PI",
+                            initiator     : "PI-SRAM",
                             source_address: self.cart_addr,
                             dest_address  : self.dram_addr,
                             count         : 1,
@@ -200,7 +235,28 @@ impl PeripheralInterface {
                         self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                         WriteReturnSignal::None
                     } else {
-                        WriteReturnSignal::None
+                        let start = self.cart_addr & !0xF000_0000;
+                        let mut end = start + value + 1;
+                        if (start as usize) <= self.cartridge_rom.len() * 4 {
+                            // truncate dma
+                            end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
+
+                            let dma_info = DmaInfo {
+                                initiator     : "PI-CART",
+                                source_address: self.cart_addr,
+                                dest_address  : self.dram_addr,
+                                count         : 1,
+                                length        : ((end - start) + 7) & !7,
+                                completed     : Some(self.dma_completed_tx.clone()),
+                                ..Default::default()
+                            };
+
+                            self.dma_status |= 0x01;
+                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            WriteReturnSignal::None
+                        } else {
+                            WriteReturnSignal::None
+                        }
                     }
                 } else {
                     panic!("might need to handle this case at some point");
@@ -453,13 +509,24 @@ impl Addressable for PeripheralInterface {
 	}
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
-        if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
+        if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
+            info!(target: "SRAM", "read_block {} bytes from ${:08X}", length, offset);
+            let length = if length > (256*1024) { 256 * 1024 } else { length };
+            Ok(vec![0u32; (length >> 2) as usize])
+        } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
             let start = (offset & !0x1000_0000) >> 2;
             let end = start + (length as usize >> 2);
             Ok((&self.cartridge_rom[start..end]).to_vec())
         } else {
             todo!("probably not used ever");
         }
+    }
+
+    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
+            info!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len(), offset);
+        }
+        Ok(WriteReturnSignal::None)
     }
 }
 
