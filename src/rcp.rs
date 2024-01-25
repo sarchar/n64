@@ -70,7 +70,7 @@ impl Rcp {
         comms.start_dma_tx = Some(start_dma_tx.clone());
 
         // create MI first so we can create the interrupt interconnect
-        let mut mi = MipsInterface::new();
+        let mut mi = MipsInterface::new(comms.clone());
         comms.mi_interrupts_tx = Some(mi.get_update_channel());
 
         // create the PI first

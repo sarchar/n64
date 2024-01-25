@@ -359,6 +359,7 @@ impl Hle {
             0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
 
             0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
+            0x22099872 => HleRspSoftwareVersion::F3DEX2, // Zelda MM Release
             0x21F91874 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT Debug
             0x5D3099F1 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT Release
             0xC901CE73 => HleRspSoftwareVersion::F3DEX2, // More demos?
@@ -464,6 +465,7 @@ impl Hle {
                 self.command_table[0xE7] = Hle::handle_rdppipesync;
                 self.command_table[0xE6] = Hle::handle_rdploadsync;
                 self.command_table[0xE4] = Hle::handle_texrect;
+                self.command_table[0xE0] = Hle::handle_spnoop;
             },
 
             HleRspSoftwareVersion::Unknown => {},
@@ -1695,8 +1697,8 @@ impl Hle {
 
     fn handle_rdpfullsync(&mut self) { // G_RDPFULLSYNC
         trace!(target: "HLE", "{} gsDPFullSync()", self.command_prefix);
+        self.comms.rdp_full_sync.store(1, Ordering::SeqCst);
     }
-
 
     fn handle_loadlut(&mut self) { // G_LOADTLUT
         let tile  = ((self.command >> 24) & 0x0F) as u8;

@@ -155,6 +155,9 @@ pub struct SystemCommunication {
     pub mi_interrupts_tx: Option<mpsc::Sender<mips::InterruptUpdate>>,
     pub check_interrupts: Arc<AtomicU32>,
 
+    // full sync
+    pub rdp_full_sync: Arc<AtomicU32>,
+
     // start DMA transfer signal
     pub start_dma_tx: Option<mpsc::Sender<rcp::DmaInfo>>,
 
@@ -172,6 +175,7 @@ impl SystemCommunication {
             vi_format         : Arc::new(AtomicU32::new(0)),
             mi_interrupts_tx  : None,
             check_interrupts  : Arc::new(AtomicU32::new(0)),
+            rdp_full_sync     : Arc::new(AtomicU32::new(0)),
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
         }

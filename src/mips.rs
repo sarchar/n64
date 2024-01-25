@@ -27,6 +27,8 @@ pub enum InterruptUpdateMode {
 pub struct InterruptUpdate(pub u32, pub InterruptUpdateMode);
 
 pub struct MipsInterface {
+    comms: SystemCommunication,
+
     interrupt_mask: u32, // enabled interrupts
     interrupt     : u32, // current interrupt signals (does not require enabled interrupts)
     trigger_int   : u32, // interrupt signals that actually generate an external int (requires interrupt enable)
@@ -38,10 +40,11 @@ pub struct MipsInterface {
 }
 
 impl MipsInterface {
-    pub fn new() -> MipsInterface {
+    pub fn new(comms: SystemCommunication) -> MipsInterface {
         let (tx, rx) = mpsc::channel();
 
         MipsInterface { 
+            comms         : comms,
             interrupt_mask: 0,
             interrupt     : 0,
             trigger_int   : 0,
@@ -151,6 +154,7 @@ impl Addressable for MipsInterface {
 
                 // RDP interrupt is cleared by writing to MI
                 if (value & 0x800) != 0 {
+                    self.comms.rdp_full_sync.store(0, Ordering::SeqCst);
                     self.interrupt &= !(1 << IMask_DP);
                 }
 

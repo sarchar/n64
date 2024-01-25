@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
@@ -5,7 +7,7 @@ use crate::*;
 //use mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
 pub struct Rdp {
-    _comms: SystemCommunication,
+    comms: SystemCommunication,
 
     start: u32,
     start_latch: u32,
@@ -18,7 +20,7 @@ pub struct Rdp {
 impl Rdp {
     pub fn new(comms: SystemCommunication) -> Rdp {
         Rdp {
-            _comms: comms,
+            comms: comms,
 
             start: 0,
             start_latch: 0,
@@ -57,6 +59,11 @@ impl Addressable for Rdp {
             // DP_STATUS 
             0x0010_000C => {
                 debug!(target: "RDP", "read DP_STATUS");
+
+                let full_sync = self.comms.rdp_full_sync.load(Ordering::SeqCst);
+                if full_sync != 0 {
+                    self.status &= !0x40;
+                }
 
                 let ret = self.status;
 
