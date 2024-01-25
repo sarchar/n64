@@ -35,6 +35,10 @@ pub enum ReadWriteFault {
 }
 
 pub trait Addressable {
+    fn read_u64(&mut self, offset: usize) -> Result<u64, ReadWriteFault> {
+        Ok(((self.read_u32(offset)? as u64) << 32) | self.read_u32(offset + 4)? as u64)
+    }
+
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault>;
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault>;
 
@@ -50,6 +54,11 @@ pub trait Addressable {
         let word = self.read_u32(offset & !0x03)?;
         let shift = 24 - ((offset & 0x03) << 3);
         Ok(((word >> shift) & 0xFF) as u8)
+    }
+
+    fn write_u64(&mut self, value: u64, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.write_u32((value >> 32) as u32, offset)?;
+        self.write_u32(value as u32, offset + 4)
     }
 
     // The VR4300 has pins selecting the size of the write (byte, halfword, word) but still places

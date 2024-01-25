@@ -676,6 +676,18 @@ impl Addressable for Rsp {
         }
     }
 
+    // SD on RSP memory is broken, only write the upper word
+    fn write_u64(&mut self, value: u64, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (offset & 0xF_0000) < 0x4_0000 {
+            let mem_offset = (offset & 0x1FFF) >> 2; // 8KiB, repeated
+            let mut mem = self.mem.write().unwrap();
+            mem[mem_offset as usize] = (value >> 32) as u32;
+            Ok(WriteReturnSignal::None)
+        } else {
+            todo!("TODO");
+        }
+    }
+
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
         trace!(target: "RSP", "write32 value=${:08X} offset=${:08X}", value, offset);
 

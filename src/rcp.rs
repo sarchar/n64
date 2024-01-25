@@ -257,6 +257,16 @@ impl Rcp {
 }
 
 impl Addressable for Rcp {
+    fn read_u64(&mut self, address: usize) -> Result<u64, ReadWriteFault> {
+        trace!(target: "RCP", "read64 address=${:08X}", address);
+
+        if let (Some(addressable), offset) = self.match_addressable(address, "read64") {
+            addressable.read_u64(offset)
+        } else {
+            Ok(0)
+        }
+    }
+
     fn read_u32(&mut self, address: usize) -> Result<u32, ReadWriteFault> {
         trace!(target: "RCP", "read32 address=${:08X}", address);
 
@@ -284,6 +294,16 @@ impl Addressable for Rcp {
             addressable.read_u8(offset)
         } else {
             Ok(0)
+        }
+    }
+
+    fn write_u64(&mut self, value: u64, address: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        trace!(target: "RCP", "write64 value=${:08X} address=${:08X}", value, address);
+
+        if let (Some(addressable), offset) = self.match_addressable(address, "write64") {
+            addressable.write_u64(value, offset)
+        } else {
+            Ok(WriteReturnSignal::None)
         }
     }
 

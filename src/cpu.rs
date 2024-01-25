@@ -364,19 +364,8 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn read_u64_phys(&mut self, mut address: Address) -> Result<u64, InstructionFault> {
-        match self.read_u32_phys(address) {
-            Err(err) => Err(err),
-            Ok(v) => {
-                address.physical_address += 4; // Hmm, might this cause problems on virtual page boundaries?
-                match self.read_u32_phys(address) {
-                    Err(err) => Err(err),
-                    Ok(v2) => {
-                        Ok(((v as u64) << 32) | (v2 as u64))
-                    }
-                }
-            }
-        }
+    fn read_u64_phys(&mut self, address: Address) -> Result<u64, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u64(address.physical_address as usize)?)
     }
 
     #[inline(always)]
@@ -434,10 +423,8 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u64_phys(&mut self, value: u64, mut address: Address) -> Result<WriteReturnSignal, InstructionFault> {
-        self.write_u32_phys((value >> 32) as u32, address)?;
-        address.physical_address += 4;
-        Ok(self.write_u32_phys(value as u32, address)?)
+    fn write_u64_phys(&mut self, value: u64, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u64(value, address.physical_address as usize)?)
     }
 
     // prefetch the next instruction
