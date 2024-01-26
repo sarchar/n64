@@ -244,7 +244,6 @@ impl VideoInterface {
             self.current_line = (self.current_line + 1) % NUM_LINES;
 
             if self.current_line == self.interrupt_line {
-                //TODO enabling the interrupt causes LoZ to stop working?
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.comms.check_interrupts.store(1, Ordering::SeqCst);
             }

@@ -526,7 +526,7 @@ impl App for Game {
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: appwnd.surface_config().format,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         };
@@ -918,7 +918,7 @@ impl App for Game {
 
 impl Game {
     fn update_game_inputs(&mut self, appwnd: &AppWindow) {
-        let set_state = |state: &mut ButtonState, is_pressed: bool| {
+        let set_button_state = |state: &mut ButtonState, is_pressed: bool| {
             let pressed  = (!state.pressed && !state.held) &&  is_pressed;
             let held     = ( state.pressed ||  state.held) &&  is_pressed;
             let released = ( state.pressed ||  state.held) && !is_pressed;
@@ -930,8 +930,16 @@ impl Game {
         };
 
         let controllers = &mut self.comms.controllers.write().unwrap();
-        set_state(&mut controllers[0].a, appwnd.gamepad_ispressed(0, gilrs::Button::South) || appwnd.input().key_held(VirtualKeyCode::C));
-        set_state(&mut controllers[0].b, appwnd.gamepad_ispressed(0, gilrs::Button::West)  || appwnd.input().key_held(VirtualKeyCode::X));
+        set_button_state(&mut controllers[0].a    , appwnd.gamepad_ispressed(0, gilrs::Button::South) || appwnd.input().key_held(VirtualKeyCode::C));
+        set_button_state(&mut controllers[0].b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)  || appwnd.input().key_held(VirtualKeyCode::X));
+        set_button_state(&mut controllers[0].start, appwnd.gamepad_ispressed(0, gilrs::Button::Start) || appwnd.input().key_held(VirtualKeyCode::Return));
+
+        // x-axis assign -1 to a and 1 to d
+        let x_kb = -(appwnd.input().key_held(VirtualKeyCode::A) as i32) + (appwnd.input().key_held(VirtualKeyCode::D) as i32);
+        controllers[0].x_axis = x_kb as f32;
+        // y-axis assign -1 to s and 1 to w
+        let y_kb = -(appwnd.input().key_held(VirtualKeyCode::S) as i32) + (appwnd.input().key_held(VirtualKeyCode::W) as i32);
+        controllers[0].y_axis = y_kb as f32;
     }
 
     fn create_color_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {

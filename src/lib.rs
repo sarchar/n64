@@ -295,14 +295,13 @@ impl ButtonState {
     fn is_down(&self) -> bool {
         self.pressed || self.held
     }
-
-    fn is_up(&self) -> bool {
-        !self.is_down()
-    }
 }
 
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ControllerState {
-    pub b: ButtonState,
-    pub a: ButtonState,
+    pub b     : ButtonState,
+    pub a     : ButtonState,
+    pub start : ButtonState,
+    pub x_axis: f32,
+    pub y_axis: f32,
 }

@@ -321,7 +321,6 @@ impl Hle {
         self.matrix_stack.clear();
         self.current_matrix = Matrix4::identity();
         self.current_projection_matrix = Matrix4::identity();
-        self.current_viewport = None;
         self.color_images.clear();
         self.depth_images.clear();
         self.clear_images.clear();
@@ -334,6 +333,9 @@ impl Hle {
         self.clear_color_happened = false;
         self.tex.reset();
         self.mapped_texture_dirty = false;
+
+        // allow viewport to carry over into other display lists
+        //self.current_viewport = None;
 
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
@@ -503,7 +505,7 @@ impl Hle {
         }
 
         // render the tmem quad
-        self.render_tmem();
+        //self.render_tmem();
 
         // find the maximum length of all the texture fetches
         //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
@@ -1167,6 +1169,57 @@ impl Hle {
         (rx, ry)
     }
 
+    // Convert I 4b in TMEM to RGBA 32bpp
+    fn map_tmem_i_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
+                                                           //
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                };
+                // duplicate the nibble in both halves to give a more gradual flow and maximum
+                // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
+                let v = (src << 4) | src;
+                plot(self, x, y, &[v as u8, v as u8, v as u8, v as u8]);
+            }
+        }
+    }
+
+    // Convert I 8b in TMEM to RGBA 32bpp
+    fn map_tmem_i_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
+
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                };
+                plot(self, x, y, &[src as u8, src as u8, src as u8, src as u8]);
+            }
+        }
+    }
+
     // Convert RGBA 16b in TMEM to RGBA 32bpp
     fn map_tmem_rgba_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
                             line_bytes: u32, plot: F)
@@ -1201,18 +1254,21 @@ impl Hle {
             for x in 0..texture_width {
                 let src = {
                     // swap on odd lines
-                    let sx = if (y & 0x01) == 0x01 { x ^ 1 } else { x };
+                    let sx = if (y & 0x01) == 0x01 { x ^ 2 } else { x };
 
                     // offset based on x,y of texture data
-                    let offset = (y * line_bytes) + (sx * 4);
+                    // every 16-bits represents one 32-bit texel because the other half is stored in high mem
+                    let offset = (y * line_bytes) + (sx * 2);
+                    let shift = 16 - ((sx & 1) << 4); // odd x takes the lower 16-bits from value in tmem
 
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    // offset is in bytes
                     let address = (tmem_address << 3) + offset;
 
                     // combine colors from high and low
-                    let a = self.tex.tmem[(address >> 2) as usize + 0];
-                    let b = self.tex.tmem[(address >> 2) as usize + 2];
-                    (a & 0xFFFF0000) | (b >> 16)
+                    let a = (self.tex.tmem[(address >> 2) as usize | 0x000] >> shift) & 0xFFFF;
+                    let b = (self.tex.tmem[(address >> 2) as usize | 0x200] >> shift) & 0xFFFF;
+                    (a << 16) | b
                 };
                 plot(self, x, y, &src.to_be_bytes());
             }
@@ -1220,6 +1276,10 @@ impl Hle {
     }
 
     fn map_current_texture(&mut self) {
+        // if texturing isn't enabled, then the current tile index isn't valid and it doesn't
+        // make sense to map it into a texture
+        if !self.tex.enabled { return; }
+
         // when rendering, tile should be set to mipmap level 0
         let current_tile_index = self.tex.tile;
         let current_tile = self.tex.rdp_tiles[current_tile_index as usize];
@@ -1259,6 +1319,7 @@ impl Hle {
         }
 
         let (mx, my) = self.allocate_mapped_texture_space(texture_width, texture_height);
+        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{}", mx, my, texture_width, texture_height);
 
         // now we need to copy the texture from tmem to mapped texture space, converting
         // before formats and unswizzling odd rows
@@ -1278,6 +1339,14 @@ impl Hle {
             (0, 3) => { // RGBA_32b
                 // TODO ideally this would just be a direct memcpy, so we need unswizzled data in tmem
                 self.map_tmem_rgba_32b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (4, 0) => { // I_4b
+                self.map_tmem_i_4b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (4, 1) => { // I_8b
+                self.map_tmem_i_8b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
             
             _ => {
@@ -1370,7 +1439,7 @@ impl Hle {
             Some(HleRenderCommand::Viewport { w: vw, h: vh, .. }) => (vw, vh),
             _ => {
                 // no viewport set?
-                //warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
+                warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
                 return;
             },
         };
@@ -1390,39 +1459,42 @@ impl Hle {
         let sw   = w * dsdx;
         let th   = h * dtdy;
 
+        // apparently textures don't have to be enabled with gSPTexture to use TextureRectangle..
+        let old_enabled = self.tex.enabled;
+        self.tex.enabled = true;
+
         self.map_current_texture();
 
-        let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
+        // map screen coordinate to -1..1
+        // invert y
+        let scale   = |s, maxs| ((s / maxs) * 2.0) - 1.0;
+        let scale_y = |s, maxs| (((s / maxs) * 2.0) - 1.0) * -1.0;
+
         let cur_pos = self.vertices_internal.len() as u16; // save start index
         self.vertices_internal.push(Vertex { // TL
-            position  : [scale(ulx, vw), scale(uly, vh), 0.0, 1.0], 
+            position  : [scale(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
             tex_coords: [uls, ult], 
             color     : [1.0, 0.0, 0.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // TR
-            position  : [scale(ulx+w, vw), scale(uly, vh), 0.0, 1.0], 
+            position  : [scale(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
             tex_coords: [uls+sw, ult], 
             color     : [0.0, 1.0, 0.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // BL
-            position  : [scale(ulx, vw), scale(uly+h, vh), 0.0, 1.0], 
+            position  : [scale(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
             tex_coords: [uls, ult+th], 
             color     : [0.0, 0.0, 1.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // BR
-            position  : [scale(ulx+w, vw), scale(uly+h, vh), 0.0, 1.0], 
+            position  : [scale(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
             tex_coords: [uls+sw, ult+th], 
             color     : [1.0, 0.0, 1.0, 1.0], 
             flags     : 0, 
         });
-
-        // make final vertex will only apply texture correction if self.tex.enabled is true
-        // and apparently it doesn't need to be set to call g*SPTextureRectangle
-        let old_enabled = self.tex.enabled;
-        self.tex.enabled = true;
 
         let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
         let (_, v1) = self.make_final_vertex((cur_pos+1) as usize).unwrap();
@@ -1498,8 +1570,7 @@ impl Hle {
         let mut whole_part    = counter as u32;
         let mut line_number   = 0u32;
 
-        for i in 0..(data_size / 8) { // number of 64-bit words to copy
-            // counter is incremented for every 64-bits of texture read, or 2 u32s
+        for _ in 0..(data_size / 8) { // number of 64-bit words to copy
             let v = &data[source_offset..][..2];
             source_offset += 2;
 
@@ -1514,27 +1585,24 @@ impl Hle {
                     dest_offset += 2;
                 },
                 3 => { // 32b
-                    // 32b mode stores these texels as kinda separated. RG and BA are split into low and high half of tmem
-                    // rows are 6-texels long with 2 more texels unused, so 128-bits
-                    // and on odd rows, we have unused space
-                    // TODO this is not correct and it's not terribly important right now, so I'm
-                    // putting it on hold for now. 
+                    // 32b mode stores red+green in low half of tmem and blue+alpha in high mem
                     if (line_number & 0x01) == 0 {
                         // red and green from the two texels into the low half
-                        dst[dest_offset+0] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        dst[dest_offset] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
                         // blue and alpha from the two texels into the high half
-                        dst[dest_offset^2] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
+                        dst[dest_offset + 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
                     } else {
                         // swizzled
-                        dst[(dest_offset^1)+0] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
-                        dst[(dest_offset^1)+2] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        dst[dest_offset^1]          = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16); // RG
+                        dst[(dest_offset^1)+ 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF); // BA
                     }
 
-                    dest_offset += if (i % 1) == 0 { 1 } else { 3 };
+                    dest_offset += 1;
                 },
                 _ => todo!("swizzle LOADBLOCK for other sizes"),
             };
 
+            // counter is incremented for every 64-bits of texture read, or 2 u32s
             counter += dxt;
             if whole_part != (counter as u32) {
                 whole_part = counter as u32;

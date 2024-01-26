@@ -330,11 +330,18 @@ impl PifRom {
                                 let cs = self.comms.controllers.read().unwrap()[0];
 
                                 // four bytes indicate buttons and two axes
-                                let b0 = ((cs.a.is_down() as u8) << 7) | ((cs.b.is_down() as u8) << 6);
+                                let b0 = ((cs.a.is_down() as u8) << 7) 
+                                            | ((cs.b.is_down() as u8) << 6) 
+                                            | ((cs.start.is_down() as u8) << 4);
                                 self.write_u8_correct(  b0 as u32, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
-                                self.write_u8_correct(0x00u32    , res_addr + 1).unwrap(); // lTrTcUcDcLcR
-                                self.write_u8_correct(0x00u32    , res_addr + 2).unwrap(); // x-axis
-                                self.write_u8_correct(0x00u32    , res_addr + 3).unwrap(); // y-axis
+                                self.write_u8_correct(0x00u32    , res_addr + 1).unwrap(); //              R_lTrTcUcDcLcR // R = reset, _ = zero
+                                                                                           //
+                                // convert -1..1 to -128..127 
+                                let b2 = (if cs.x_axis < 0.0 { 128.0 * cs.x_axis } else { 127.0 * cs.x_axis }) as i8;
+                                self.write_u8_correct((b2 as u8) as u32, res_addr + 2).unwrap(); // x-axis
+
+                                let b3 = (if cs.y_axis < 0.0 { 128.0 * cs.y_axis } else { 127.0 * cs.y_axis }) as i8;
+                                self.write_u8_correct((b3 as u8) as u32, res_addr + 3).unwrap(); // y-axis
                             } else {
                                 self.write_u8_correct(0x00, res_addr + 0).unwrap();
                                 self.write_u8_correct(0x00, res_addr + 1).unwrap();
