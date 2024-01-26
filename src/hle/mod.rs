@@ -172,6 +172,10 @@ pub struct Hle {
     command_op: u8,
     command_words: u32,
     command_prefix: String,
+
+    // copied emulation flags 
+    disable_textures: bool,
+    view_texture_map: u32,
 }
 
 struct TextureState {
@@ -252,7 +256,7 @@ impl Hle {
         let texwidth = 1024;
         let texheight = 1024;
         let mut texdata = Vec::new();
-        texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0);
+        texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0x000000FF);
 
         Self {
             comms: comms,
@@ -307,6 +311,9 @@ impl Hle {
             command_op: 0,
             command_words: 0,
             command_prefix: String::new(),
+
+            disable_textures: false,
+            view_texture_map: 0,
         }
     }
 
@@ -343,6 +350,11 @@ impl Hle {
         // always have a render pass and draw list started
         self.next_render_pass();
         self.next_triangle_list(None);
+
+        // copy over some emulation flags so we don't constantly need to acquire a read lock
+        let ef = self.comms.emulation_flags.read().unwrap();
+        self.disable_textures = ef.disable_textures;
+        self.view_texture_map = ef.view_texture_map;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -505,7 +517,9 @@ impl Hle {
         }
 
         // render the tmem quad
-        //self.render_tmem();
+        if self.view_texture_map > 0 {
+            self.render_tmem();
+        }
 
         // find the maximum length of all the texture fetches
         //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
@@ -1123,10 +1137,13 @@ impl Hle {
             }
 
             //set to 0 to see OoT console logo screen
-            //vtx.flags = 0;
-            vtx.flags |= VERTEX_FLAG_TEXTURED;
-            if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
-                vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+            if self.disable_textures {
+                vtx.flags &= !VERTEX_FLAG_TEXTURED;
+            } else {
+                vtx.flags |= VERTEX_FLAG_TEXTURED;
+                if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
+                    vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+                }
             }
         }   
 
@@ -1302,9 +1319,9 @@ impl Hle {
         // isn't set. We could just use padded_width to map the width of the texture,
         // but I'm not sure where the height of the texture would come from
 
-        // add 1 to the specified width/height to account for sampler filtering
-        let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) + 1.75) as u32;
-        let texture_height = ((current_tile.lr.1 - current_tile.ul.1) + 1.75) as u32;
+        // tile bounds are inclusive of texels, so add 1 in each dim
+        let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) as u32) + 1;
+        let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
 
         // calculate CRC of texture data
         let mut crc: u64 = 0;
@@ -1318,17 +1335,47 @@ impl Hle {
             return;
         }
 
-        let (mx, my) = self.allocate_mapped_texture_space(texture_width, texture_height);
-        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{}", mx, my, texture_width, texture_height);
+        // we need to duplicate the top row and left column of every texture so that "clamping"
+        // works for bilinear filters.
+        let (mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+1, texture_height+1);
+        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{}", mx, my, texture_width-1, texture_height-1);
+
+        // coordinates that the polys use will be increased by 1 to accomodate the duplicate texture data
+        mx += 1;
+        my += 1;
 
         // now we need to copy the texture from tmem to mapped texture space, converting
-        // before formats and unswizzling odd rows
-        // TODO match format and size first then call the conversion function with a store function
-        // lambda
+        // before formats and unswizzling odd rows. this plot fuction shifts x and y right/down by
+        // 1, and will duplicate a pixel if x == 0 or y == 0
+        let mtw = self.mapped_texture_width;
+        let calc_offset = |x, y| (4 * (((my + y) * mtw) + (mx + x))) as usize; // *4 => sizeof(u32)
         let plot = |myself: &mut Self, x: u32, y: u32, color: &[u8]| {
-            let offset = (((my + y) * myself.mapped_texture_width) + (mx + x)) * 4; // sizeof u32
-            let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
-            mapped_texture_dest.copy_from_slice(&color);
+            let offset = calc_offset(x, y);
+            {
+                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            }
+
+            // copy color into (-1,-1)
+            if x == 0 && y == 0 {
+                let offset = offset - 4*(mtw as usize + 1);
+                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            } 
+
+            // copy color into (-1, y)
+            if x == 0 {
+                let offset = offset - 4; // sizeof(u32)
+                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            } 
+
+            // copy color into (x, -1)
+            if y == 0 {
+                let offset = offset - 4*mtw as usize; // sizeof(u32)
+                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            }
         };
 
         match (current_tile.format, current_tile.size) {
@@ -1901,8 +1948,8 @@ impl Hle {
         let vh = 240.0;
         let x0 = 0.0;
         let y0 = 0.0;
-        let w = 80.0;
-        let h = 60.0;
+        let w = 80.0 * (self.view_texture_map as f32);
+        let h = 60.0 * (self.view_texture_map as f32);
 
         // map (0,vx) -> (-1,1)
         // so (rx/vx * 2) - 1

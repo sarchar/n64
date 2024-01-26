@@ -140,6 +140,13 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
     }
 
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmulationFlags {
+    pub disable_textures: bool,
+    pub view_texture_map: u32,
+}
+
 // Collection of thread-safe channels for the front end to communicate with the emulating system
 #[derive(Clone)]
 pub struct SystemCommunication {
@@ -173,6 +180,9 @@ pub struct SystemCommunication {
 
     // current controller states
     pub controllers: Arc<RwLock<Vec<ControllerState>>>,
+
+    // emulation flags that change the way emulation behaves
+    pub emulation_flags: Arc<RwLock<EmulationFlags>>,
 }
 
 impl SystemCommunication {
@@ -190,6 +200,7 @@ impl SystemCommunication {
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
             controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
+            emulation_flags   : Arc::new(RwLock::new(EmulationFlags::default())),
         }
     }
 }

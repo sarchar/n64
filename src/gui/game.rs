@@ -704,6 +704,18 @@ impl App for Game {
                     },
                 };
             }
+
+            // CTRL+T to toggle disable textures
+            if appwnd.input().key_pressed(VirtualKeyCode::T) {
+                let mut ef = self.comms.emulation_flags.write().unwrap();
+                ef.disable_textures = !ef.disable_textures;
+            }
+
+            // CTRL+U to view the texture map 
+            if appwnd.input().key_pressed(VirtualKeyCode::U) {
+                let mut ef = self.comms.emulation_flags.write().unwrap();
+                ef.view_texture_map = (ef.view_texture_map + 1) % 5;
+            }
         }
 
         // Reset
