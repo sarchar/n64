@@ -438,8 +438,10 @@ impl Hle {
             HleRspSoftwareVersion::F3DEX2 => {
                 self.command_table[0x00] = Hle::handle_noop;
                 self.command_table[0x01] = Hle::handle_vtx;
+                self.command_table[0x03] = Hle::handle_culldl;
                 self.command_table[0x05] = Hle::handle_tri1;
                 self.command_table[0x06] = Hle::handle_tri2;
+                self.command_table[0x07] = Hle::handle_quad;
 
                 self.command_table[0xD7] = Hle::handle_texture;
                 self.command_table[0xD8] = Hle::handle_popmtx;
@@ -887,6 +889,20 @@ impl Hle {
         }
     }
 
+    fn handle_culldl(&mut self) {
+        let vfirst = ((self.command >> 32) as u16) >> 1;
+        let vlast  = (self.command as u16) >> 1;
+
+        trace!(target: "HLE", "{} gsSPCullDisplayLast({}, {})", self.command_prefix, vfirst, vlast);
+
+        // TODO 
+        // loop over all vertices and find min and max of each component, call them vmin and vmax
+        // transform vmin and vmax using the current mvp matrix
+        // persp correct vmin and vmax
+        // check if the entire bounding volumn is outside of viewspace (-1..1, -1..1, 0..1)
+        // if entirely outside of viewspace, execute gsSPEndDisplayList()
+    }
+
     fn handle_enddl(&mut self) {
         trace!(target: "HLE", "{} gsSPEndDisplayList()", self.command_prefix);
         self.dl_stack.pop();
@@ -1186,6 +1202,90 @@ impl Hle {
         (rx, ry)
     }
 
+    // Convert CI 4b in TMEM to RGBA 32bpp
+    fn map_tmem_ci_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+
+        let tlut_mode = self.other_modes.get_tlut_mode();
+
+        // determine palette
+        let palette = (self.tex.rdp_tiles[self.tex.tile as usize].palette << 4) as u32;
+
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
+                                                           //
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                };
+
+                let index = palette | src;
+                let color_address = 0x200 | (index >> 1);
+                let shift = 16 - ((index & 1) << 4);
+                let color = (self.tex.tmem[color_address as usize] >> shift) & 0xFFFF;
+                let p = match tlut_mode {
+                    TlutMode::Rgba16 => {
+                        let r = (color >> 11) & 0x1F;
+                        let g = (color >>  6) & 0x1F;
+                        let b = (color >>  1) & 0x1F;
+                        [((r << 3) | (r >> 2)) as u8,
+                         ((g << 3) | (g >> 2)) as u8,
+                         ((b << 3) | (b >> 2)) as u8,
+                         if (color & 0x01) != 0 { 255 } else { 0 }]
+                    },
+                    TlutMode::Ia16 => {
+                        todo!();
+                        //[0, 255, 0, 255]
+                    },
+                    TlutMode::None => {
+                        warn!(target: "HLE", "map_tmem_ci_8b with TlutMode::None");
+                        [255, 0, 0, 255]
+                    },
+                };
+                plot(self, x, y, &p);
+            }
+        }
+    }
+
+    // Convert IA 4b in TMEM to RGBA 32bpp
+    fn map_tmem_ia_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
+                                                           //
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                };
+
+                // duplicate the nibble in both halves to give a more gradual flow and maximum
+                // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
+                let c = src >> 1;
+                let v = (c << 5) | (c << 2) | (c >> 1);
+                plot(self, x, y, &[v as u8, v as u8, v as u8, if (src & 0x01) != 0 { 255 } else { 0 }]);
+            }
+        }
+    }
+
     // Convert I 4b in TMEM to RGBA 32bpp
     fn map_tmem_i_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
                             line_bytes: u32, plot: F) 
@@ -1209,6 +1309,88 @@ impl Hle {
                 // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
                 let v = (src << 4) | src;
                 plot(self, x, y, &[v as u8, v as u8, v as u8, v as u8]);
+            }
+        }
+    }
+
+    // Convert CI 8b in TMEM to RGBA 32bpp
+    // TODO palettes. just use the color index for now
+    fn map_tmem_ci_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+
+        let tlut_mode = self.other_modes.get_tlut_mode();
+
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
+
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                };
+
+                // select the 16-bit color from TLUT
+                let color_address = 0x200 | (src >> 1); // two colors per 32-bit word 
+                let shift = 16 - ((src & 1) << 4);
+                let color = (self.tex.tmem[color_address as usize] >> shift) & 0xFFFF;
+                let p = match tlut_mode {
+                    TlutMode::Rgba16 => {
+                        let r = (color >> 11) & 0x1F;
+                        let g = (color >>  6) & 0x1F;
+                        let b = (color >>  1) & 0x1F;
+                        [((r << 3) | (r >> 2)) as u8,
+                         ((g << 3) | (g >> 2)) as u8,
+                         ((b << 3) | (b >> 2)) as u8,
+                         if (color & 0x01) != 0 { 255 } else { 0 }]
+                    },
+                    TlutMode::Ia16 => {
+                        todo!();
+                        //[0, 255, 0, 255]
+                    },
+                    TlutMode::None => {
+                        warn!(target: "HLE", "map_tmem_ci_8b with TlutMode::None");
+                        [255, 0, 0, 255]
+                    },
+                };
+
+                plot(self, x, y, &p);
+            }
+        }
+    }
+
+    // Convert IA 8b in TMEM to RGBA 32bpp
+    fn map_tmem_ia_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
+
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                };
+
+                let c = src >> 4;
+                let v = (c << 4) | c;
+                let a = src & 0x0F;
+                plot(self, x, y, &[v as u8, v as u8, v as u8, ((a << 4) | a) as u8]);
             }
         }
     }
@@ -1258,7 +1440,7 @@ impl Hle {
                 let g = ((src >>  6) & 0x1F) as u8;
                 let b = ((src >>  1) & 0x1F) as u8;
                 let a = (src & 0x01) != 0;
-                plot(self, x, y, &[r << 3, g << 3, b << 3, if a {255} else {0}]);
+                plot(self, x, y, &[(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), if a {255} else {0}]);
             }
         }
     }
@@ -1388,6 +1570,22 @@ impl Hle {
                 self.map_tmem_rgba_32b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
 
+            (2, 0) => { // CI_4b
+                self.map_tmem_ci_4b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (2, 1) => { // CI_8b
+                self.map_tmem_ci_8b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (3, 0) => { // IA_4b
+                self.map_tmem_ia_4b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (3, 1) => { // IA_8b
+                self.map_tmem_ia_8b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
             (4, 0) => { // I_4b
                 self.map_tmem_i_4b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
@@ -1464,6 +1662,12 @@ impl Hle {
         tl.num_indices += 6;
         self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
         self.num_tris += 2;
+    }
+
+    fn handle_quad(&mut self) { // G_QUAD
+        // equiv. to TRI2
+        trace!(target: "HLE", "{} next_call_is_actually gsSPQuadrangle(...)", self.command_prefix);
+        self.handle_tri2();
     }
 
     fn handle_texrect(&mut self) { // G_TEXRECT
@@ -1827,34 +2031,48 @@ impl Hle {
         let hi = ((self.command >> 32) & 0x00FF_FFFF) as u32;
         let lo = self.command as u32;
         trace!(target: "HLE", "{} gsDPSetOtherMode(0x{:08X}, 0x{:08X})", self.command_prefix, hi, lo);
+        let old_mode = self.other_modes.get_zmode();
         self.other_modes.hi = hi;
         self.other_modes.lo = lo;
+        if old_mode != self.other_modes.get_zmode() {
+            println!("Changed ZMode = {:?} -> {:?}", old_mode, self.other_modes.get_zmode());
+        }
     }
 
     fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
         let shift = (self.command >> 40) & 0xFF;
-        let length = (self.command >> 32) & 0xFF;
+        let length = ((self.command >> 32) & 0xFF) + 1;
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeH(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
 
-        let length = length + 1;
         let shift = 32 - length - shift;
-        self.other_modes.hi &= ((1 << length) - 1) << shift;
+        let mask = (1 << length) - 1;
+        self.other_modes.hi &= !(mask << shift);
         self.other_modes.hi |= data;
     }
 
     fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
         let shift = (self.command >> 40) & 0xFF;
-        let length = (self.command >> 32) & 0xFF;
+        let length = ((self.command >> 32) & 0xFF) + 1;
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeL(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
 
-        let length = length + 1;
         let shift = 32 - length - shift;
-        self.other_modes.lo &= ((1 << length) - 1) << shift;
+        let mask = (1 << length) - 1;
+
+        let old_mode = self.other_modes.get_zmode();
+
+        self.other_modes.lo &= !(mask << shift);
         self.other_modes.lo |= data;
+
+        if old_mode != self.other_modes.get_zmode() {
+            println!("Changed ZMode = {:?} -> {:?}", old_mode, self.other_modes.get_zmode());
+        }
+
+        // Opaque surface: has Z_CMP, Z_UPD, ALPHA_CVG_SEL,           GL_BL_A_MEM
+        // Transl surface: has               CLR_ON_CVG,    FORCE_BL, G_BL_1MA
     }
 
     fn handle_setprimdepth(&mut self) { // G_SETPRIMDEPTH
@@ -2122,7 +2340,7 @@ impl Hle {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 enum AlphaDither {
     Pattern,
     NotPattern,
@@ -2138,7 +2356,7 @@ enum TextureFilter {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 enum AlphaCompare {
     None,
     Threshold,
@@ -2146,10 +2364,27 @@ enum AlphaCompare {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
+enum TlutMode {
+    None,
+    Rgba16,
+    Ia16,
+}
+
+#[allow(dead_code)]
+#[derive(Debug,PartialEq)]
 enum ZSourceSelect {
     Pixel,
     Primitive
+}
+
+#[allow(dead_code)]
+#[derive(Debug,PartialEq)]
+enum ZMode {
+    Opaque,
+    Interpenetrating,
+    Translucent,
+    Decal
 }
 
 #[derive(Debug)]
@@ -2174,12 +2409,27 @@ impl OtherModes {
     const ALPHA_DITHER_MASK    : u32 = 0x03;
     const TEXTURE_FILTER_SHIFT : u32 = 12;
     const TEXTURE_FILTER_MASK  : u32 = 0x03;
+    const TLUT_MODE_SHIFT      : u32 = 14;
+    const TLUT_MODE_MASK       : u32 = 0x03;
 
     // LO
     const ALPHA_COMPARE_SHIFT  : u32 = 0;
     const ALPHA_COMPARE_MASK   : u32 = 0x03;
     const Z_SOURCE_SELECT_SHIFT: u32 = 2;
     const Z_SOURCE_SELECT_MASK : u32 = 0x01;
+    const RENDER_MODE_SHIFT    : u32 = 3;
+    const RENDER_MODE_MASK     : u32 = 0x1FFFFFFF;
+
+    // RenderMode
+    // AA_EN starts the render mode flags and it is set to 0x0008
+    // because RENDER_MODE_SHIFT is 3.  So subtract 3 from the actual bit flag to get the shift
+    // amount
+    const ZMODE_SHIFT          : u32 = 7;
+    const ZMODE_MASK           : u32 = 0x03;
+
+    fn get_render_mode(&self) -> u32 {
+        (self.lo >> Self::RENDER_MODE_SHIFT) & Self::RENDER_MODE_MASK
+    }
 
     fn get_alpha_compare(&self) -> AlphaCompare {
         match (self.lo >> Self::ALPHA_COMPARE_SHIFT) & Self::ALPHA_COMPARE_MASK {
@@ -2220,6 +2470,28 @@ impl OtherModes {
                 warn!(target: "HLE", "invalid texture filter mode {}", x);
                 TextureFilter::Point
             }
+        }
+    }
+
+    fn get_tlut_mode(&self) -> TlutMode {
+        match (self.hi >> Self::TLUT_MODE_SHIFT) & Self::TLUT_MODE_MASK {
+            0 => TlutMode::None,
+            2 => TlutMode::Rgba16,
+            3 => TlutMode::Ia16,
+            x => {
+                warn!(target: "HLE", "invalid tlut mode {}", x);
+                TlutMode::None
+            }
+        }
+    }
+
+    fn get_zmode(&self) -> ZMode {
+        match (self.get_render_mode() >> Self::ZMODE_SHIFT) & Self::ZMODE_MASK {
+            0 => ZMode::Opaque,
+            1 => ZMode::Interpenetrating,
+            2 => ZMode::Translucent,
+            3 => ZMode::Decal,
+            _ => panic!("invalid"),
         }
     }
 }

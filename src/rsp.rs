@@ -823,7 +823,7 @@ impl Addressable for Rsp {
                 let (left, _) = right.split_at_mut((length >> 2) as usize);
                 Ok(left.to_owned())
             } else {
-                todo!()
+                todo!("DMA out of RSP mem offset=${:04X} length={}", offset, length)
             }
         } else {
             todo!("DMA out of ${offset:8X}");

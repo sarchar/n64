@@ -47,6 +47,7 @@ impl SerialInterface {
 
     pub fn step(&mut self) {
         if let Ok(_) = self.dma_completed_rx.try_recv() {
+            //println!("SerialInterface::step generating SI");
             self.interrupt_flag = true;
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
         }
@@ -127,7 +128,10 @@ impl SerialInterface {
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::ClearInterrupt)).unwrap();
             },
 
-            _ => warn!(target: "SI", "unimplemented SI register write value=${:08X} offset=${:08X}", value, offset),
+            _ => {
+                warn!(target: "SI", "unimplemented SI register write value=${:08X} offset=${:08X}", value, offset);
+                return Err(ReadWriteFault::Invalid);
+            }
         }
         Ok(WriteReturnSignal::None)
     }
@@ -148,9 +152,10 @@ impl Addressable for SerialInterface {
 
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
+                //println!("SI write32 generating interrupt");
                 // all writes into PIFROM/RAM generate SI interrupt
-                self.interrupt_flag = true;
-                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                //self.interrupt_flag = true;
+                //self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u32(value, offset & 0x000F_FFFF)
             },
 
@@ -163,8 +168,9 @@ impl Addressable for SerialInterface {
 
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
-                self.interrupt_flag = true;
-                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                //println!("SI write16 generating interrupt");
+                //self.interrupt_flag = true;
+                //self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u16(value, offset & 0x000F_FFFF)
             },
             _ => todo!(),
@@ -176,8 +182,9 @@ impl Addressable for SerialInterface {
 
         match offset & 0x7FE0_0000 {
             0x1FC0_0000 => {
-                self.interrupt_flag = true;
-                self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                //println!("SI write8 generating interrupt");
+                //self.interrupt_flag = true;
+                //self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
                 self.pif.write_u8(value, offset & 0x000F_FFFF)
             },
             _ => todo!(),

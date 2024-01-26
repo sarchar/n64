@@ -195,7 +195,7 @@ impl Addressable for RdramInterface {
             left.copy_from_slice(block);
             Ok(WriteReturnSignal::None)
         } else {
-            todo!("not likely");
+            todo!("DMA write to rdram offset ${:08X}: not likely", offset);
         }
     }
 }
