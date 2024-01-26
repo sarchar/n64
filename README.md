@@ -26,13 +26,15 @@ $ cargo run --release -- n64-systemtest.z64 -D
 
 # Screenshots
 
-* Current test rate:
+* Current test rate (failed 4 out of 3555 tests):
 
-![image](https://github.com/sarchar/n64/assets/4928176/c6a6b774-afde-40d6-9acd-8f0157002369)
+![image](https://github.com/sarchar/n64/assets/4928176/568e5671-af3b-4144-b7b9-6386299ac27b)
+
 
 * Ocarina of Time:
 
-![image](https://github.com/sarchar/n64/assets/4928176/8f1530c1-3c2d-4e38-9e03-1d80040e2a5e)
+![image](https://github.com/sarchar/n64/assets/4928176/bf109d74-6892-4980-b4ec-1b30cd87b059)
+
 
 * "morphdemo.n64" from NuSystems
 
