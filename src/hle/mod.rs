@@ -1895,6 +1895,7 @@ impl Hle {
         self.num_tris += 2;
     }
 
+    #[allow(dead_code)]
     fn render_tmem(&mut self) {
         let vw = 320.0;
         let vh = 240.0;

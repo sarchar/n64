@@ -332,10 +332,22 @@ impl PifRom {
                                 // four bytes indicate buttons and two axes
                                 let b0 = ((cs.a.is_down() as u8) << 7) 
                                             | ((cs.b.is_down() as u8) << 6) 
-                                            | ((cs.start.is_down() as u8) << 4);
-                                self.write_u8_correct(  b0 as u32, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
-                                self.write_u8_correct(0x00u32    , res_addr + 1).unwrap(); //              R_lTrTcUcDcLcR // R = reset, _ = zero
-                                                                                           //
+                                            | ((cs.z.is_down() as u8) << 5)
+                                            | ((cs.start.is_down() as u8) << 4)
+                                            | ((cs.d_up.is_down() as u8) << 3)
+                                            | ((cs.d_down.is_down() as u8) << 2)
+                                            | ((cs.d_left.is_down() as u8) << 1)
+                                            | ((cs.d_right.is_down() as u8) << 0);
+                                self.write_u8_correct(b0 as u32, res_addr + 0).unwrap(); // from bit 7..0, ABZSdUdDdLdR
+
+                                let b1 = ((cs.l_trigger.is_down() as u8) << 5)
+                                            | ((cs.r_trigger.is_down() as u8) << 4)
+                                            | ((cs.c_up.is_down() as u8) << 3)
+                                            | ((cs.c_down.is_down() as u8) << 2)
+                                            | ((cs.c_left.is_down() as u8) << 1)
+                                            | ((cs.c_right.is_down() as u8) << 0);
+                                self.write_u8_correct(b1 as u32, res_addr + 1).unwrap(); //              R_lTrTcUcDcLcR // R = reset, _ = zero
+
                                 // convert -1..1 to -128..127 
                                 let b2 = (if cs.x_axis < 0.0 { 128.0 * cs.x_axis } else { 127.0 * cs.x_axis }) as i8;
                                 self.write_u8_correct((b2 as u8) as u32, res_addr + 2).unwrap(); // x-axis

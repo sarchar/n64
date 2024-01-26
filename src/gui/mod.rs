@@ -190,6 +190,21 @@ impl AppWindow {
         }
     }
 
+    fn gamepad_getaxis(&self, port: u8, axis: gilrs::ev::Axis) -> f32 {
+        match self.connected_gamepads[port as usize] {
+            None => 0.0,
+            Some(gpid) => {
+                let gp = self.gilrs.gamepad(gpid);
+                if !gp.is_connected() { return 0.0 }
+                if let Some(axis) = gp.axis_data(axis) {
+                    axis.value()
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
     fn run<F>(mut appwnd: AppWindow, mut user_update: F)
     where 
         F: FnMut(&mut AppWindow, Event<()>) -> () + 'static
@@ -278,7 +293,7 @@ pub trait App {
 }
 
 pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, gilrs: gilrs::Gilrs) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, false, gilrs).await;
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true, gilrs).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);

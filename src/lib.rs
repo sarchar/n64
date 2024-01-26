@@ -299,9 +299,20 @@ impl ButtonState {
 
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ControllerState {
-    pub b     : ButtonState,
-    pub a     : ButtonState,
-    pub start : ButtonState,
-    pub x_axis: f32,
-    pub y_axis: f32,
+    pub b        : ButtonState,
+    pub a        : ButtonState,
+    pub z        : ButtonState,
+    pub start    : ButtonState,
+    pub d_up     : ButtonState,
+    pub d_down   : ButtonState,
+    pub d_left   : ButtonState,
+    pub d_right  : ButtonState,
+    pub c_up     : ButtonState,
+    pub c_down   : ButtonState,
+    pub c_left   : ButtonState,
+    pub c_right  : ButtonState,
+    pub l_trigger: ButtonState,
+    pub r_trigger: ButtonState,
+    pub x_axis   : f32,
+    pub y_axis   : f32,
 }

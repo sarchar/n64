@@ -930,16 +930,36 @@ impl Game {
         };
 
         let controllers = &mut self.comms.controllers.write().unwrap();
-        set_button_state(&mut controllers[0].a    , appwnd.gamepad_ispressed(0, gilrs::Button::South) || appwnd.input().key_held(VirtualKeyCode::C));
-        set_button_state(&mut controllers[0].b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)  || appwnd.input().key_held(VirtualKeyCode::X));
-        set_button_state(&mut controllers[0].start, appwnd.gamepad_ispressed(0, gilrs::Button::Start) || appwnd.input().key_held(VirtualKeyCode::Return));
+        set_button_state(&mut controllers[0].a    , appwnd.gamepad_ispressed(0, gilrs::Button::South)         || appwnd.input().key_held(VirtualKeyCode::Slash));
+        set_button_state(&mut controllers[0].b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)          || appwnd.input().key_held(VirtualKeyCode::Period));
+        set_button_state(&mut controllers[0].z    , appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger2)  || appwnd.input().key_held(VirtualKeyCode::Space));
+        set_button_state(&mut controllers[0].start, appwnd.gamepad_ispressed(0, gilrs::Button::Start)         || appwnd.input().key_held(VirtualKeyCode::Return));
 
-        // x-axis assign -1 to a and 1 to d
-        let x_kb = -(appwnd.input().key_held(VirtualKeyCode::A) as i32) + (appwnd.input().key_held(VirtualKeyCode::D) as i32);
-        controllers[0].x_axis = x_kb as f32;
-        // y-axis assign -1 to s and 1 to w
-        let y_kb = -(appwnd.input().key_held(VirtualKeyCode::S) as i32) + (appwnd.input().key_held(VirtualKeyCode::W) as i32);
-        controllers[0].y_axis = y_kb as f32;
+        set_button_state(&mut controllers[0].l_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger)  || appwnd.input().key_held(VirtualKeyCode::Semicolon));
+        set_button_state(&mut controllers[0].r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || appwnd.input().key_held(VirtualKeyCode::Apostrophe));
+
+        // C buttons - IJKL
+        set_button_state(&mut controllers[0].c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)>0.2) || appwnd.input().key_held(VirtualKeyCode::I));
+        set_button_state(&mut controllers[0].c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)<0.2) || appwnd.input().key_held(VirtualKeyCode::K));
+        set_button_state(&mut controllers[0].c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)<0.2) || appwnd.input().key_held(VirtualKeyCode::J));
+        set_button_state(&mut controllers[0].c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)>0.2) || appwnd.input().key_held(VirtualKeyCode::L));
+
+        // DPad - Arrow keys
+        set_button_state(&mut controllers[0].d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || appwnd.input().key_held(VirtualKeyCode::Up));
+        set_button_state(&mut controllers[0].d_down , appwnd.gamepad_ispressed(0, gilrs::Button::DPadDown)    || appwnd.input().key_held(VirtualKeyCode::Down));
+        set_button_state(&mut controllers[0].d_left , appwnd.gamepad_ispressed(0, gilrs::Button::DPadLeft)    || appwnd.input().key_held(VirtualKeyCode::Left));
+        set_button_state(&mut controllers[0].d_right, appwnd.gamepad_ispressed(0, gilrs::Button::DPadRight)   || appwnd.input().key_held(VirtualKeyCode::Right));
+
+        // Analog Stick - WASD
+        // x-axis assign -1 to A and 1 to D
+        let mut x_kb = (-(appwnd.input().key_held(VirtualKeyCode::A) as i32) + (appwnd.input().key_held(VirtualKeyCode::D) as i32)) as f32;
+        x_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickX);
+        controllers[0].x_axis = x_kb.clamp(-1.0, 1.0);
+
+        // y-axis assign -1 to S and 1 to W
+        let mut y_kb = (-(appwnd.input().key_held(VirtualKeyCode::S) as i32) + (appwnd.input().key_held(VirtualKeyCode::W) as i32)) as f32;
+        y_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickY);
+        controllers[0].y_axis = y_kb.clamp(-1.0, 1.0);
     }
 
     fn create_color_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32, is_copy_dst: bool, is_filtered: bool) -> (wgpu::Texture, wgpu::BindGroup) {
