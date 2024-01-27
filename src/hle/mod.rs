@@ -265,7 +265,11 @@ impl Hle {
         let texwidth = 1024;
         let texheight = 1024;
         let mut texdata = Vec::new();
-        texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0x000000FF);
+        texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0);
+        for v in texdata.chunks_mut(4) {
+            v[1] = 0x7F;
+            v[3] = 0xFF;
+        }
 
         Self {
             comms: comms,
@@ -485,6 +489,7 @@ impl Hle {
                 self.command_table[0xF4] = Hle::handle_loadtile;
                 self.command_table[0xF3] = Hle::handle_loadblock;
                 self.command_table[0xF2] = Hle::handle_settilesize;
+                self.command_table[0xF1] = Hle::handle_rdphalf_2;
                 self.command_table[0xF0] = Hle::handle_loadlut;
                 self.command_table[0xEF] = Hle::handle_rdpsetothermode;
                 self.command_table[0xEE] = Hle::handle_setprimdepth;
@@ -497,6 +502,7 @@ impl Hle {
                 self.command_table[0xE7] = Hle::handle_rdppipesync;
                 self.command_table[0xE6] = Hle::handle_rdploadsync;
                 self.command_table[0xE4] = Hle::handle_texrect;
+                self.command_table[0xE1] = Hle::handle_rdphalf_1;
                 self.command_table[0xE0] = Hle::handle_spnoop;
             },
 
@@ -691,6 +697,16 @@ impl Hle {
 
     fn handle_unknown(&mut self) {
         unimplemented!("unimplemented DL command ${:02X}", self.command_op);
+    }
+
+    fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1
+        let wordhi = self.command as u32;
+        trace!(target: "HLE", "{} gsDPWord(0x{:08X}, wordlo);", self.command_prefix, wordhi);
+    }
+
+    fn handle_rdphalf_2(&mut self) { // G_RDPHALF_1
+        let wordlo = self.command as u32;
+        trace!(target: "HLE", "{} gsDPWord(wordhi, 0x{:08X});", self.command_prefix, wordlo);
     }
 
     fn handle_spnoop(&mut self) { // G_SPNOOP
@@ -2420,7 +2436,7 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPSetColorImage({}, {}, {}, 0x{:08X} [0x{:08X}])", self.command_prefix, fmt, bpp, width, addr, translated_addr);
 
         if fmt != 0 { // G_IM_FMT_RGBA
-            unimplemented!("color targets not of RGBA not yet supported");
+            unimplemented!("color targets not of RGBA not yet supported: {}", fmt);
         }
 
         // if the color buffer changes, start a new render pass

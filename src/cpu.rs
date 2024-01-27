@@ -913,6 +913,9 @@ impl Cpu {
 
         // next instruction prefetch. we need to catch TLB misses
         self.next_instruction = match self.read_u32(self.pc as usize) {
+            // most common situation
+            Ok(x) => x,
+
             Err(InstructionFault::OtherException(ExceptionCode_TLBL)) => {
                 // we need to know if the current self.next_instruction is a jump instruction and thus, if self.pc fetch is in a delay slot.
                 // link instructions also need to correctly update RA to be after the delay slot
@@ -988,7 +991,6 @@ impl Cpu {
             }
 
             Err(x) => { return Err(x); },
-            Ok(x) => x,
         };
 
         // update and increment PC
@@ -1003,34 +1005,48 @@ impl Cpu {
         self.is_delay_slot = self.next_is_delay_slot;
         self.next_is_delay_slot = false;
 
-        let result = self.instruction_table[self.inst.op as usize](self);
-        let result = match result {
-            // Raise FPE on InstructionFault::FloatingPointException
-            Err(InstructionFault::FloatingPointException) => { 
-                let _ = self.floating_point_exception();
-                Ok(())
-            },
+        // execute instruction and check result
+        let result = match self.instruction_table[self.inst.op as usize](self) {
+            // Most common situation
+            result @ Ok(_) => result,
 
             // Other exceptions continue execution
             Err(InstructionFault::OtherException(_)) => {
                 Ok(())
             }
 
+            // Raise FPE on InstructionFault::FloatingPointException
+            Err(InstructionFault::FloatingPointException) => { 
+                let _ = self.floating_point_exception();
+                Ok(())
+            },
+
             Err(InstructionFault::CoprocessorUnusable) => {
                 panic!("Am I using this?");
             }
 
+            Err(InstructionFault::ReadWrite(fault)) => {
+                error!(target: "CPU", "crash at PC=${:16X}: {:?}", self.current_instruction_pc, fault);
+                info!(target: "CPU", "[$80000318] = ${:08X}", self.read_u32_phys(
+                       Address {
+                            virtual_address: 0,
+                            physical_address: 0x00000318,
+                            cached: false,
+                            mapped: false,
+                            space: MemorySpace::User,
+                            tlb_index: None,
+                        }).unwrap());
+                panic!("cpu crash");
+            }
+
             // Other faults like Break, Unimplemented actually stop processing
-            Err(_) => {
+            result @ Err(_) => {
                 // on error, restore the previous instruction since it didn't complete
                 self.pc -= 4;
                 self.next_instruction_pc = self.current_instruction_pc;
                 self.next_instruction = inst;
                 result
             },
-
-            // Everything else
-            Ok(_) => { result },
         };
 
         // r0 must always be zero

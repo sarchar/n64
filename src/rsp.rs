@@ -675,6 +675,7 @@ impl Rsp {
                 // SET_INTR: manually trigger SP interrupt
                 if (value & 0x10) != 0 {
                     self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                    self.comms.break_cpu();
                 }
 
                 // CLR_INTR: ack SP interrupt
@@ -1380,7 +1381,7 @@ impl RspCpuCore {
         let shared_state = self.shared_state.read().unwrap();
         if shared_state.intbreak {
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
-            self.comms.check_interrupts.store(1, Ordering::SeqCst);
+            self.comms.break_cpu();
         }
 
         Ok(())

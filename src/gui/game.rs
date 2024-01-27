@@ -725,7 +725,7 @@ impl App for Game {
             // send reset 1 for hard reset, 2 for soft reset
             // then break out any cpu step cycle
             self.comms.reset_signal.store(if soft_reset { 2 } else { 1 }, Ordering::SeqCst);
-            self.comms.check_interrupts.store(1, Ordering::SeqCst);
+            self.comms.break_cpu();
 
             // TODO reset rendering states
         }
@@ -1262,7 +1262,7 @@ impl Game {
                     // trigger RDP interrupt to signal render is done
                     if let Some(mi) = &self.comms.mi_interrupts_tx {
                         mi.send(InterruptUpdate(IMask_DP, InterruptUpdateMode::SetInterrupt)).unwrap();
-                        self.comms.check_interrupts.store(1, Ordering::SeqCst);
+                        self.comms.break_cpu();
                     }
                     
                     break 'cmd_loop;

@@ -6,7 +6,7 @@ use std::fs;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 
 use atomic_counter::{AtomicCounter, RelaxedCounter};
 
@@ -167,7 +167,7 @@ pub struct SystemCommunication {
 
     // interrupt signal
     pub mi_interrupts_tx: Option<mpsc::Sender<mips::InterruptUpdate>>,
-    pub check_interrupts: Arc<AtomicU32>,
+    pub break_cpu_cycles: Arc<AtomicBool>,
 
     // full sync
     pub rdp_full_sync: Arc<AtomicU32>,
@@ -195,13 +195,17 @@ impl SystemCommunication {
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
             mi_interrupts_tx  : None,
-            check_interrupts  : Arc::new(AtomicU32::new(0)),
+            break_cpu_cycles  : Arc::new(AtomicBool::new(false)),
             rdp_full_sync     : Arc::new(AtomicU32::new(0)),
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
             controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
             emulation_flags   : Arc::new(RwLock::new(EmulationFlags::default())),
         }
+    }
+
+    pub fn break_cpu(&mut self) {
+        self.break_cpu_cycles.store(true, Ordering::SeqCst);
     }
 }
 
@@ -252,14 +256,14 @@ impl System {
 
     #[inline(always)]
     pub fn step(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
-        let mut i = 0;
-        while i < cpu_cycles && self.comms.check_interrupts.load(Ordering::SeqCst) == 0 {
-            self.cpu.step()?; // TODO should probably still call rcp.step() if this returns an error?
-            i += 1;
+        let mut cycles_ran = 0;
+        while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
+            self.cpu.step()?;
+            cycles_ran += 1;
             self.comms.total_cpu_steps.inc();
         }
 
-        self.comms.check_interrupts.store(0, Ordering::SeqCst);
+        self.comms.break_cpu_cycles.store(false, Ordering::SeqCst);
 
         // handle reset
         match self.comms.reset_signal.load(Ordering::SeqCst) {
@@ -278,7 +282,7 @@ impl System {
 
         let trigger_int = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
-            rcp.step(cpu_cycles);
+            rcp.step(cycles_ran);
             rcp.should_interrupt()
         };
 
@@ -290,7 +294,10 @@ impl System {
     }
 
     pub fn run(&mut self) {
-        loop { let _ = self.step(1000); }
+        loop { 
+            let num_cycles = self.rcp.borrow().calculate_free_cycles();
+            let _ = self.step(num_cycles); 
+        }
     }
 
 }

@@ -75,6 +75,15 @@ pub struct VideoInterface {
 }
 
 impl VideoInterface {
+    // CPU runs at 93.75MHz, so at 60fps we should render a frame every 1,562,500 cpu cycles
+    // Just assuming a 320x240 resolution, we should complete a scanline every ~6510 cycles
+    const NUM_LINES: u64 = 280;
+    const CPU_FREQ : u64 = 93_750_000;
+    const FPS      : u64 = 100;  // 60
+
+    const CYC_PER_FRAME: u64 = Self::CPU_FREQ / Self::FPS;
+    const CYC_PER_SCANLINE: u64 = Self::CYC_PER_FRAME / Self::NUM_LINES;
+
     pub fn new(comms: SystemCommunication) -> VideoInterface {
         VideoInterface {
             comms: comms,
@@ -222,6 +231,10 @@ impl VideoInterface {
         self.origin
     }
 
+    pub fn calculate_free_cycles(&self) -> u64 {
+        return Self::CYC_PER_SCANLINE - self.cycle_count;
+    }
+
     pub fn step(&mut self, cpu_cycles_elapsed: u64) {
         if self.resolution_changed > 0 {
             self.resolution_changed = 0;
@@ -233,19 +246,13 @@ impl VideoInterface {
             debug!(target: "VI", "resolution changed to {width}x{height}x{depth}");
         }
 
-        // CPU runs at 93.75MHz, so we should render a frame every 1,562,500 cpu cycles
-        // Just assuming a 320x240 resolution, we should complete a scanline every ~6510 cycles
-        const NUM_LINES: u32 = 280;
-        //const CYC_PER_SCANLINE: u64 = 1562500 / (NUM_LINES as u64);
-        const CYC_PER_SCANLINE: u64 = 1000000 / (NUM_LINES as u64);
         self.cycle_count += cpu_cycles_elapsed;
-        while self.cycle_count >= CYC_PER_SCANLINE { 
-            self.cycle_count -= CYC_PER_SCANLINE;
-            self.current_line = (self.current_line + 1) % NUM_LINES;
+        while self.cycle_count >= Self::CYC_PER_SCANLINE { 
+            self.cycle_count -= Self::CYC_PER_SCANLINE;
+            self.current_line = (self.current_line + 1) % (Self::NUM_LINES as u32);
 
             if self.current_line == self.interrupt_line {
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
-                self.comms.check_interrupts.store(1, Ordering::SeqCst);
             }
         }
     }
