@@ -25,7 +25,7 @@ pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
 #[derive(Debug, Clone)]
 pub enum HleRenderCommand {
     Noop,
-    DefineColorImage { bytes_per_pixel: u8, width: u16, framebuffer_address: u32 },
+    DefineColorImage { bpp: u8, width: u16, framebuffer_address: u32 },
     DefineDepthImage { framebuffer_address: u32 },
     Viewport { x: f32, y: f32, z: f32, w: f32, h: f32, d: f32 },
     VertexData(Vec<Vertex>),
@@ -100,8 +100,14 @@ pub struct RenderPassState {
     pub clear_color: Option<[f32; 4]>,
     pub clear_depth: bool,
 
+    pub depth_compare_enable: bool,
+    pub depth_write: bool,
+
     // draw_list an array of triangle lists, where each triangle shares common state
     pub draw_list: Vec<TriangleList>,
+
+    // reason this render pass was terminated
+    pub reason: Option<String>,
 }
 
 #[derive(Clone,Debug,Default)]
@@ -141,6 +147,9 @@ pub struct Hle {
     color_images: HashMap<u32, HleRenderCommand>,
     depth_images: HashMap<u32, HleRenderCommand>,
     clear_images: HashMap<u32, [f32; 4]>,
+    current_color_image: Option<u32>,
+    current_color_image_format: Option<HleRenderCommand>,
+    current_depth_image: Option<u32>,
 
     // list of render_passes. the last of the array is always the current render pass
     render_passes: Vec<RenderPassState>,
@@ -284,6 +293,9 @@ impl Hle {
             color_images: HashMap::new(),
             depth_images: HashMap::new(),
             clear_images: HashMap::new(),
+            current_color_image: None,
+            current_color_image_format: None,
+            current_depth_image: None,
 
             render_passes: vec![],
             num_draws: 0,
@@ -343,12 +355,16 @@ impl Hle {
 
         // allow viewport to carry over into other display lists
         //self.current_viewport = None;
+        // keep color and depth images from pass to pass
+        //self.current_color_image = None;
+        //self.current_color_image_format = None;
+        //self.current_depth_image = None;
 
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
 
         // always have a render pass and draw list started
-        self.next_render_pass();
+        self.next_render_pass(None);
         self.next_triangle_list(None);
 
         // copy over some emulation flags so we don't constantly need to acquire a read lock
@@ -533,7 +549,7 @@ impl Hle {
         }
 
         // finalize current render pass
-        self.finalize_render_pass();
+        self.finalize_render_pass(Some(format!("end of display list")));
 
         debug!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls, \
                                {} total tris, {} texels read ({} bytes), ", 
@@ -578,6 +594,7 @@ impl Hle {
         // run each render pass
         for i in 0..self.render_passes.len() {
             let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
+            //println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
             self.send_hle_render_command(HleRenderCommand::RenderPass(rp));
         }
 
@@ -986,29 +1003,57 @@ impl Hle {
         }
     }
         
+    fn update_render_pass_state(&mut self) {
+        let depth_compare_enable = self.other_modes.get_depth_compare_enable();
+        let depth_write          = self.other_modes.get_depth_update_enable();
+
+        let color_image = self.current_color_image;
+        let depth_image = self.current_depth_image;
+
+        let rp = self.current_render_pass();
+        rp.depth_compare_enable = depth_compare_enable;
+        rp.depth_write          = depth_write;
+        rp.color_buffer         = color_image;
+        rp.depth_buffer         = depth_image;
+    }
+
     fn current_render_pass(&mut self) -> &mut RenderPassState {
         self.render_passes.last_mut().expect("must always have a valid RP")
     }
 
-    fn next_render_pass(&mut self) {
+    fn next_render_pass(&mut self, reason: Option<String>) {
         // don't create a new render pass if this one isn't rendering anything, however, keep the current state
         if self.render_passes.len() > 0 {
             // if there's no draw_list or the one there is empty, this render pass can still be
             // used and doesn't need to be finalized
-            if !self.render_passes.last().unwrap().draw_list.last().is_some_and(|v| v.num_indices != 0) {
+            if !self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices != 0) {
+                // No draw calls, so update render state
+                self.update_render_pass_state();
                 return;
             }
 
-            self.finalize_render_pass();
+            self.finalize_render_pass(reason);
         }
 
-        let rp = RenderPassState {
-            ..Default::default()
-        };
+        let rp = RenderPassState::default();
         self.render_passes.push(rp);
+        self.update_render_pass_state();
     }
 
-    fn finalize_render_pass(&mut self) {
+    fn finalize_render_pass(&mut self, reason: Option<String>) {
+        // if the current draw list has no indices, drop it
+        if self.current_render_pass().draw_list.last().unwrap().num_indices == 0 {
+            self.current_render_pass().draw_list.pop().unwrap();
+            self.num_draws -= 1;
+        }
+
+        // if there are no draw_calls, drop this render pass
+        // this could happen at the end of a frame, but not from next_render_pass()
+        if self.current_render_pass().draw_list.len() == 0 {
+            self.render_passes.pop().unwrap();
+            return;
+        }
+
         match self.current_render_pass().pass_type {
             Some(RenderPassType::FillRectangles) => {
                 // no depth on FillRectangles
@@ -1022,18 +1067,8 @@ impl Hle {
             },
         }
 
-        // if the current draw list has no indices, drop it
-        if self.current_render_pass().draw_list.last().unwrap().num_indices == 0 {
-            self.current_render_pass().draw_list.pop().unwrap();
-            self.num_draws -= 1;
-        }
-
-        // if there are no draw_calls, drop this render pass
-        // this could happen at the end of a frame, but not from next_render_pass()
-        if self.current_render_pass().draw_list.len() == 0 {
-            self.render_passes.pop().unwrap();
-            return;
-        }
+        trace!(target: "HLE", "moving on from current render pass: {}", reason.as_ref().unwrap());
+        self.current_render_pass().reason = reason;
 
         // check to see if the render targets are cleared with full screen tris
         let (color_buffer, depth_buffer) = {
@@ -1066,7 +1101,7 @@ impl Hle {
             let color_buffer = self.current_render_pass().color_buffer.clone();
             let depth_buffer = self.current_render_pass().depth_buffer.clone();
             // clear_color and clear_depth would have been cleared in the previous render pass
-            self.next_render_pass();
+            self.next_render_pass(Some(format!("change pass type to {:?}", pass_type)));
             self.current_render_pass().color_buffer = color_buffer;
             self.current_render_pass().depth_buffer = depth_buffer;
         }
@@ -1243,8 +1278,9 @@ impl Hle {
                          if (color & 0x01) != 0 { 255 } else { 0 }]
                     },
                     TlutMode::Ia16 => {
-                        todo!();
-                        //[0, 255, 0, 255]
+                        let i = color >> 8;
+                        let a = color & 0xFF;
+                        [i as u8, i as u8, i as u8, a as u8]
                     },
                     TlutMode::None => {
                         warn!(target: "HLE", "map_tmem_ci_8b with TlutMode::None");
@@ -1352,8 +1388,9 @@ impl Hle {
                          if (color & 0x01) != 0 { 255 } else { 0 }]
                     },
                     TlutMode::Ia16 => {
-                        todo!();
-                        //[0, 255, 0, 255]
+                        let i = color >> 8;
+                        let a = color & 0xFF;
+                        [i as u8, i as u8, i as u8, a as u8]
                     },
                     TlutMode::None => {
                         warn!(target: "HLE", "map_tmem_ci_8b with TlutMode::None");
@@ -1418,6 +1455,35 @@ impl Hle {
             }
         }
     }
+
+    // Convert IA 16b in TMEM to RGBA 32bpp
+    fn map_tmem_ia_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
+                            line_bytes: u32, plot: F) 
+        where 
+            F: Fn(&mut Self, u32, u32, &[u8]) {
+
+        for y in 0..texture_height {
+            for x in 0..texture_width {
+                let src = {
+                    // on odd lines, flip to read 2 texels (32-bits) ahead/back
+                    let sx = if (y & 0x01) == 0x01 { x ^ 0x02 } else { x };
+
+                    // offset based on x,y of texture data
+                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+                    let offset = (y * line_bytes) + (sx * 2); // sx is is texels (16bpp), convert to bytes!
+                    let address = (tmem_address << 3) + offset;
+                    let shift   = 16 - ((address & 0x02) << 3); // multiply to select bits 31..16, 15..0
+
+                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFFFF
+                };
+
+                let c = src >> 8;
+                let a = src & 0xFF;
+                plot(self, x, y, &[c as u8, c as u8, c as u8, a as u8]);
+            }
+        }
+    }
+
 
     // Convert RGBA 16b in TMEM to RGBA 32bpp
     fn map_tmem_rgba_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
@@ -1584,6 +1650,10 @@ impl Hle {
 
             (3, 1) => { // IA_8b
                 self.map_tmem_ia_8b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
+            },
+
+            (3, 2) => { // IA_16b
+                self.map_tmem_ia_16b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
 
             (4, 0) => { // I_4b
@@ -2027,16 +2097,27 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPLoadTLUTCmd({}, {})", self.command_prefix, tile, count);
     }
 
+    // start a new render pass if any of the critical render states change, i.e., depth compare is disabled
+    fn check_render_pass_state_change(&mut self) {
+        if self.current_render_pass().depth_compare_enable != self.other_modes.get_depth_compare_enable() {
+            self.next_render_pass(Some(format!("depth compare change to {}", self.other_modes.get_depth_compare_enable())));
+            return;
+        }
+
+        if self.current_render_pass().depth_write != self.other_modes.get_depth_update_enable() {
+            self.next_render_pass(Some(format!("depth write change to {}", self.other_modes.get_depth_update_enable())));
+            return;
+        }
+    }
+
     fn handle_rdpsetothermode(&mut self) { // G_(RDP)SETOTHERMODE
         let hi = ((self.command >> 32) & 0x00FF_FFFF) as u32;
         let lo = self.command as u32;
         trace!(target: "HLE", "{} gsDPSetOtherMode(0x{:08X}, 0x{:08X})", self.command_prefix, hi, lo);
-        let old_mode = self.other_modes.get_zmode();
         self.other_modes.hi = hi;
         self.other_modes.lo = lo;
-        if old_mode != self.other_modes.get_zmode() {
-            println!("Changed ZMode = {:?} -> {:?}", old_mode, self.other_modes.get_zmode());
-        }
+
+        self.check_render_pass_state_change();
     }
 
     fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
@@ -2050,6 +2131,8 @@ impl Hle {
         let mask = (1 << length) - 1;
         self.other_modes.hi &= !(mask << shift);
         self.other_modes.hi |= data;
+
+        self.check_render_pass_state_change();
     }
 
     fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
@@ -2062,14 +2145,10 @@ impl Hle {
         let shift = 32 - length - shift;
         let mask = (1 << length) - 1;
 
-        let old_mode = self.other_modes.get_zmode();
-
         self.other_modes.lo &= !(mask << shift);
         self.other_modes.lo |= data;
 
-        if old_mode != self.other_modes.get_zmode() {
-            println!("Changed ZMode = {:?} -> {:?}", old_mode, self.other_modes.get_zmode());
-        }
+        self.check_render_pass_state_change();
 
         // Opaque surface: has Z_CMP, Z_UPD, ALPHA_CVG_SEL,           GL_BL_A_MEM
         // Transl surface: has               CLR_ON_CVG,    FORCE_BL, G_BL_1MA
@@ -2108,8 +2187,34 @@ impl Hle {
         let y0 = (((self.command >>  0) & 0xFFF) as u16) >> 2;
         let w = x1 - x0 + 1;
         let h = y1 - y0 + 1;
-        let color = [((self.fill_color >> 11) & 0x1F) as f32 / 32.0, ((self.fill_color >> 6) & 0x1F) as f32 / 32.0,
-                     ((self.fill_color >>  1) & 0x1F) as f32 / 32.0, 1.0];
+
+        let color = match self.current_color_image_format {
+            Some(HleRenderCommand::DefineColorImage { bpp, .. }) => {
+                match bpp {
+                    2 => { // 16b 
+                        [((self.fill_color >> 11) & 0x1F) as f32 / 31.0, 
+                         ((self.fill_color >> 6) & 0x1F) as f32 / 31.0,
+                         ((self.fill_color >>  1) & 0x1F) as f32 / 31.0, 
+                         if (self.fill_color & 0x01) != 0 { 1.0 } else { 0.0 }]
+                    },
+                    3 => { // 32b
+                        [((self.fill_color >> 24) & 0xFF) as f32 / 255.0,
+                         ((self.fill_color >> 16) & 0xFF) as f32 / 255.0,
+                         ((self.fill_color >>  8) & 0xFF) as f32 / 255.0,
+                         ((self.fill_color >>  0) & 0xFF) as f32 / 255.0]
+                    },
+                    _ => {
+                        // Unimplemented mode
+                        [0.0, 1.0, 1.0, 1.0]
+                    },
+                }
+            },
+            _ => {
+                // No color image defined, give a weird color that stands out
+                [1.0, 1.0, 0.0, 1.0]
+            },
+        };
+
         trace!(target: "HLE", "{} gsDPFillRectangle({}, {}, {}, {})", self.command_prefix, x0, y0, x1, y1);
 
         // we can only render fill rects when there's a valid viewport
@@ -2127,16 +2232,35 @@ impl Hle {
         };
 
         // Check if this rectangle is a full-screen (i.e., clear) render
-        if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) { // can't have alternating colors
-            if x0 == vx as u16 && y0 == vy as u16 && w == vw as u16 && h == vh as u16 {
-                let addr = self.current_render_pass().color_buffer.clone().unwrap();
-                // we can't just mark clear_color in the current render pass, because
-                // the N64 uses the color buffer to clear depth buffers, so we mark this
-                // address as cleared in a separate buffer and only when next_render_pass() is
-                // called do we know that the render targets are set
-                trace!(target: "HLE", "clear image ${:08X}", addr);
-                self.clear_images.insert(addr, color);
-                return;
+        // and if so, make sure the color is compatible with a fill
+        if x0 == vx as u16 && y0 == vy as u16 && w == vw as u16 && h == vh as u16 {
+            match self.current_color_image_format {
+                Some(HleRenderCommand::DefineColorImage { bpp, .. }) => {
+                    match bpp {
+                        2 => { // 16b
+                            if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) { // can't have alternating colors
+                                let addr = self.current_render_pass().color_buffer.clone().unwrap();
+                                // we can't just mark clear_color in the current render pass, because
+                                // the N64 uses the color buffer to clear depth buffers, so we mark this
+                                // address as cleared in a separate buffer and only when next_render_pass() is
+                                // called do we know that the render targets are set
+                                trace!(target: "HLE", "clear image ${:08X}", addr);
+                                self.clear_images.insert(addr, color);
+                                return;
+                            }
+                        },
+                        3 => { // 32b
+                            // the color isn't important because it's 32b, so any value will do
+                            let addr = self.current_render_pass().color_buffer.clone().unwrap();
+                            // see note above
+                            trace!(target: "HLE", "clear image ${:08X}", addr);
+                            self.clear_images.insert(addr, color);
+                            return;
+                        },
+                        _ => {},
+                    }
+                },
+                _ => {},
             }
         }
 
@@ -2271,9 +2395,10 @@ impl Hle {
 
         // if the color depth changes, start a new render pass
         if self.current_render_pass().depth_buffer.is_some_and(|v| v != translated_addr) {
-            self.next_render_pass();
+            self.next_render_pass(Some(format!("new depth target ${:08X}", translated_addr)));
         }
-        self.current_render_pass().depth_buffer = Some(translated_addr);
+        self.current_depth_image = Some(translated_addr);
+        self.current_render_pass().depth_buffer = self.current_depth_image;
 
         let hle_render_command = HleRenderCommand::DefineDepthImage { framebuffer_address: translated_addr };
         if !self.depth_images.contains_key(&translated_addr) {
@@ -2300,12 +2425,14 @@ impl Hle {
 
         // if the color buffer changes, start a new render pass
         if self.current_render_pass().color_buffer.is_some_and(|v| v != translated_addr) {
-            self.next_render_pass();
+            self.next_render_pass(Some(format!("new color target ${:08X}", translated_addr)));
         }
-        self.current_render_pass().color_buffer = Some(translated_addr);
+        self.current_color_image = Some(translated_addr);
+        self.current_render_pass().color_buffer = self.current_color_image;
 
         // create the color buffer
-        let hle_render_command = HleRenderCommand::DefineColorImage { bytes_per_pixel: bpp, width: width, framebuffer_address: translated_addr };
+        let hle_render_command = HleRenderCommand::DefineColorImage { bpp: bpp, width: width, framebuffer_address: translated_addr };
+        self.current_color_image_format = Some(hle_render_command.clone());
         if !self.color_images.contains_key(&translated_addr) {
             self.color_images.insert(translated_addr, hle_render_command);
         }
@@ -2424,6 +2551,8 @@ impl OtherModes {
     // AA_EN starts the render mode flags and it is set to 0x0008
     // because RENDER_MODE_SHIFT is 3.  So subtract 3 from the actual bit flag to get the shift
     // amount
+    const Z_DEPTH_COMPARE_SHIFT: u32 = 1;
+    const Z_DEPTH_UPDATE_SHIFT : u32 = 2;
     const ZMODE_SHIFT          : u32 = 7;
     const ZMODE_MASK           : u32 = 0x03;
 
@@ -2483,6 +2612,14 @@ impl OtherModes {
                 TlutMode::None
             }
         }
+    }
+
+    fn get_depth_compare_enable(&self) -> bool {
+        ((self.get_render_mode() >> Self::Z_DEPTH_COMPARE_SHIFT) & 0x01) != 0
+    }
+
+    fn get_depth_update_enable(&self) -> bool {
+        ((self.get_render_mode() >> Self::Z_DEPTH_UPDATE_SHIFT) & 0x01) != 0
     }
 
     fn get_zmode(&self) -> ZMode {

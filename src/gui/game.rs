@@ -813,6 +813,8 @@ impl App for Game {
                         self.game_render_texture_bind_groups.get(&video_buffer).unwrap()
                     } else if self.game_render_texture_bind_groups.contains_key(&(video_buffer - 640)) { // video_buffer is + 640 on NTSC?
                         self.game_render_texture_bind_groups.get(&(video_buffer - 640)).unwrap()
+                    } else if self.game_render_texture_bind_groups.contains_key(&(video_buffer - 1280)) { // hmmm?
+                        self.game_render_texture_bind_groups.get(&(video_buffer - 1280)).unwrap()
                     } else {
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
@@ -1201,8 +1203,10 @@ impl Game {
                         (&self.game_pipeline, Some(wgpu::RenderPassDepthStencilAttachment {
                             view: depth_view.as_ref().unwrap(),
                             depth_ops: Some(wgpu::Operations {
-                                load: if rp.clear_depth { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
-                                store: true,
+                                // if clear depth load 1.0, if compare is disabled we load 1.0 so all compares pass
+                                load: if rp.clear_depth || !rp.depth_compare_enable { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
+                                // if clear depth or write is enabled, set store
+                                store: (rp.clear_depth || rp.depth_write),
                             }),
                             stencil_ops: None,
                         }))
