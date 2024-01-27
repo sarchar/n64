@@ -160,6 +160,9 @@ pub struct Hle {
 
     fill_color: u32,
 
+    rdp_half_hi: u32,
+    rdp_half_lo: u32,
+
     // TEMP HACK only let a clear happen once
     clear_color_happened: bool,
 
@@ -262,8 +265,8 @@ type DLCommand = fn(&mut Hle) -> ();
 
 impl Hle {
     pub fn new(comms: SystemCommunication, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
-        let texwidth = 1024;
-        let texheight = 1024;
+        let texwidth = 2048;
+        let texheight = 2048;
         let mut texdata = Vec::new();
         texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0);
         for v in texdata.chunks_mut(4) {
@@ -308,6 +311,9 @@ impl Hle {
             total_texture_data: 0,
 
             fill_color: 0,
+
+            rdp_half_hi: 0,
+            rdp_half_lo: 0,
 
             clear_color_happened: false,
 
@@ -364,6 +370,14 @@ impl Hle {
         //self.current_color_image_format = None;
         //self.current_depth_image = None;
 
+        // keep a default vertex in self.vertices_internal in case anything draws before calling G_VTX
+        self.vertices_internal.push(Vertex {
+            position  : [0.0, 0.0, 0.0, 1.0],
+            tex_coords: [0.0, 0.0],
+            color     : [1.0, 0.0, 0.0, 1.0],
+            flags     : 0,
+        });
+
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
 
@@ -398,6 +412,7 @@ impl Hle {
             0x5D3099F1 => HleRspSoftwareVersion::F3DEX2, // Zelda OoT Release
             0xC901CE73 => HleRspSoftwareVersion::F3DEX2, // More demos?
             0x21F91834 => HleRspSoftwareVersion::F3DEX2, // Paper Mario, (NuSys?), 
+            0xBC45382E => HleRspSoftwareVersion::F3DEX2, // Kirby 64
 
             _ => HleRspSoftwareVersion::Unknown,
         };
@@ -459,9 +474,11 @@ impl Hle {
                 self.command_table[0x00] = Hle::handle_noop;
                 self.command_table[0x01] = Hle::handle_vtx;
                 self.command_table[0x03] = Hle::handle_culldl;
+                self.command_table[0x04] = Hle::handle_branch_z;
                 self.command_table[0x05] = Hle::handle_tri1;
                 self.command_table[0x06] = Hle::handle_tri2;
                 self.command_table[0x07] = Hle::handle_quad;
+                self.command_table[0x0B] = Hle::handle_obj_rendermode;
 
                 self.command_table[0xD7] = Hle::handle_texture;
                 self.command_table[0xD8] = Hle::handle_popmtx;
@@ -469,6 +486,7 @@ impl Hle {
                 self.command_table[0xDA] = Hle::handle_mtx;
                 self.command_table[0xDB] = Hle::handle_moveword02;
                 self.command_table[0xDC] = Hle::handle_movemem;
+                self.command_table[0xDD] = Hle::handle_load_ucode;
                 self.command_table[0xDE] = Hle::handle_displaylist;
                 self.command_table[0xDF] = Hle::handle_enddl;
                 self.command_table[0xE2] = Hle::handle_setothermode_l;
@@ -702,11 +720,13 @@ impl Hle {
     fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1
         let wordhi = self.command as u32;
         trace!(target: "HLE", "{} gsDPWord(0x{:08X}, wordlo);", self.command_prefix, wordhi);
+        self.rdp_half_hi = wordhi;
     }
 
     fn handle_rdphalf_2(&mut self) { // G_RDPHALF_1
         let wordlo = self.command as u32;
         trace!(target: "HLE", "{} gsDPWord(wordhi, 0x{:08X});", self.command_prefix, wordlo);
+        self.rdp_half_lo = wordlo;
     }
 
     fn handle_spnoop(&mut self) { // G_SPNOOP
@@ -894,6 +914,14 @@ impl Hle {
         };
     }
 
+    fn handle_load_ucode(&mut self) { // G_LOAD_UCODE
+        let _cmd1 = self.next_display_list_command();
+        self.command_words += 2;
+
+        // nop
+        trace!(target: "HLE", "{} glSPLoadUcodeEx(...)", self.command_prefix);
+    }
+
     fn handle_displaylist(&mut self) { // G_DL
         let is_link = (self.command & 0x00FF_0000_0000_0000) == 0;
         let addr    = (self.command & 0x1FFF_FFFF) as u32;
@@ -934,6 +962,20 @@ impl Hle {
         // persp correct vmin and vmax
         // check if the entire bounding volumn is outside of viewspace (-1..1, -1..1, 0..1)
         // if entirely outside of viewspace, execute gsSPEndDisplayList()
+    }
+
+    fn handle_branch_z(&mut self) {
+        let addr = self.rdp_half_hi;
+
+        let vbidx = ((self.command >> 32) & 0xFFF) >> 1;
+        let zval = self.command as u32;
+
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+            let segment = ((addr >> 24) & 0x0F) as usize;
+            self.segments[segment] + (addr & 0x00FF_FFFF)
+        };
+
+        trace!(target: "HLE", "{} gsSPBranchLessZraw(0x{:08X} [0x{:08X}], {}, 0x{:08X})", self.command_prefix, addr, translated_addr, vbidx, zval);
     }
 
     fn handle_enddl(&mut self) {
@@ -1094,12 +1136,12 @@ impl Hle {
 
         if let Some(color_addr) = color_buffer {
             let clear_color = self.clear_images.remove(&color_addr);
-            if !self.clear_color_happened {
+            //if !self.clear_color_happened {
                 self.current_render_pass().clear_color = clear_color;
-                if clear_color.is_some() {
-                    self.clear_color_happened = true;
-                }
-            }
+            //    if clear_color.is_some() {
+            //        self.clear_color_happened = true;
+            //    }
+            //}
         }
 
         if let Some(depth_addr) = depth_buffer {
@@ -2168,6 +2210,10 @@ impl Hle {
 
         // Opaque surface: has Z_CMP, Z_UPD, ALPHA_CVG_SEL,           GL_BL_A_MEM
         // Transl surface: has               CLR_ON_CVG,    FORCE_BL, G_BL_1MA
+    }
+
+    fn handle_obj_rendermode(&mut self) {
+        trace!(target: "HLE", "{} gsDPObjectRenderMode???(...)", self.command_prefix);
     }
 
     fn handle_setprimdepth(&mut self) { // G_SETPRIMDEPTH

@@ -17,7 +17,6 @@ use crate::rsp::Rsp;
 use crate::serial::SerialInterface;
 use crate::video::VideoInterface;
 
-#[derive(Default)]
 pub struct DmaInfo {
     pub initiator     : &'static str, // for debugging
     pub source_address: u32, // RCP physical address
@@ -29,9 +28,21 @@ pub struct DmaInfo {
 
     // callback function to let the initiator know the DMA has completed
     pub completed     : Option<mpsc::Sender<DmaInfo>>,
+}
 
-    // direct read or write to memory (when source or dest address == 0xFFFF_FFFF)
-    pub internal_buffer: Option<Vec<u32>>,
+impl Default for DmaInfo {
+    fn default() -> Self {
+        Self {
+            initiator     : "default",
+            source_address: 0,
+            dest_address  : 0,
+            count         : 0,
+            length        : 0,
+            source_stride : 0,
+            dest_stride   : 0,
+            completed     : None,
+        }
+    }
 }
 
 impl fmt::Debug for DmaInfo {
@@ -134,23 +145,21 @@ impl Rcp {
     pub fn step(&mut self, cpu_cycles_elapsed: u64) {
         // run DMAs before stepping modules, as they often check for dma completion
         // and this way we can trigger interrupts asap
-        loop {
-            if let Some(mut dma_info) = self.should_dma() {
-                if !dma_info.initiator.starts_with("PI-") { // don't display PI-RD64B and PI-WR64B
+        while let Some(mut dma_info) = self.should_dma() {
+            if !dma_info.initiator.starts_with("PI-") { // don't display PI-RD64B and PI-WR64B
+                if dma_info.count != 1 {
                     trace!(target: "DMA", "performing dma: DmaInfo = {:?}", dma_info);
                 }
-
-                if let Err(_) = self.do_dma(&mut dma_info) {
-                    todo!("handle dma error");
-                }
-
-                let cb_maybe = mem::replace(&mut dma_info.completed, None);
-                if let Some(cb) = cb_maybe {
-                    let _ = cb.send(dma_info).unwrap();
-                }
-                continue;
             }
-            break;
+
+            if let Err(_) = self.do_dma(&mut dma_info) {
+                todo!("handle dma error");
+            }
+
+            let cb_maybe = mem::replace(&mut dma_info.completed, None);
+            if let Some(cb) = cb_maybe {
+                let _ = cb.send(dma_info).unwrap();
+            }
         }
 
         // the order here is somewhat important, but MI must be last
@@ -247,8 +256,9 @@ impl Rcp {
 
     // Slow, maybe at some point we can do more of a direct memory copy
     fn do_dma(&mut self, dma_info: &mut DmaInfo) -> Result<(), ReadWriteFault> {
-        if (dma_info.length % 4) != 0 {
-            return Err(ReadWriteFault::Invalid);
+        if (dma_info.length & 7) != 0 {
+            panic!("invalid length for dma {}", dma_info.length);
+            //return Err(ReadWriteFault::Invalid);
         } 
 
         let transfer_size = dma_info.count * dma_info.length;
@@ -259,28 +269,15 @@ impl Rcp {
         let mut source_address = dma_info.source_address & !0x07;
         let mut dest_address = dma_info.dest_address & !0x07;
 
-        let mut ret_buffer = if dma_info.dest_address == 0xFFFF_FFFF {
-            assert!(dma_info.dest_stride == 0); // internal buffer doesn't support stride
-            assert!(dma_info.count == 1);       // we could support count != 1, but hasn't been necessary yet
-            Some(Vec::with_capacity((transfer_size >> 2) as usize))
-        } else {
-            None
-        };
-
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {
+            //info!(target: "DMA", "reading source_address=${:08X} length=${:08X} dest_address=${:08X}", source_address
             let block = self.read_block(source_address as usize, dma_info.length)?;
-            source_address += dma_info.source_stride;
+            source_address += dma_info.length + dma_info.source_stride;
 
-            if let Some(ref mut dest) = ret_buffer {
-                dest.extend_from_slice(&block);
-            } else {
-                self.write_block(dest_address as usize, &block)?;
-                dest_address += dma_info.dest_stride;
-            }
+            self.write_block(dest_address as usize, &block)?;
+            dest_address += dma_info.length + dma_info.dest_stride;
         }
-
-        dma_info.internal_buffer = ret_buffer;
 
         Ok(())
     }

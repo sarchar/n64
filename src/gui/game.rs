@@ -340,8 +340,8 @@ impl App for Game {
         //let diffuse_dim   = diffuse_image.dimensions();
 
         let texture_size = wgpu::Extent3d {
-            width: 1024, //diffuse_dim.0,
-            height: 1024, //diffuse_dim.1,
+            width: 2048, //diffuse_dim.0,
+            height: 2048, //diffuse_dim.1,
             depth_or_array_layers: 1,
         };
 
@@ -1173,12 +1173,12 @@ impl Game {
                         bytemuck::cast_slice(&tmem),
                         wgpu::ImageDataLayout {
                             offset: 0,
-                            bytes_per_row: Some(4 * 1024),
-                            rows_per_image: Some(1024),
+                            bytes_per_row: Some(4 * 2048),
+                            rows_per_image: Some(2048),
                         },
                         wgpu::Extent3d {
-                            width: 1024,
-                            height: 1024,
+                            width: 2048,
+                            height: 2048,
                             depth_or_array_layers: 1,
                         },
                     );

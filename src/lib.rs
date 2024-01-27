@@ -263,6 +263,7 @@ impl System {
             self.comms.total_cpu_steps.inc();
         }
 
+        // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
         self.comms.break_cpu_cycles.store(false, Ordering::SeqCst);
 
         // handle reset

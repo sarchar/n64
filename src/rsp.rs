@@ -281,10 +281,21 @@ impl Rsp {
                                 }
                             },
 
-                            //.2 => { // M_AUDTASK
-                            //.    // run on RSP for now
-                            //.    c.process_task = false;
-                            //.},
+                            2 => { // M_AUDTASK
+                                // run on RSP for now
+                                debug!(target: "RSP", "stubbed audio tasks for now, as they crash");
+                                    // set SIG2 (SP_STATUS_TASKDONE)
+                                    {
+                                        let mut shared_state = c.shared_state.write().unwrap();
+                                        shared_state.signals |= 1 << 2;
+                                    }
+
+                                    // and break, which usually triggers SP interrupt
+                                    let _ = c.special_break().unwrap();
+
+                                    // RSP isn't running
+                                    c.halted = true;
+                            },
 
                             // All other tasks types are LLE'd
                             _ => {
@@ -374,6 +385,7 @@ impl Rsp {
                 shared_state.dma_current_write_length = 0xFF8;
                 shared_state.dma_busy = true;
                 self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap(); 
+                self.comms.break_cpu();
             }
         }
     }
@@ -528,7 +540,7 @@ impl Rsp {
                 shared_state.dma_total_size = count * length + (count - 1) * skip;
 
                 let dma_info = DmaInfo {
-                    initiator     : "RSP-READ",
+                    initiator     : "RSP-READ(CPU)",
                     source_address: shared_state.dma_dram,
                     dest_address  : shared_state.dma_cache | 0x0400_0000,
                     count         : count,
@@ -550,6 +562,7 @@ impl Rsp {
                     shared_state.dma_current_write_length = 0xFF8;
                     shared_state.dma_busy = true;
                     self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                    self.comms.break_cpu();
                 }
             },
 
@@ -565,7 +578,7 @@ impl Rsp {
                 shared_state.dma_total_size = count * length + (count - 1) * skip;
 
                 let dma_info = DmaInfo {
-                    initiator     : "RSP-WRITE",
+                    initiator     : "RSP-WRITE(CPU)",
                     source_address: shared_state.dma_cache | 0x0400_0000,
                     dest_address  : shared_state.dma_dram,
                     count         : count,
@@ -587,6 +600,7 @@ impl Rsp {
                     shared_state.dma_current_write_length = 0xFF8;
                     shared_state.dma_busy = true;
                     self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                    self.comms.break_cpu();
                 }
             },
 
@@ -1600,6 +1614,7 @@ impl RspCpuCore {
                             shared_state.dma_current_write_length = 0xFF8;
                             shared_state.dma_busy = true;
                             self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            self.comms.break_cpu();
                         }
 
                         Ok(())
@@ -1638,6 +1653,7 @@ impl RspCpuCore {
                             shared_state.dma_current_write_length = 0xFF8;
                             shared_state.dma_busy = true;
                             self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            self.comms.break_cpu();
                         }
 
                         Ok(())

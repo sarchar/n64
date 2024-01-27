@@ -209,6 +209,7 @@ impl PeripheralInterface {
 
                         self.dma_status |= 0x01;
                         self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                        self.comms.break_cpu();
                     }
                 }
 
@@ -248,6 +249,7 @@ impl PeripheralInterface {
 
                         self.dma_status |= 0x01;
                         self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                        self.comms.break_cpu();
                         WriteReturnSignal::None
                     } else {
                         let start = self.cart_addr & !0xF000_0000;
@@ -268,6 +270,7 @@ impl PeripheralInterface {
 
                             self.dma_status |= 0x01;
                             self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            self.comms.break_cpu();
                             WriteReturnSignal::None
                         } else {
                             WriteReturnSignal::None

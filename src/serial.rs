@@ -99,6 +99,7 @@ impl SerialInterface {
 
                 // start DMA
                 self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                self.comms.break_cpu();
             },
 
             // SI_PIF_AD_WR64B - DMA 64 bytes from RDRAM to PIF-RAM
@@ -120,6 +121,7 @@ impl SerialInterface {
 
                 // start DMA
                 self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                self.comms.break_cpu();
             },
 
             // SI_STATUS
