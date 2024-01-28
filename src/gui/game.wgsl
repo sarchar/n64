@@ -8,6 +8,18 @@ struct CameraUniform {
 @group(1) @binding(0)
 var<uniform> camera: CameraUniform;
 
+struct ColorCombinerState {
+    color1_source: u32,
+    alpha1_source: u32,
+    color2_source: u32,
+    alpha2_source: u32,
+    prim_color   : vec4<f32>,
+    env_color    : vec4<f32>,
+};
+
+@group(1) @binding(1)
+var<uniform> color_combiner_state: ColorCombinerState;
+
 struct VertexInput {
     @location(0) position: vec4<f32>,
     @location(1) tex_coords: vec2<f32>,
@@ -29,6 +41,7 @@ struct FragmentOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+
 
     out.tex_coords    = vec2<f32>(in.tex_coords.x, in.tex_coords.y);
     out.clip_position = in.position * camera.view_proj;
@@ -74,6 +87,34 @@ fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     }
 }
 
+fn select_colorA(src: u32, rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
+    switch(src) {
+        case 1u: {
+            return rc;
+        }
+
+        default: {
+            return vec4(1.0, 0.0, 1.0, 1.0);
+        }
+    }
+}
+
+// (A-B)*C+D
 fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
-    return rc;// * vec4(0.39215, 0.588235, 1.0, 0.7843137);
+    // So ugly.  Why can't I use u8 types in this language?
+    let a0c_source = color_combiner_state.color1_source / 16777216u;
+    let b0c_source = (color_combiner_state.color1_source / 65536u) % 256u; 
+    let c0c_source = (color_combiner_state.color1_source / 256u) % 256u;
+    let d0c_source = color_combiner_state.color1_source % 256u;
+
+    let a = select_colorA(a0c_source, rc, in);
+
+    if a0c_source == 1u && c0c_source == 3u {
+        // A=texture color
+        // C=prim color
+        // B=D=0
+        return rc * color_combiner_state.prim_color;
+    } else {
+        return rc;
+    }
 }

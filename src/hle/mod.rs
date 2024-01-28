@@ -31,6 +31,7 @@ pub enum HleRenderCommand {
     VertexData(Vec<Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
+    ColorCombinerStateData(Vec<ColorCombinerState>),
     TextureData { tmem: Vec<u8> },
     RenderPass(RenderPassState),
     Sync,
@@ -115,6 +116,7 @@ pub struct TriangleList {
     // uniform buffer indices to use for this draw list
     // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
     pub matrix_index: u32,
+    pub color_combiner_state_index: u32,
 
     // start index and number of indices
     pub start_index: u32,
@@ -168,6 +170,9 @@ pub struct Hle {
 
     rdp_half_hi: u32,
     rdp_half_lo: u32,
+
+    current_color_combiner_state: ColorCombinerState,
+    color_combiner_states: Vec<ColorCombinerState>,
 
     // TEMP HACK only let a clear happen once
     clear_color_happened: bool,
@@ -265,11 +270,32 @@ impl TextureState {
     }
 }
 
-struct ColorCombinerState {
-    color1_source: cgmath::Vector4<u8>, // a, b, c, d
-    alpha1_source: cgmath::Vector4<u8>,
-    color2_source: cgmath::Vector4<u8>, // a, b, c, d
-    alpha2_source: cgmath::Vector4<u8>,
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ColorCombinerState {
+    pub color1_source: u32, //[u8; 4], // a, b, c, d
+    pub alpha1_source: u32, //[u8; 4],
+    pub color2_source: u32, //[u8; 4], // a, b, c, d
+    pub alpha2_source: u32, //[u8; 4],
+    pub prim_color   : [f32; 4],
+    pub env_color    : [f32; 4],
+
+    // alignment to 256 bytes
+    pub _alignment   : [u64; 26],
+}
+
+impl ColorCombinerState {
+    fn new() -> Self {
+        Self {
+            color1_source: 0, //[0, 0, 0, 0],
+            alpha1_source: 0, //[0, 0, 0, 0],
+            color2_source: 0, //[0, 0, 0, 0],
+            alpha2_source: 0, //[0, 0, 0, 0],
+            prim_color   : [0.0, 0.0, 0.0, 0.0],
+            env_color    : [0.0, 0.0, 0.0, 0.0],
+            _alignment   : [0; 26],
+        }
+    }
 }
 
 const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let's use it too?
@@ -338,6 +364,9 @@ impl Hle {
             rdp_half_hi: 0,
             rdp_half_lo: 0,
 
+            current_color_combiner_state: ColorCombinerState::new(),
+            color_combiner_states: vec![],
+
             clear_color_happened: false,
 
             tex: TextureState::new(),
@@ -383,6 +412,7 @@ impl Hle {
         self.num_texels = 0;
         self.total_texture_data = 0;
         self.fill_color = 0;
+        self.color_combiner_states.clear();
         self.clear_color_happened = false;
         self.tex.reset(); // TODO this probably shouldn't be done, as it looks like
                           // RDP state isn't reset from frame to frame
@@ -592,9 +622,9 @@ impl Hle {
         self.finalize_render_pass(Some(format!("end of display list")));
 
         debug!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls, \
-                               {} total tris, {} texels read ({} bytes), ", 
+                               {} total tris, {} texels read ({} bytes), {} cc states", 
                self.matrices.len(), self.vertices.len(), self.indices.len(), self.render_passes.len(), self.num_draws, 
-               self.num_tris, self.num_texels, self.total_texture_data);
+               self.num_tris, self.num_texels, self.total_texture_data, self.color_combiner_states.len());
 
         // if there's nothing to draw, just Sync with the renderer and return
         if self.render_passes.len() == 0 {
@@ -630,6 +660,10 @@ impl Hle {
         // upload matrices
         let matrices = std::mem::replace(&mut self.matrices, vec![]);
         self.send_hle_render_command(HleRenderCommand::MatrixData(matrices));
+
+        // upload color combiner states
+        let cc_states = std::mem::replace(&mut self.color_combiner_states, vec![]);
+        self.send_hle_render_command(HleRenderCommand::ColorCombinerStateData(cc_states));
 
         // run each render pass
         for i in 0..self.render_passes.len() {
@@ -1211,9 +1245,26 @@ impl Hle {
                 },
             };
 
+            // transfer the current combiner state to the uniform buffer
+            let cc_index = if self.color_combiner_states.len() == 0 {
+                self.color_combiner_states.push(self.current_color_combiner_state);
+                0
+            } else {
+                if self.current_color_combiner_state != *self.color_combiner_states.last().unwrap() {
+                    let cc_index = self.color_combiner_states.len() as u32;
+                    self.color_combiner_states.push(self.current_color_combiner_state);
+                    cc_index
+                } else {
+                    (self.color_combiner_states.len() - 1) as u32
+                }
+            };
+
+            trace!(target: "HLE", "CC State: {:?}", self.color_combiner_states[cc_index as usize]);
+
             // set the uniform indices
             let tl = self.current_triangle_list();
             tl.matrix_index = matrix_index; // set the matrix index
+            tl.color_combiner_state_index = cc_index;
         }
 
         // clear overrides even if they weren't used
@@ -2076,8 +2127,9 @@ impl Hle {
 
             // swizzle odd rows. NOTE TODO this is only "correct" for RGBA 16b
             if (y & 0x01) == 1 { 
-                match rdp_tile.size {
-                    1 => {},
+                match rdp_tile.size { 
+                    1 => { // 8b
+                    },
                     2 => { // 16b
                         for r in row.chunks_mut(2) {
                             r.swap(0, 1);
@@ -2385,7 +2437,8 @@ impl Hle {
         self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
-        self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
+        self.matrix_index_override = Some(0);
+        self.add_triangles(RenderPassType::DrawTriangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
     }
 
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
@@ -2417,7 +2470,17 @@ impl Hle {
         let g = (self.command >> 16) as u8;
         let b = (self.command >>  8) as u8;
         let a = (self.command >>  0) as u8;
+
         trace!(target: "HLE", "{} gsDPSetPrimColor({}, {}, {}, {}, {}, {})", self.command_prefix, minlevel, lodfrac, r, g, b, a);
+
+        self.current_color_combiner_state.prim_color = [
+            (r as f32) / 255.0,
+            (g as f32) / 255.0,
+            (b as f32) / 255.0,
+            (a as f32) / 255.0
+        ];
+
+        self.color_combiner_state_changed();
     }
 
     fn handle_setenvcolor(&mut self) { // G_SETENVCOLOR
@@ -2426,10 +2489,57 @@ impl Hle {
         let b = (self.command >>  8) as u8;
         let a = (self.command >>  0) as u8;
         trace!(target: "HLE", "{} gsDPSetEnvColor({}, {}, {}, {})", self.command_prefix, r, g, b, a);
+
+        self.current_color_combiner_state.env_color = [
+            (r as f32) / 255.0,
+            (g as f32) / 255.0,
+            (b as f32) / 255.0,
+            (a as f32) / 255.0
+        ];
+
+        self.color_combiner_state_changed();
     }
 
     fn handle_setcombine(&mut self) { // G_SETCOMBINE
-        trace!(target: "HLE", "{} gsDPSetCombineLERP(...)", self.command_prefix);
+        let a0c = ((self.command >> 52) & 0x0F) as u8;
+        let b0c = ((self.command >> 28) & 0x0F) as u8;
+        let c0c = ((self.command >> 47) & 0x1F) as u8;
+        let d0c = ((self.command >> 15) & 0x07) as u8;
+
+        let a0a = ((self.command >> 44) & 0x07) as u8;
+        let b0a = ((self.command >> 12) & 0x07) as u8;
+        let c0a = ((self.command >> 41) & 0x07) as u8;
+        let d0a = ((self.command >>  9) & 0x07) as u8;
+
+        let a1c = ((self.command >> 37) & 0x0F) as u8;
+        let b1c = ((self.command >> 24) & 0x0F) as u8;
+        let c1c = ((self.command >> 32) & 0x1F) as u8;
+        let d1c = ((self.command >>  6) & 0x07) as u8;
+
+        let a1a = ((self.command >> 21) & 0x07) as u8;
+        let b1a = ((self.command >>  3) & 0x07) as u8;
+        let c1a = ((self.command >> 18) & 0x07) as u8;
+        let d1a = ((self.command >>  0) & 0x07) as u8;
+
+        trace!(target: "HLE", "{} gsDPSetCombineLERP({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})", self.command_prefix,
+                a0c, b0c, c0c, d0c, a0a, b0a, c0a, d0a, a1c, b1c, c1c, d1c, a1a, b1a, c1a, d1a);
+
+        self.current_color_combiner_state.color1_source = u32::from_be_bytes([a0c, b0c, c0c, d0c]);
+        self.current_color_combiner_state.alpha1_source = u32::from_be_bytes([a0a, b0a, c0a, d0a]);
+        self.current_color_combiner_state.color2_source = u32::from_be_bytes([a1c, b1c, c1c, d1c]);
+        self.current_color_combiner_state.alpha2_source = u32::from_be_bytes([a1a, b1a, c1a, d1a]);
+        self.color_combiner_state_changed();
+    }
+
+    fn color_combiner_state_changed(&mut self) {
+        // if the current triangle list isn't using the current combiner state, switch to a new list.
+        // num_indices has to be non-zero for the color state index to be valid
+        // if num_indices is 0, then the color index will be set on the next draw call
+        let cc_index = self.current_triangle_list().color_combiner_state_index as usize;
+        if (self.current_triangle_list().num_indices > 0)
+            && (self.color_combiner_states[cc_index] != self.current_color_combiner_state) {
+            self.next_triangle_list();
+        }
     }
 
     fn handle_settimg(&mut self) { // G_SETTIMG
