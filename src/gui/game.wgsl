@@ -52,18 +52,28 @@ var s_diffuse_nearest: sampler;
 fn fs_main(in: VertexOutput) -> FragmentOutput {
     var out: FragmentOutput;
 
+    let rc = rasterizer_color(in);
+    let cc = color_combine(rc, in);
+
+    out.color = cc;
+    return out;
+}
+
+fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, in.tex_coords);
     let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, in.tex_coords);
 
     if ((in.flags & ENABLE_TEXTURE) == ENABLE_TEXTURE) {
         if ((in.flags & LINEAR_FILTER) == LINEAR_FILTER) {
-            out.color = tex_linear;
+            return tex_linear;
         } else {
-            out.color = tex_nearest;
+            return tex_nearest;
         }
     } else {
-        out.color = in.color;
+        return in.color;
     }
+}
 
-    return out;
+fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
+    return rc;// * vec4(0.39215, 0.588235, 1.0, 0.7843137);
 }

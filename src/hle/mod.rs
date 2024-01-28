@@ -112,7 +112,11 @@ pub struct RenderPassState {
 
 #[derive(Clone,Debug,Default)]
 pub struct TriangleList {
+    // uniform buffer indices to use for this draw list
+    // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
     pub matrix_index: u32,
+
+    // start index and number of indices
     pub start_index: u32,
     pub num_indices: u32,
 }
@@ -139,8 +143,10 @@ pub struct Hle {
 
     matrices: Vec<Matrix4<f32>>,             // all the unique matrices in the DL
     matrix_stack: Vec<Matrix4<f32>>,         // modelview only, not multiplied by proj
-    current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
     current_projection_matrix: Matrix4<f32>, // current projection matrix
+
+    current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
+    matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use current_matrix
 
     current_viewport: Option<HleRenderCommand>,
 
@@ -259,6 +265,13 @@ impl TextureState {
     }
 }
 
+struct ColorCombinerState {
+    color1_source: cgmath::Vector4<u8>, // a, b, c, d
+    alpha1_source: cgmath::Vector4<u8>,
+    color2_source: cgmath::Vector4<u8>, // a, b, c, d
+    alpha2_source: cgmath::Vector4<u8>,
+}
+
 const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let's use it too?
 
 type DLCommand = fn(&mut Hle) -> ();
@@ -274,6 +287,14 @@ impl Hle {
             v[3] = 0xFF;
         }
 
+        // keep a default vertex in self.vertices_internal in case anything draws before calling G_VTX
+        let vertices_internal = vec![Vertex {
+            position  : [0.0, 0.0, 0.0, 1.0],
+            tex_coords: [0.0, 0.0],
+            color     : [1.0, 0.0, 0.0, 1.0],
+            flags     : 0,
+        }];
+
         Self {
             comms: comms,
 
@@ -286,15 +307,17 @@ impl Hle {
 
             other_modes: OtherModes::default(),
 
-            vertices_internal: vec![],
+            vertices_internal: vertices_internal,
             vertices: vec![],
             vertex_stack: [0; 32],
             indices: vec![],
 
             matrices: vec![],
             matrix_stack: vec![],
-            current_matrix: Matrix4::identity(),
             current_projection_matrix: Matrix4::identity(),
+            current_matrix: Matrix4::identity(),
+            matrix_index_override: None,
+
             current_viewport: None,
 
             color_images: HashMap::new(),
@@ -342,13 +365,14 @@ impl Hle {
     fn reset_display_list(&mut self) {
         self.dl_stack.clear();
         self.segments = [0u32; 16];
-        self.vertices_internal.clear();
+        self.vertices_internal.truncate(1); // keep element 0 in the list
         self.vertices.clear();
         self.vertex_stack = [0; 32];
         self.indices.clear();
         self.matrices.clear();
         self.matrix_stack.clear();
         self.current_matrix = Matrix4::identity();
+        self.matrix_index_override = None;
         self.current_projection_matrix = Matrix4::identity();
         self.color_images.clear();
         self.depth_images.clear();
@@ -360,7 +384,8 @@ impl Hle {
         self.total_texture_data = 0;
         self.fill_color = 0;
         self.clear_color_happened = false;
-        self.tex.reset();
+        self.tex.reset(); // TODO this probably shouldn't be done, as it looks like
+                          // RDP state isn't reset from frame to frame
         self.mapped_texture_dirty = false;
 
         // allow viewport to carry over into other display lists
@@ -370,20 +395,11 @@ impl Hle {
         //self.current_color_image_format = None;
         //self.current_depth_image = None;
 
-        // keep a default vertex in self.vertices_internal in case anything draws before calling G_VTX
-        self.vertices_internal.push(Vertex {
-            position  : [0.0, 0.0, 0.0, 1.0],
-            tex_coords: [0.0, 0.0],
-            color     : [1.0, 0.0, 0.0, 1.0],
-            flags     : 0,
-        });
-
         // set matrix 0 to be an ortho projection
         self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
 
         // always have a render pass and draw list started
         self.next_render_pass(None);
-        self.next_triangle_list(None);
 
         // copy over some emulation flags so we don't constantly need to acquire a read lock
         let ef = self.comms.emulation_flags.read().unwrap();
@@ -784,7 +800,7 @@ impl Hle {
         let c3 = [elem(1,  0), elem(3,  0), elem(5,  0), elem(7,  0)];
         let mut cgmat = Matrix4::from_cols(c0.into(), c1.into(), c2.into(), c3.into());
         //println!("data: {mtx_data:?}");
-        //println!("matrix: {cgmat:?}");
+        trace!(target: "HLE", "matrix: {cgmat:?}");
 
         if proj {
             //println!("proj: {cgmat:?}");
@@ -808,11 +824,12 @@ impl Hle {
 
             // the matrices used on n64 expect the vertex to be left-multiplied: v' = v*(M*V*P)
             self.current_matrix = cgmat * self.current_projection_matrix;
+
+            // when current_matrix changes we need to start a new draw call
+            // (if there were no triangles yet, this call this does nothing)
+            self.next_triangle_list();
         }
 
-        // when current_matrix changes we need to start a new draw call
-        // (if there were no triangles yet, this call this does nothing)
-        self.next_triangle_list(None);
     }
 
     fn handle_popmtx(&mut self) { // G_POPMTX
@@ -1052,7 +1069,7 @@ impl Hle {
                 flags: 0,
             };
 
-            //println!("v{}: {:?}", i+vbidx, vtx);
+            trace!(target: "HLE", "v{}: {:?}", i+vbidx, vtx);
 
             // place the vertex in the internal buffer, and set the stack to refer to it
             let cur_pos = self.vertices_internal.len() as u16;
@@ -1080,10 +1097,9 @@ impl Hle {
     }
 
     fn next_render_pass(&mut self, reason: Option<String>) {
-        // don't create a new render pass if this one isn't rendering anything, however, keep the current state
         if self.render_passes.len() > 0 {
-            // if there's no draw_list or the one there is empty, this render pass can still be
-            // used and doesn't need to be finalized
+            // don't create a new render pass if this one isn't rendering anything, however, keep the current state
+            // if there's no draw_list or the one there is empty, this render pass can still be used and doesn't need to be finalized
             if !self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices != 0) {
                 // No draw calls, so update render state
                 self.update_render_pass_state();
@@ -1096,11 +1112,13 @@ impl Hle {
         let rp = RenderPassState::default();
         self.render_passes.push(rp);
         self.update_render_pass_state();
+
+        self.next_triangle_list();
     }
 
     fn finalize_render_pass(&mut self, reason: Option<String>) {
         // if the current draw list has no indices, drop it
-        if self.current_render_pass().draw_list.last().unwrap().num_indices == 0 {
+        if self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices == 0) {
             self.current_render_pass().draw_list.pop().unwrap();
             self.num_draws -= 1;
         }
@@ -1113,19 +1131,19 @@ impl Hle {
         }
 
         match self.current_render_pass().pass_type {
+            // no depth on FillRectangles
             Some(RenderPassType::FillRectangles) => {
-                // no depth on FillRectangles
                 self.current_render_pass().depth_buffer = None;
+                self.current_render_pass().depth_compare_enable = false;
+                self.current_render_pass().depth_write = false;
             },
 
             Some(RenderPassType::DrawTriangles) => {},
 
-            None => {
-                warn!(target: "HLE", "finalizing buffer that has no pass type");
-            },
+            None => warn!(target: "HLE", "finalizing buffer that has no pass type"),
         }
 
-        trace!(target: "HLE", "moving on from current render pass: {}", reason.as_ref().unwrap());
+        trace!(target: "HLE", "changing to new render pass: {}", reason.as_ref().unwrap());
         self.current_render_pass().reason = reason;
 
         // check to see if the render targets are cleared with full screen tris
@@ -1151,79 +1169,85 @@ impl Hle {
         }
     }
 
-    // get current triangle list, and if the pass type changes we need a new render pass
-    fn current_triangle_list(&mut self, pass_type: RenderPassType, specific_matrix_index: Option<u32>) -> &mut TriangleList {
-        // check if pass_type is different than the current pass
+    fn add_triangles(&mut self, pass_type: RenderPassType, v: &[u16]) {
+        assert!((v.len() % 3) == 0); // must be a tri
+
+        // check if the render pass type has changed, and if so, start a new render pass
         if self.current_render_pass().pass_type.is_some_and(|v| v != pass_type) {
-            // copy over certain state from the current render pass to the new one
-            let color_buffer = self.current_render_pass().color_buffer.clone();
-            let depth_buffer = self.current_render_pass().depth_buffer.clone();
-            // clear_color and clear_depth would have been cleared in the previous render pass
-            self.next_render_pass(Some(format!("change pass type to {:?}", pass_type)));
-            self.current_render_pass().color_buffer = color_buffer;
-            self.current_render_pass().depth_buffer = depth_buffer;
+            let cur_pass_type = self.current_render_pass().pass_type.unwrap();
+            self.next_render_pass(Some(format!("change pass type from {:?} to {:?}", cur_pass_type, pass_type)));
+
         }
 
-        // update pass type from None
+        // set pass type for the new render pass (or one that is None)
         self.current_render_pass().pass_type = Some(pass_type);
 
+        // check if any uniforms change and start a new draw call
+        if self.current_triangle_list().num_indices != 0 {
+            // if the matrix index requested is different than the current matrix
+            if let Some(matrix_index_override) = self.matrix_index_override {
+                if self.current_triangle_list().matrix_index != matrix_index_override { // must be valid here
+                    // pass type is the same, draw calls exist, matrix changed, we need a new list
+                    self.next_triangle_list();
+                }
+            }
+        }
+
+        // upon the first addition of a triangle, we need to note what the current uniform buffers are
+        if self.current_triangle_list().num_indices == 0 {
+            // set the render pass
+            self.current_render_pass().pass_type = Some(pass_type);
+
+            // transfer the current matrix to the uniform buffer but allow a matrix index override
+            // you need to set self.matrix_index_override before any add_triangles call that requires it
+            let matrix_index = match self.matrix_index_override {
+                Some(matrix_index_override) => {
+                    matrix_index_override
+                },
+                None => {
+                    let matrix_index = self.matrices.len() as u32;
+                    self.matrices.push(self.current_matrix);
+                    matrix_index
+                },
+            };
+
+            // set the uniform indices
+            let tl = self.current_triangle_list();
+            tl.matrix_index = matrix_index; // set the matrix index
+        }
+
+        // clear overrides even if they weren't used
+        self.matrix_index_override = None;
+
+        self.indices.extend_from_slice(v);
+        self.current_triangle_list().num_indices += v.len() as u32;
+        self.num_tris += v.len() as u32 / 3;
+    }
+
+    // get current triangle list, and if the pass type changes we need a new render pass
+    fn current_triangle_list(&mut self) -> &mut TriangleList {
         // create a draw_list if none exists
         if self.current_render_pass().draw_list.len() == 0 {
-            self.next_triangle_list(specific_matrix_index);
-        }
-
-        // if the requested matrix isn't the current matrix, we need a new draw call
-        let tl = self.current_render_pass().draw_list.last_mut().unwrap();
-        if let Some(matrix_index) = specific_matrix_index {
-            // if we specified a different matrix index than the current list
-            // then we need a new draw call
-            if tl.matrix_index != matrix_index {
-                self.next_triangle_list(Some(matrix_index));
-            }
-        }
-
-        // if this is the first addition to draw_list, add the matrix to self.matrices
-        // don't matrix 0, as it's already in the list
-        let tl = self.current_render_pass().draw_list.last_mut().unwrap();
-        if tl.matrix_index != 0 && tl.num_indices == 0 {
-            {
-                //let mi = self.current_render_pass().draw_list.last().unwrap().matrix_index;
-                //println!("setting render pass {} draw call {} matrix index to {}",
-                //         self.render_passes.len()-1, self.current_render_pass().draw_list.len()-1, mi);
-                let tl = self.current_render_pass().draw_list.last().unwrap();
-                assert!(tl.matrix_index == 0 || tl.matrix_index == self.matrices.len() as u32);
-            }
-            self.matrices.push(self.current_matrix);
+            self.next_triangle_list();
         }
 
         self.current_render_pass().draw_list.last_mut().unwrap()
     }
 
-    // if specific_matrix_index is Some, self.next_triangle_list will use it instead
-    // of the next entry in the matrices list
-    fn next_triangle_list(&mut self, specific_matrix_index: Option<u32>) {
-        // determine the matrix index for the next draw call
-        // self.matrices.len() is always >0 (0 is the ortho view matrix)
-        let matrix_index = specific_matrix_index.or_else(|| Some(self.matrices.len() as u32)).unwrap();
-
-        // check if we should leave the current draw list alone
-        if self.current_render_pass().draw_list.len() > 0 {
-            let tl = self.current_render_pass().draw_list.last_mut().unwrap();
-            if tl.num_indices == 0 { // no calls yet, just change the matrix index and return
-                tl.matrix_index = matrix_index;
-                return;
-            }
-        }
+    // start a new draw list of type pass_type
+    fn next_triangle_list(&mut self) {
+        // if the current list exists and has no indices, then no need to create a new draw list
+        if self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices == 0) { return; }
 
         // definitely need a new draw list then
         let tl = TriangleList {
-            matrix_index: matrix_index,
-            start_index: self.indices.len() as u32,
+            // start index with the current indices doesn't change
+            start_index : self.indices.len() as u32,
+
             ..Default::default()
         };
 
-        let rp = self.current_render_pass();
-        rp.draw_list.push(tl);
+        self.current_render_pass().draw_list.push(tl);
         self.num_draws += 1;
     }
 
@@ -1754,10 +1778,7 @@ impl Hle {
         //println!("iv2: {:?}", _iv);
 
         // place indices into draw list
-        let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
-        tl.num_indices += 3;
-        self.indices.extend_from_slice(&[v0, v1, v2]);
-        self.num_tris += 1;
+        self.add_triangles(RenderPassType::DrawTriangles, &[v0, v1, v2]);
     }
 
     fn handle_tri2(&mut self) { // G_TRI2
@@ -1786,10 +1807,7 @@ impl Hle {
         let vi = self.vertex_stack.get(v12 as usize).unwrap();
         let (_, v12) = self.make_final_vertex(*vi as usize).unwrap();
 
-        let tl = self.current_triangle_list(RenderPassType::DrawTriangles, None);
-        tl.num_indices += 6;
-        self.indices.extend_from_slice(&[v00, v01, v02, v10, v11, v12]);
-        self.num_tris += 2;
+        self.add_triangles(RenderPassType::DrawTriangles, &[v00, v01, v02, v10, v11, v12]);
     }
 
     fn handle_quad(&mut self) { // G_QUAD
@@ -1883,10 +1901,8 @@ impl Hle {
         self.tex.enabled = old_enabled;
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
-        let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
-        tl.num_indices += 6;
-        self.indices.extend_from_slice(&[v0, v1, v2, v1, v2, v3]);
-        self.num_tris += 2;
+        self.matrix_index_override = Some(0);
+        self.add_triangles(RenderPassType::FillRectangles, &[v0, v1, v2, v1, v2, v3]);
     }
 
     fn handle_settilesize(&mut self) { // G_SETTILESIZE
@@ -2060,8 +2076,15 @@ impl Hle {
 
             // swizzle odd rows. NOTE TODO this is only "correct" for RGBA 16b
             if (y & 0x01) == 1 { 
-                for r in row.chunks_mut(2) {
-                    r.swap(0, 1);
+                match rdp_tile.size {
+                    1 => {},
+                    2 => { // 16b
+                        for r in row.chunks_mut(2) {
+                            r.swap(0, 1);
+                        }
+                    },
+                    3 => {},
+                    _ => todo!("load tile size {}", rdp_tile.size),
                 }
             }
 
@@ -2296,12 +2319,12 @@ impl Hle {
         // Check if this rectangle is a full-screen (i.e., clear) render
         // and if so, make sure the color is compatible with a fill
         if x0 == vx as u16 && y0 == vy as u16 && w == vw as u16 && h == vh as u16 {
+            let addr = self.current_render_pass().color_buffer.clone().unwrap();
             match self.current_color_image_format {
                 Some(HleRenderCommand::DefineColorImage { bpp, .. }) => {
                     match bpp {
                         2 => { // 16b
                             if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) { // can't have alternating colors
-                                let addr = self.current_render_pass().color_buffer.clone().unwrap();
                                 // we can't just mark clear_color in the current render pass, because
                                 // the N64 uses the color buffer to clear depth buffers, so we mark this
                                 // address as cleared in a separate buffer and only when next_render_pass() is
@@ -2312,9 +2335,7 @@ impl Hle {
                             }
                         },
                         3 => { // 32b
-                            // the color isn't important because it's 32b, so any value will do
-                            let addr = self.current_render_pass().color_buffer.clone().unwrap();
-                            // see note above
+                            // the color isn't important because it's 32b, so any value will do. see note above
                             trace!(target: "HLE", "clear image ${:08X}", addr);
                             self.clear_images.insert(addr, color);
                             return;
@@ -2340,10 +2361,7 @@ impl Hle {
         self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
-        let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
-        tl.num_indices += 6;
-        self.indices.extend_from_slice(&[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
-        self.num_tris += 2;
+        self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
     }
 
     #[allow(dead_code)]
@@ -2367,10 +2385,7 @@ impl Hle {
         self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
-        let tl = self.current_triangle_list(RenderPassType::FillRectangles, Some(0));
-        tl.num_indices += 6;
-        self.indices.extend_from_slice(&[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
-        self.num_tris += 2;
+        self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
     }
 
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
@@ -2455,12 +2470,14 @@ impl Hle {
 
         trace!(target: "HLE", "{} gsDPSetDepthImage(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
 
-        // if the color depth changes, start a new render pass
-        if self.current_render_pass().depth_buffer.is_some_and(|v| v != translated_addr) {
+        // set before next_render_pass(), which will use the new value
+        self.current_depth_image = Some(translated_addr);
+
+        // if the depth image changes, start a new render pass
+        if self.current_render_pass().depth_buffer.is_none() 
+            || self.current_render_pass().depth_buffer.is_some_and(|v| v != translated_addr) {
             self.next_render_pass(Some(format!("new depth target ${:08X}", translated_addr)));
         }
-        self.current_depth_image = Some(translated_addr);
-        self.current_render_pass().depth_buffer = self.current_depth_image;
 
         let hle_render_command = HleRenderCommand::DefineDepthImage { framebuffer_address: translated_addr };
         if !self.depth_images.contains_key(&translated_addr) {
@@ -2485,12 +2502,15 @@ impl Hle {
             unimplemented!("color targets not of RGBA not yet supported: {}", fmt);
         }
 
-        // if the color buffer changes, start a new render pass
-        if self.current_render_pass().color_buffer.is_some_and(|v| v != translated_addr) {
+        // set before next_render_pass(), which will use this value
+        self.current_color_image = Some(translated_addr);
+
+        // if the color image changes, start a new render pass
+        // I guess its possible there have been draw calls before setting a color image
+        if self.current_render_pass().color_buffer.is_none() 
+            || self.current_render_pass().color_buffer.is_some_and(|v| v != translated_addr) {
             self.next_render_pass(Some(format!("new color target ${:08X}", translated_addr)));
         }
-        self.current_color_image = Some(translated_addr);
-        self.current_render_pass().color_buffer = self.current_color_image;
 
         // create the color buffer
         let hle_render_command = HleRenderCommand::DefineColorImage { bpp: bpp, width: width, framebuffer_address: translated_addr };

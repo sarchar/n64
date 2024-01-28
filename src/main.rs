@@ -81,29 +81,6 @@ fn main() {
         }).unwrap();
     });
 
-    // The following gilrs code does work on windows, but enumerating gamepads() does not work
-    // without a GUI window
-    // 
-    //. let mut gilrs = match gilrs::GilrsBuilder::new().set_update_state(false).build() {
-    //.     Ok(g) => g,
-    //.     Err(gilrs::Error::NotImplemented(g)) => {
-    //.         error!("gilrs doesn't support current platform");
-    //.         g
-    //.     },
-    //.     Err(e) => {
-    //.         error!("gilrs failed to create context: {}", e);
-    //.         std::process::exit(-1);
-    //.     },
-    //. };
-
-    //. let repeat_filter = gilrs::ev::filter::Repeat::new();
-    //. loop {
-    //.     while let Some(ev) = gilrs.next_event_blocking(None).filter_ev(&repeat_filter, &mut gilrs) {
-    //.         gilrs.update(&ev);
-    //.         println!("{:?}", ev);
-    //.     }
-    //. }
-
     let program_rom = String::from(args[1].as_str());
     let make_system = move |comms: SystemCommunication| {
         System::new(comms, "bios/pifrom.v64", &program_rom)
@@ -138,7 +115,7 @@ fn main() {
                     },
                 };
 
-                pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system), gilrs));
+                pollster::block_on(gui::run::<gui::game::Game>(Box::new(make_system), change_logging, gilrs));
             }
         }
     }

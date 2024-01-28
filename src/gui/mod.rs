@@ -1,6 +1,8 @@
 use std::sync::mpsc;
 use std::time::Instant;
 
+use tracing_core::Level;
+
 use winit::{
     dpi::{LogicalSize, PhysicalSize},
     event::{Event, WindowEvent, VirtualKeyCode}, // VirtualKeyCode
@@ -39,10 +41,11 @@ pub struct AppWindow {
     wgpu        : WgpuInfo,
     gilrs       : gilrs::Gilrs,
     connected_gamepads: [Option<gilrs::GamepadId>; 4],
+    change_logging_func: Box<dyn Fn(&str, Level) -> ()>,
 }
 
 impl AppWindow {
-    async fn new(title: &str, width: u32, height: u32, allow_vulkan: bool, gilrs: gilrs::Gilrs) -> Self {
+    async fn new(title: &str, width: u32, height: u32, allow_vulkan: bool, change_logging: Box<dyn Fn(&str, Level) -> ()>, gilrs: gilrs::Gilrs) -> Self {
         let event_loop = EventLoop::new();
 
         // Create the platform window with winit
@@ -111,6 +114,7 @@ impl AppWindow {
             input_helper: WinitInputHelper::new(),
             gilrs       : gilrs,
             connected_gamepads: [None; 4],
+            change_logging_func: change_logging,
 
             wgpu        : WgpuInfo {
                 //instance      : instance,
@@ -160,6 +164,10 @@ impl AppWindow {
 
     fn window_scale_factor(&self) -> f64 {
         self.window.scale_factor()
+    }
+
+    fn change_logging(&self, logging_str: &str, default_level: Level) {
+        (self.change_logging_func)(logging_str, default_level);
     }
 
     fn gamepad_connected(&mut self, gamepad_id: gilrs::GamepadId) {
@@ -292,8 +300,10 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, gilrs: gilrs::Gilrs) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true, gilrs).await;
+pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, 
+                                   change_logging: Box<dyn Fn(&str, Level) -> ()>,
+                                   gilrs: gilrs::Gilrs) {
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true, change_logging, gilrs).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);

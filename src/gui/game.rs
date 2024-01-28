@@ -5,6 +5,7 @@ use std::time::Instant;
 
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
+use tracing_core::Level;
 
 use winit::event::VirtualKeyCode;
 use wgpu::util::DeviceExt;
@@ -168,6 +169,9 @@ pub struct Game {
     game_frame_count: u64,
     game_last_fps_time: Instant,
     game_fps: f64,
+
+    capture_display_list: u32,
+    capturing_display_list: bool,
 }
 
 impl App for Game {
@@ -649,6 +653,9 @@ impl App for Game {
             game_frame_count: 0,
             game_last_fps_time: Instant::now(),
             game_fps: 0.0,
+
+            capture_display_list: 0,
+            capturing_display_list: false,
         }
     }
 
@@ -715,6 +722,11 @@ impl App for Game {
             if appwnd.input().key_pressed(VirtualKeyCode::U) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
                 ef.view_texture_map = (ef.view_texture_map + 1) % 5;
+            }
+
+            // CTRL+P to print one frame of displaylists
+            if appwnd.input().key_pressed(VirtualKeyCode::P) {
+                self.capture_display_list = 1;
             }
         }
 
@@ -1241,6 +1253,7 @@ impl Game {
                         for dl in rp.draw_list {
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix is used for the triangle list
                             render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(dl.matrix_index as usize)]);
+
                             let last_index = dl.start_index + dl.num_indices;
                             render_pass.draw_indexed(dl.start_index..last_index as _, 0, 0..1);
                         }
@@ -1265,6 +1278,19 @@ impl Game {
                         self.comms.break_cpu();
                     }
                     
+                    if self.capturing_display_list {
+                        if self.capture_display_list == 1 {
+                            self.capturing_display_list = false;
+                            appwnd.change_logging("HLE=info", Level::INFO);
+                        }
+                        self.capture_display_list -= 1;
+                    } else {
+                        if self.capture_display_list > 0 {
+                            self.capturing_display_list = true;
+                            appwnd.change_logging("HLE=trace", Level::INFO);
+                        }
+                    }
+
                     break 'cmd_loop;
                 },
     
