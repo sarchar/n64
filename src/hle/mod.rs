@@ -2225,9 +2225,37 @@ impl Hle {
     }
 
     fn handle_loadlut(&mut self) { // G_LOADTLUT
-        let tile  = ((self.command >> 24) & 0x0F) as u8;
-        let count = ((self.command >> 14) & 0x03FF) as u16;
+        let tile  = ((self.command >> 24) & 0x07) as u8;
+        let count = ((self.command >> 14) & 0x03FF) + 1;
         trace!(target: "HLE", "{} gsDPLoadTLUTCmd({}, {})", self.command_prefix, tile, count);
+
+        let rdp_tile = &self.tex.rdp_tiles[tile as usize];
+
+        // TLUT is always 16b
+        let mut load_size = (count << 1) as u32;
+
+        // prevent overflow of tmem
+        let dest_addr = (rdp_tile.tmem as u32) << 3;
+        if (dest_addr + load_size) > 0x1000 {
+            load_size = 0x1000 - dest_addr;
+        }
+
+        if (self.tex.address & 0x07) != 0 {
+            warn!(target: "HLE", "TLUT source address is not 64b aligned");
+        }
+
+        // load tlut data into tmem starting at rdp_tiles.tmem from rdram self.tex.address
+        let tlut_data = self.load_from_rdram(self.tex.address, load_size);
+
+        for i in 0..count as u32 {
+            let src_shift = 16 - ((i & 1) << 4);
+            let src_color = (tlut_data[(i >> 1) as usize] >> src_shift) & 0xFFFF;
+
+            let da = dest_addr + (i << 1);
+            let dst_shift = 16 - ((da & 1) << 4);
+            let v = &mut self.tex.tmem[(da >> 2) as usize];
+            *v = (*v & (0xFFFF0000 >> dst_shift)) | (src_color << dst_shift);
+        }
     }
 
     // start a new render pass if any of the critical render states change, i.e., depth compare is disabled
