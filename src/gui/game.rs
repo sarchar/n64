@@ -164,11 +164,12 @@ impl MvpPacked {
     }
 }
 
-#[derive(Debug,Copy,Clone)]
+#[derive(Debug,Copy,Clone,PartialEq)]
 enum ViewMode {
     Game,
     Color(usize),
     Depth(usize),
+    ViOrigin,
 }
 
 pub struct Game {
@@ -776,7 +777,7 @@ impl App for Game {
                         } else if self.game_depth_texture_bind_groups.len() > 0 {
                             ViewMode::Depth(0)
                         } else {
-                            ViewMode::Game
+                            ViewMode::ViOrigin
                         }
                     },
                     ViewMode::Color(i) => {
@@ -785,16 +786,19 @@ impl App for Game {
                         } else if self.game_depth_texture_bind_groups.len() > 0 {
                             ViewMode::Depth(0)
                         } else {
-                            ViewMode::Game
+                            ViewMode::ViOrigin
                         }
                     },
                     ViewMode::Depth(i) => {
                         if self.game_depth_texture_bind_groups.len() > (i + 1) {
                             ViewMode::Depth(i + 1)
                         } else {
-                            ViewMode::Game
+                            ViewMode::ViOrigin
                         }
                     },
+                    ViewMode::ViOrigin => {
+                        ViewMode::Game
+                    }
                 };
             }
 
@@ -898,14 +902,19 @@ impl App for Game {
 
             // look for the texture associated with the color image address
             match self.view_mode {
-                ViewMode::Game => {
+                ViewMode::Game | ViewMode::ViOrigin => {
                     // we need the VI_ORIGIN value to know what to render..
-                    let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
+                    let mut video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
                     if video_buffer == 0 { 
                         // Throw away the render pass and encoder, no biggie
                         return; 
                     }
 
+                    // force video_buffer to not exist in the bind groups so we fall through to rendering ram
+                    if self.view_mode == ViewMode::ViOrigin {
+                        video_buffer = 1280;
+                    }
+                    
                     // The video buffer pointer is either exact or off by 640, or it doesn't exist at all
                     let bind_group = if self.game_render_texture_bind_groups.contains_key(&video_buffer) {
                         self.game_render_texture_bind_groups.get(&video_buffer).unwrap()
@@ -914,6 +923,9 @@ impl App for Game {
                     } else if self.game_render_texture_bind_groups.contains_key(&(video_buffer - 1280)) { // hmmm?
                         self.game_render_texture_bind_groups.get(&(video_buffer - 1280)).unwrap()
                     } else {
+                        // restore video_buffer address for render
+                        let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
+
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
                         let height = if width == 320 { 240 } else if width == 640 { 480 } else { warn!(target: "RENDER", "unknown render size {}", width); return; } as usize;
@@ -1289,7 +1301,11 @@ impl Game {
                 HleRenderCommand::RenderPass(rp) => {
                     let res = self.game_render_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap());
                     let color_texture: &wgpu::Texture = if res.is_none() {
-                        warn!(target: "HLE", "render pass without a color target!");
+                        warn!(target: "HLE", "render pass without a color target (rp.color_buffer={:X?}!", rp.color_buffer);
+                        let res = self.game_depth_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap());
+                        if res.is_some() {
+                            warn!(target: "HLE", "weird. it's a depth buffer!");
+                        }
                         continue;
                     } else {
                         res.unwrap()
