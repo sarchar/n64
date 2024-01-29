@@ -103,6 +103,8 @@ fn main() {
             if let Ok(new_filter) = filter_fmt.parse::<filter::Targets>() {
                 *filter = new_filter
                             .with_target("rustyline", Level::ERROR)
+                            .with_target("wgpu_hal", Level::WARN)
+                            .with_target("wgpu_core", Level::WARN)
                             .with_default(default_level);
             } else {
                 eprintln!("invalid filter format: {}", filter_fmt);
