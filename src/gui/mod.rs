@@ -56,7 +56,7 @@ impl AppWindow {
                 .with_inner_size(window_size)
                 .with_min_inner_size(LogicalSize::new(50, 50))
                 .with_resizable(allow_vulkan) // my current environment crashes when using the Gl
-                                              // backend, so I'm disabling window resize for now
+                                              // backend, so I'm disabling window resize in OpenGL
                 .build(&event_loop)
                 .expect("Error creating window")
         };
@@ -300,10 +300,15 @@ pub trait App {
     fn render_ui(&mut self, appwnd: &AppWindow, ui: &imgui::Ui);
 }
 
-pub async fn run<T: App + 'static>(create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, 
+pub async fn run<T: App + 'static>(args: crate::Args,
+                                   create_system: Box<dyn (FnOnce(SystemCommunication) -> System) + Send>, 
                                    change_logging: Box<dyn Fn(&str, Level) -> ()>,
                                    gilrs: gilrs::Gilrs) {
-    let appwnd = AppWindow::new("Sarchar's N64 Emulator", 1280, 960, true, change_logging, gilrs).await;
+
+    let width = 320 * args.window_scale as u32;
+    let height = 240 * args.window_scale as u32;
+
+    let appwnd = AppWindow::new("Sarchar's N64 Emulator", width, height, !args.force_opengl, change_logging, gilrs).await;
 
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);

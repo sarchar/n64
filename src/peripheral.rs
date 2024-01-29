@@ -99,7 +99,7 @@ impl PeripheralInterface {
         match offset & 0xF_FFFF {
             // PI_STATUS
             0x0_0010 => {
-                debug!(target: "PI", "read PI_STATUS");
+                trace!(target: "PI", "read PI_STATUS");
 
                 let ret = self.dma_status | self.io_busy;
 
@@ -165,7 +165,7 @@ impl PeripheralInterface {
         let result = match offset & 0xF_FFFF {
             // PI_DRAM_ADDR
             0x0_0000 => {
-                debug!(target: "PI", "write PI_DRAM_ADDR value=${:08X}", value);
+                trace!(target: "PI", "write PI_DRAM_ADDR value=${:08X}", value);
                 self.dram_addr = value;
 
                 WriteReturnSignal::None
@@ -173,7 +173,7 @@ impl PeripheralInterface {
 
             // PI_CART_ADDR
             0x0_0004 => {
-                debug!(target: "PI", "write PI_CART_ADDR value=${:08X}", value);
+                trace!(target: "PI", "write PI_CART_ADDR value=${:08X}", value);
                 self.cart_addr = value;
 
                 WriteReturnSignal::None
@@ -181,7 +181,7 @@ impl PeripheralInterface {
 
             // PI_RD_LEN
             0x0_0008 => {
-                debug!(target: "PI", "write PI_RD_LEN value=${:08X}", value);
+                trace!(target: "PI", "write PI_RD_LEN value=${:08X}", value);
 
                 //info!(target: "PI", "DMA INTO PI from DRAM=${:08X} DEST=${:08X}", self.dram_addr, self.cart_addr);
 
@@ -218,7 +218,7 @@ impl PeripheralInterface {
 
             // PI_WR_LEN
             0x0_000C => {
-                debug!(target: "PI", "write PI_WR_LEN value=${:08X}", value);
+                trace!(target: "PI", "write PI_WR_LEN value=${:08X}", value);
 
                 assert!((self.cart_addr & 0xF000_0000) == 0x1000_0000 ||
                         (self.cart_addr & 0xF800_0000) == 0x0800_0000, "PI DMA initiated from ${:08X}", self.cart_addr); // right now only cartridge rom is valid for dma
@@ -283,7 +283,7 @@ impl PeripheralInterface {
 
             // PI_STATUS
             0x0_0010 => {
-                debug!(target: "PI", "write PI_STATUS value=${:08X}", value);
+                trace!(target: "PI", "write PI_STATUS value=${:08X}", value);
 
                 if (value & 0x01) != 0 { // DMA stop/reset
                 }
@@ -298,49 +298,49 @@ impl PeripheralInterface {
 
             // PI_BSD_DOM1_LAT
             0x0_0014 => {
-                debug!(target: "PI", "write PI_BSD_DOM1_LAT");
+                trace!(target: "PI", "write PI_BSD_DOM1_LAT");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_PWD
             0x0_0018 => {
-                debug!(target: "PI", "write PI_BSD_DOM1_PWD");
+                trace!(target: "PI", "write PI_BSD_DOM1_PWD");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_PGS
             0x0_001C => {
-                debug!(target: "PI", "write PI_BSD_DOM1_PGS");
+                trace!(target: "PI", "write PI_BSD_DOM1_PGS");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM1_RLS
             0x0_0020 => {
-                debug!(target: "PI", "write PI_BSD_DOM1_RLS");
+                trace!(target: "PI", "write PI_BSD_DOM1_RLS");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM2_LAT
             0x0_0024 => {
-                debug!(target: "PI", "write PI_BSD_DOM2_LAT");
+                trace!(target: "PI", "write PI_BSD_DOM2_LAT");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM2_PWD
             0x0_0028 => {
-                debug!(target: "PI", "write PI_BSD_DOM2_PWD");
+                trace!(target: "PI", "write PI_BSD_DOM2_PWD");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM2_PGS
             0x0_002C => {
-                debug!(target: "PI", "write PI_BSD_DOM2_PGS");
+                trace!(target: "PI", "write PI_BSD_DOM2_PGS");
                 WriteReturnSignal::None
             },
 
             // PI_BSD_DOM2_RLS
             0x0_0030 => {
-                debug!(target: "PI", "write PI_BSD_DOM2_RLS");
+                trace!(target: "PI", "write PI_BSD_DOM2_RLS");
                 WriteReturnSignal::None
             },
 
@@ -411,7 +411,7 @@ impl Addressable for PeripheralInterface {
         // 16-bit read from CART is buggy
         let i = (offset & 0x02) >> 1;
         let ret = ((self.read_u32((offset & !0x03) + (i << 2))? & 0xFFFF0000) >> 16) as u16;
-        debug!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
+        trace!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
         Ok(ret)
     }
 
@@ -420,12 +420,12 @@ impl Addressable for PeripheralInterface {
         let half = self.read_u16(offset & !0x01)?;
         let shift = 8 - ((offset & 0x01) << 3);
         let ret = (half >> shift) & 0xFF;
-        debug!(target: "PI", "read8 offset=${:08X} return=${:02X}", offset, ret);
+        trace!(target: "PI", "read8 offset=${:08X} return=${:02X}", offset, ret);
         Ok(ret as u8)
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
-        debug!(target: "PI", "write32 value=${:08X} offset=${:08X}", value, offset);
+        trace!(target: "PI", "write32 value=${:08X} offset=${:08X}", value, offset);
 
         if offset < 0x0500_0000 {
             self.write_register(value, offset)
