@@ -81,7 +81,7 @@ impl VideoInterface {
     const CPU_FREQ : u64 = 93_750_000;
 
     // this FPS value "simulates" the VI interrupt occuring at this framerate
-    const FPS      : u64 = 120; // some demos run really nicely with this VI at 200+
+    const FPS      : u64 = 80; // some demos run really nicely with this VI at 200+
 
     const CYC_PER_FRAME: u64 = Self::CPU_FREQ / Self::FPS;
     const CYC_PER_SCANLINE: u64 = Self::CYC_PER_FRAME / Self::NUM_LINES;

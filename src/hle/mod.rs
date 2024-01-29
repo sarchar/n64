@@ -711,6 +711,9 @@ impl Hle {
         let length = ((length + 7) & !7) as usize;
         let start = ((start & !0x8000_0000) >> 2) as usize;
         let end   = start + (length >> 2);
+        if end > rdram.len() {
+            panic!("read from ${:08X} length {} reads outside of RDRAM", start << 2, length);
+        }
         rdram[start..end].into()
     }
 
@@ -1177,7 +1180,7 @@ impl Hle {
             None => warn!(target: "HLE", "finalizing buffer that has no pass type"),
         }
 
-        trace!(target: "HLE", "changing to new render pass: {}", reason.as_ref().unwrap());
+        trace!(target: "HLE", "changing to new render pass: {} (now {} complete passe(s))", reason.as_ref().unwrap(), self.render_passes.len());
         self.current_render_pass().reason = reason;
 
         // check to see if the render targets are cleared with full screen tris
@@ -1185,6 +1188,8 @@ impl Hle {
             let rp = self.current_render_pass();
             (rp.color_buffer, rp.depth_buffer)
         };
+
+        trace!(target: "HLE", "rp: color_buffer = ${:X?} depth_buffer = ${:X?}", color_buffer, depth_buffer);
 
         if let Some(color_addr) = color_buffer {
             let clear_color = self.clear_images.remove(&color_addr);
@@ -1388,10 +1393,10 @@ impl Hle {
 
                     // offset based on x,y of texture data
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
-                    let address = (tmem_address << 3) + offset;
+                    let offset  = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
+                    let address = (tmem_address << 3) + offset; // address in bytes
                     let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-                                                           //
+
                     (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
                 };
 
@@ -1462,12 +1467,12 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
+                    // on odd lines, flip to read 4 texels (16-bits) ahead/back
                     let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
 
                     // offset based on x,y of texture data
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
+                    let offset  = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
                     let address = (tmem_address << 3) + offset;
                     let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
 
@@ -1647,10 +1652,12 @@ impl Hle {
                             line_bytes: u32, plot: F)
         where 
             F: Fn(&mut Self, u32, u32, &[u8]) {
+        println!("texture_width={}", texture_width);
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // swap on odd lines
+                    // swap by two texels on odd lines
+                    // not 1 because texels are 16-bit (separated) in size
                     let sx = if (y & 0x01) == 0x01 { x ^ 2 } else { x };
 
                     // offset based on x,y of texture data
@@ -1704,12 +1711,28 @@ impl Hle {
         let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
 
         // calculate CRC of texture data
-        let mut crc: u64 = 0;
-        for i in 0..(line_bytes * texture_height) {
-            crc += self.tex.tmem[((((current_tile.tmem as u32) << 3) + i) >> 2) as usize] as u64;
-        }
+        let crc: u64 = {
+            let tmem_start = (current_tile.tmem << 1) as usize;
+            let len = ((line_bytes * texture_height) >> 2) as usize;
+            let data = (self.tex.tmem[tmem_start..][..len]).iter().map(|v| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+            let crc = crc64::crc64(0, &data);
+            // 32-bit textures need to crc the high half of memory too
+            if current_tile.size == 3 {
+                let tmem_start = ((current_tile.tmem << 1) ^ 0x200) as usize;
+                let data = (self.tex.tmem[tmem_start..][..len]).iter().map(|v| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+                crc64::crc64(crc, &data)
+            } else if current_tile.format == 2 { // Color-indexed textures, 
+                // Palette textures need their palette CRC'd so we can get palette animations
+                // But it could be very wasteful and slow
+                debug!(target: "HLE", "need to crc TLUT to have correct textures");
+                crc
+            } else {
+                crc
+            }
+        };
 
         if let Some((mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
+            //println!("saw crc=${:X} before", crc);
             let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
             current_tile.mapped_coordinates = Some((*mx, *my));
             return;
@@ -1718,7 +1741,7 @@ impl Hle {
         // we need to duplicate the top row and left column of every texture so that "clamping"
         // works for bilinear filters.
         let (mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+1, texture_height+1);
-        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{}", mx, my, texture_width-1, texture_height-1);
+        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{} (crc=${:X})", mx, my, texture_width, texture_height, crc);
 
         // coordinates that the polys use will be increased by 1 to accomodate the duplicate texture data
         mx += 1;
@@ -1979,7 +2002,7 @@ impl Hle {
         let texels = (((self.command >> 12) & 0xFFF) as u32) + 1;
         let dxt    = ((self.command >>  0) & 0xFFF) as u16;
         trace!(target: "HLE", "{} gsDPLoadBlock(tile={}, uls={} [{}], ult={} [{}], texels={}, dxt={})", self.command_prefix, 
-                                    tile, uls, to_f32(uls), ult, to_f32(ult), texels - 1, dxt);
+                                    tile, uls, to_f32(uls), ult, to_f32(ult), texels, dxt);
 
         if uls != 0 || ult != 0 { warn!(target: "HLE", "TODO: non-zero uls/t coordinate"); }
 
@@ -1997,7 +2020,14 @@ impl Hle {
 
         // load all texels from rdram in one go
         let padded_size = (data_size + 7) & !7;
-        let data = self.load_from_rdram(self.tex.address, padded_size);
+        let data = if ((self.tex.address + padded_size) & 0x7FFF_FFFF) >= 0x0080_0000 {
+            warn!(target: "HLE", "invalid read outside of RDRAM (address=${:08X}, length={})!", self.tex.address, padded_size);
+            let mut v = Vec::new();    
+            v.resize((padded_size >> 2) as usize, 0xFF0000FF);
+            v
+        } else {
+            self.load_from_rdram(self.tex.address, padded_size)
+        };
 
         // copy line by line, incrementing a counter by dxt, and every time the whole value portion
         // of the counter rolls over, increment the line number
@@ -2015,6 +2045,7 @@ impl Hle {
         let mut whole_part    = counter as u32;
         let mut line_number   = 0u32;
 
+        trace!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
         for _ in 0..(data_size / 8) { // number of 64-bit words to copy
             let v = &data[source_offset..][..2];
             source_offset += 2;
@@ -2031,15 +2062,16 @@ impl Hle {
                 },
                 3 => { // 32b
                     // 32b mode stores red+green in low half of tmem and blue+alpha in high mem
+                    // incoming data is already padded appropriately but not split in RG/BA
                     if (line_number & 0x01) == 0 {
                         // red and green from the two texels into the low half
-                        dst[dest_offset] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        dst[dest_offset | 0x000] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
                         // blue and alpha from the two texels into the high half
-                        dst[dest_offset + 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
+                        dst[dest_offset | 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
                     } else {
                         // swizzled
-                        dst[dest_offset^1]          = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16); // RG
-                        dst[(dest_offset^1)+ 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF); // BA
+                        dst[(dest_offset^1) | 0x000] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16); // RG
+                        dst[(dest_offset^1) | 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF); // BA
                     }
 
                     dest_offset += 1;
@@ -2072,18 +2104,18 @@ impl Hle {
         let lrt  = ((self.command >>  0) & 0xFFF) as u16;
         trace!(target: "HLE", "{} gsDPLoadTile({}, {}, {}, {}, {})", self.command_prefix, tile, uls, ult, lrs, lrt);
 
-        let valid = true;//uls == 0;
-
         // convert to fp
         let uls  = (uls as f32) / 4.0;
         let ult  = (ult as f32) / 4.0;
         let lrs  = (lrs as f32) / 4.0;
         let lrt  = (lrt as f32) / 4.0;
 
-        let tile_width = lrs - uls + 1.0;
-        let tile_height = lrt - ult + 1.0;
+        let tile_width  = (lrs - uls) as u32 + 1;
+        let tile_height = (lrt - ult) as u32 + 1;
 
         let rdp_tile    = self.tex.rdp_tiles[tile as usize];
+
+        // adjust_size gives byte size from texel count
         let tile_size   = rdp_tile.size;
         let adjust_size = |texels: u32| match tile_size {
             0 => texels >> 1, // 4b
@@ -2095,9 +2127,11 @@ impl Hle {
         };
 
         // load enough data to cover the entire tile, despite loading too much data
-        // it may be (seems) better than locking rdram once for ever row
+        // it may be (seems, at least) better than locking rdram once for every row
         let image_bytes_per_row = adjust_size(self.tex.width as u32); // width of the texture in DRAM
-        let tile_bytes_per_row  = rdp_tile.line as u32 * 8; // width of the tile to load rounded up to 64-bits
+        // the amount of data to load is determined by the width of the tile
+        let tile_bytes_per_row = adjust_size(tile_width);           // width of the tile in qwords
+        let tile_words_per_row = (tile_bytes_per_row >> 2) as usize;
 
         //println!("image_bytes_per_row={} tile_bytes_per_row={} uls={} ult={} lrs={} lrt={} tile_width={} tile_height={}", 
         //         image_bytes_per_row, tile_bytes_per_row, uls, ult, lrs, lrt, tile_width, tile_height);
@@ -2106,42 +2140,52 @@ impl Hle {
         let start_dram = self.tex.address + (ult as u32) * image_bytes_per_row + adjust_size(uls as u32);
 
         // load enough data to contain the entire tile
-        let load_size = (tile_height as u32 - 1) * image_bytes_per_row + tile_bytes_per_row;
-        let image_data = if valid {
-            self.load_from_rdram(start_dram, load_size)
-        } else {
-            vec![0xF8010001; (load_size >> 2) as usize]
-        };
+        let load_size = (tile_height - 1) * image_bytes_per_row + tile_bytes_per_row;
+        let image_data = self.load_from_rdram(start_dram, load_size);
 
-        let dst = &mut self.tex.tmem[(rdp_tile.tmem << 1) as usize..]; // .tmem is in 64-bit words, tmem[] is 32-bit
+        // .tmem is in 64-bit words, tmem[] is 32-bit
+        let dst = &mut self.tex.tmem[(rdp_tile.tmem << 1) as usize..];
 
         // loop over the rows and swizzle as necessary
         let mut source_offset = 0;
         let mut dest_offset   = 0;
         for y in 0..(tile_height as usize) {
-            let tile_words_per_row = (tile_bytes_per_row >> 2) as usize;
             let mut row = image_data[source_offset..][..tile_words_per_row].to_owned();
-            // increment by one row in DRAM
-            source_offset += (image_bytes_per_row >> 2) as usize;
+            source_offset += (image_bytes_per_row >> 2) as usize; // increment by one row in DRAM
 
-            // swizzle odd rows. NOTE TODO this is only "correct" for RGBA 16b
-            if (y & 0x01) == 1 { 
-                match rdp_tile.size { 
-                    1 => { // 8b
-                    },
-                    2 => { // 16b
+            // store data in TMEM based on size
+            match rdp_tile.size { 
+                1 | 2 => { // 8,16b
+                    if (y & 0x01) == 1 {
                         for r in row.chunks_mut(2) {
                             r.swap(0, 1);
                         }
-                    },
-                    3 => {},
-                    _ => todo!("load tile size {}", rdp_tile.size),
-                }
-            }
+                    }
 
-            dst[dest_offset..][..tile_words_per_row].copy_from_slice(&row);
-            // increment by one row in TMEM
-            dest_offset += tile_words_per_row;
+                    dst[dest_offset..][..tile_words_per_row].copy_from_slice(&row);
+                    // increment by one row in TMEM
+                    dest_offset += tile_words_per_row;
+                },
+
+                3 => { // 32b half is stored in low memory, other half in high memory
+                    let mut i = 0;
+                    for texels in row.chunks_mut(2) {
+                        if (y & 0x01) == 0 {
+                            dst[(( dest_offset+i)   & 0x1FF) | 0x000] = (texels[0] & 0xFFFF0000) | (texels[1] >> 16);
+                            dst[(( dest_offset+i)   & 0x1FF) | 0x200] = (texels[0] << 16)        | (texels[1] & 0x0000FFFF);
+                        } else {
+                            dst[(((dest_offset+i)^1)& 0x1FF) | 0x000] = (texels[0] & 0xFFFF0000) | (texels[1] >> 16);
+                            dst[(((dest_offset+i)^1)& 0x1FF) | 0x200] = (texels[0] << 16)        | (texels[1] & 0x0000FFFF);
+                        }
+                        i += 1;
+                    }
+
+                    // the increment in TMEM is determined by the line value of SETTILE
+                    dest_offset += (rdp_tile.line as usize) << 1;
+                },
+
+                _ => todo!("load tile size {}", rdp_tile.size),
+            }
         }
 
         let texels = (tile_width * tile_height) as u32;
@@ -2382,7 +2426,7 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPFillRectangle({}, {}, {}, {})", self.command_prefix, x0, y0, x1, y1);
 
         // we can only render fill rects when there's a valid viewport
-        let (vx, vy, vw, vh) = match self.current_viewport.clone() {
+        let (vx, _vy, vw, vh) = match self.current_viewport.clone() {
             Some(HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh, .. }) => (vx, vy, vw, vh),
             _ => {
                 // now viewport set?
@@ -2397,32 +2441,38 @@ impl Hle {
 
         // Check if this rectangle is a full-screen (i.e., clear) render
         // and if so, make sure the color is compatible with a fill
-        if x0 == vx as u16 && y0 == vy as u16 && w == vw as u16 && h == vh as u16 {
-            let addr = self.current_render_pass().color_buffer.clone().unwrap();
-            match self.current_color_image_format {
-                Some(HleRenderCommand::DefineColorImage { bpp, .. }) => {
-                    match bpp {
-                        2 => { // 16b
-                            if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) { // can't have alternating colors
-                                // we can't just mark clear_color in the current render pass, because
-                                // the N64 uses the color buffer to clear depth buffers, so we mark this
-                                // address as cleared in a separate buffer and only when next_render_pass() is
-                                // called do we know that the render targets are set
+        if self.other_modes.get_cycle_type() == CycleType::Fill {
+            // Some games letterbox the top and bottom, so let's let them do that even though we
+            // might be clearing area we aren't supposed to... (could be a graphical bug somewhere)
+            let letterbox_size = y0;
+
+            if (x0 == vx as u16 && w == vw as u16) && (h == (vh as u16) - letterbox_size * 2) {
+                let addr = self.current_render_pass().color_buffer.clone().unwrap();
+                match self.current_color_image_format {
+                    Some(HleRenderCommand::DefineColorImage { bpp, .. }) => {
+                        match bpp {
+                            2 => { // 16b
+                                if (self.fill_color >> 16) == (self.fill_color & 0xFFFF) { // can't have alternating colors
+                                    // we can't just mark clear_color in the current render pass, because
+                                    // the N64 uses the color buffer to clear depth buffers, so we mark this
+                                    // address as cleared in a separate buffer and only when next_render_pass() is
+                                    // called do we know that the render targets are set
+                                    trace!(target: "HLE", "clear image ${:08X}", addr);
+                                    self.clear_images.insert(addr, color);
+                                    return;
+                                }
+                            },
+                            3 => { // 32b
+                                // the color isn't important because it's 32b, so any value will do. see note above
                                 trace!(target: "HLE", "clear image ${:08X}", addr);
                                 self.clear_images.insert(addr, color);
                                 return;
-                            }
-                        },
-                        3 => { // 32b
-                            // the color isn't important because it's 32b, so any value will do. see note above
-                            trace!(target: "HLE", "clear image ${:08X}", addr);
-                            self.clear_images.insert(addr, color);
-                            return;
-                        },
-                        _ => {},
-                    }
-                },
-                _ => {},
+                            },
+                            _ => {},
+                        }
+                    },
+                    _ => {},
+                }
             }
         }
 
@@ -2575,7 +2625,7 @@ impl Hle {
         let width = (self.command >> 32) & 0x0FFF;
         let addr  = self.command as u32;
 
-        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr & 0x7FFF_FFFF } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
             self.segments[segment] + (addr & 0x00FF_FFFF)
         };
@@ -2733,6 +2783,15 @@ enum ZMode {
     Decal
 }
 
+#[allow(dead_code)]
+#[derive(Debug,PartialEq)]
+enum CycleType {
+    OneCycle,
+    TwoCycle,
+    Copy,
+    Fill
+}
+
 #[derive(Debug)]
 struct OtherModes {
     lo: u32,
@@ -2757,6 +2816,8 @@ impl OtherModes {
     const TEXTURE_FILTER_MASK  : u32 = 0x03;
     const TLUT_MODE_SHIFT      : u32 = 14;
     const TLUT_MODE_MASK       : u32 = 0x03;
+    const CYCLE_TYPE_SHIFT     : u32 = 20;
+    const CYCLE_TYPE_MASK      : u32 = 0x3;
 
     // LO
     const ALPHA_COMPARE_SHIFT  : u32 = 0;
@@ -2839,6 +2900,16 @@ impl OtherModes {
 
     fn get_depth_update_enable(&self) -> bool {
         ((self.get_render_mode() >> Self::Z_DEPTH_UPDATE_SHIFT) & 0x01) != 0
+    }
+
+    fn get_cycle_type(&self) -> CycleType {
+        match (self.hi >> Self::CYCLE_TYPE_SHIFT) & Self::CYCLE_TYPE_MASK {
+            0 => CycleType::OneCycle,
+            1 => CycleType::TwoCycle,
+            2 => CycleType::Copy,
+            3 => CycleType::Fill,
+            _ => panic!("invalid"),
+        }
     }
 
     fn get_zmode(&self) -> ZMode {
