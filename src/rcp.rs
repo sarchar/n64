@@ -146,10 +146,8 @@ impl Rcp {
         // run DMAs before stepping modules, as they often check for dma completion
         // and this way we can trigger interrupts asap
         while let Some(mut dma_info) = self.should_dma() {
-            if !dma_info.initiator.starts_with("PI-") { // don't display PI-RD64B and PI-WR64B
-                if dma_info.count != 1 {
-                    trace!(target: "DMA", "performing dma: DmaInfo = {:?}", dma_info);
-                }
+            if !dma_info.initiator.starts_with("PI-RD64B") && !dma_info.initiator.starts_with("PI-WR64B") { // don't display PI-RD64B and PI-WR64B
+                trace!(target: "DMA", "performing dma: DmaInfo = {:?}", dma_info);
             }
 
             if let Err(_) = self.do_dma(&mut dma_info) {
@@ -266,8 +264,8 @@ impl Rcp {
             return Ok(());
         }
 
-        let mut source_address = dma_info.source_address & !0x07;
-        let mut dest_address = dma_info.dest_address & !0x07;
+        let mut source_address = dma_info.source_address;
+        let mut dest_address = dma_info.dest_address;
 
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {

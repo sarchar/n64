@@ -532,9 +532,27 @@ impl Addressable for PeripheralInterface {
             let length = if length > (256*1024) { 256 * 1024 } else { length };
             Ok(vec![0u32; (length >> 2) as usize])
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
-            let start = (offset & !0x1000_0000) >> 2;
-            let end = start + (length as usize >> 2);
-            Ok((&self.cartridge_rom[start..end]).to_vec())
+            if (offset & 0x02) != 0 { // 16-bit aligned DMA, slow for now but I think not too common
+                let start = (offset & !0x1000_0000) as usize;
+                let mut r = vec![];
+                for i in (0..(length >> 1) as usize).step_by(2) { // loop over 16-bit reads two at a time
+                    let address = start + i;
+                    let shift = 16 - ((address & 0x02) << 3);
+                    let h0 = (self.cartridge_rom[address >> 2] >> shift) & 0xFFFF;
+                    
+                    let address = start + i + 1;
+                    let shift = 16 - ((address & 0x02) << 3);
+                    let h1 = (self.cartridge_rom[address >> 2] >> shift) & 0xFFFF;
+
+                    r.push((h0 << 16) | h1);
+                }
+                Ok(r)
+            } else { // 32-bit aligned can do memcpy
+                assert!((length & 0x03) == 0); // length needs to be 32-bit (and really 64-bit, since this is going to DRAM)
+                let start = (offset & !0x1000_0000) >> 2;
+                let end = start + (length as usize >> 2);
+                Ok((&self.cartridge_rom[start..end]).to_vec())
+            }
         } else {
             todo!("probably not used ever");
         }
