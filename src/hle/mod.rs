@@ -800,9 +800,9 @@ impl Hle {
         let params = (self.command >> 32) as u8;
         let addr   = self.command as u32;
 
-        let translated_addr = if (addr & 0x8000_0000) != 0 { addr } else {
-            let segment = ((addr >> 24) & 0x7F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+            let segment = ((addr >> 24) & 0x0F) as usize;
+            (self.segments[segment] + (addr & 0x00FF_FFFF)) & 0x007F_FFFF
         };
 
         let push = (params & 0x01) == 0;
@@ -1937,30 +1937,30 @@ impl Hle {
 
         // map screen coordinate to -1..1
         // invert y
-        let scale   = |s, maxs| ((s / maxs) * 2.0) - 1.0;
+        let scale_x = |s, maxs| ((s / maxs) * 2.0) - 1.0;
         let scale_y = |s, maxs| (((s / maxs) * 2.0) - 1.0) * -1.0;
 
         let cur_pos = self.vertices_internal.len() as u16; // save start index
         self.vertices_internal.push(Vertex { // TL
-            position  : [scale(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
+            position  : [scale_x(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
             tex_coords: [uls, ult], 
             color     : [1.0, 0.0, 0.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // TR
-            position  : [scale(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
+            position  : [scale_x(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
             tex_coords: [uls+sw, ult], 
             color     : [0.0, 1.0, 0.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // BL
-            position  : [scale(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
+            position  : [scale_x(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
             tex_coords: [uls, ult+th], 
             color     : [0.0, 0.0, 1.0, 1.0], 
             flags     : 0, 
         });
         self.vertices_internal.push(Vertex { // BR
-            position  : [scale(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
+            position  : [scale_x(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
             tex_coords: [uls+sw, ult+th], 
             color     : [1.0, 0.0, 1.0, 1.0], 
             flags     : 0, 
@@ -2482,12 +2482,13 @@ impl Hle {
 
         // map (0,vx) -> (-1,1)
         // so (rx/vx * 2) - 1
-        let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
+        let scale_x = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
+        let scale_y = |s, maxs| ((((s as f32) / maxs) * 2.0) - 1.0) * -1.0;
         let cur_pos = self.vertices.len() as u16; // save start index
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
+        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
+        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
+        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
+        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
