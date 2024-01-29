@@ -533,7 +533,7 @@ impl App for Game {
         let color_combiner_state_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Color Combiner State Buffer"),
-                size : (ColorCombinerState::size() * 256) as u64,
+                size : (ColorCombinerState::size() * 1024) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }

@@ -1320,7 +1320,6 @@ impl Hle {
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
             }
 
-            //set to 0 to see OoT console logo screen
             if self.disable_textures {
                 vtx.flags &= !VERTEX_FLAG_TEXTURED;
             } else {
@@ -1471,9 +1470,10 @@ impl Hle {
                     let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
                     let address = (tmem_address << 3) + offset;
                     let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-                                                           //
+
                     (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
                 };
+
                 // duplicate the nibble in both halves to give a more gradual flow and maximum
                 // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
                 let v = (src << 4) | src;
@@ -1483,7 +1483,6 @@ impl Hle {
     }
 
     // Convert CI 8b in TMEM to RGBA 32bpp
-    // TODO palettes. just use the color index for now
     fn map_tmem_ci_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
                             line_bytes: u32, plot: F) 
         where 
