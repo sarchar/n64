@@ -293,6 +293,8 @@ impl Cop1 {
                 let cause = (value >> 12) & 0x3F;
                 self.fcr_control_status = value & !0x0003_F000;
                 self.update_cause(cause, false)?;
+                // Restore condition
+                self.condition_signal = ((value >> 23) & 0x01) != 0;
                 Ok(())
             },
 
@@ -993,8 +995,8 @@ impl Cop1 {
         };
 
         let condition = (((self.inst.cond & 0x04) != 0) && lt)
-            | (((self.inst.cond & 0x02) != 0) && eq)
-            | (((self.inst.cond & 0x01) != 0) && unord);
+            || (((self.inst.cond & 0x02) != 0) && eq)
+            || (((self.inst.cond & 0x01) != 0) && unord);
 
         // Set bit 23 in FCR[31] to the condition result
         self.fcr_control_status = (self.fcr_control_status & !0x800000) | ((condition as u64) << 23);
