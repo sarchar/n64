@@ -541,8 +541,8 @@ impl Rsp {
 
                 let dma_info = DmaInfo {
                     initiator     : "RSP-READ(CPU)",
-                    source_address: shared_state.dma_dram,
-                    dest_address  : shared_state.dma_cache | 0x0400_0000,
+                    source_address: (shared_state.dma_dram) & !0x07,
+                    dest_address  : (shared_state.dma_cache | 0x0400_0000) & !0x07,
                     count         : count,
                     length        : length,
                     source_stride : skip,
@@ -579,8 +579,8 @@ impl Rsp {
 
                 let dma_info = DmaInfo {
                     initiator     : "RSP-WRITE(CPU)",
-                    source_address: shared_state.dma_cache | 0x0400_0000,
-                    dest_address  : shared_state.dma_dram,
+                    source_address: (shared_state.dma_cache | 0x0400_0000) & !0x07,
+                    dest_address  : (shared_state.dma_dram) & !0x07,
                     count         : count,
                     length        : length,
                     dest_stride   : skip,
@@ -846,6 +846,8 @@ impl Addressable for Rsp {
     }
 
     fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+        let offset = offset & !7;
+
         if offset < 0x2000 { // I/DRAM
             {
                 let mut mem = self.mem.write().unwrap();
@@ -1593,8 +1595,8 @@ impl RspCpuCore {
 
                         let dma_info = DmaInfo {
                             initiator     : "RSP-READ",
-                            source_address: shared_state.dma_dram,
-                            dest_address  : shared_state.dma_cache | 0x0400_0000,
+                            source_address: (shared_state.dma_dram) & !0x07,
+                            dest_address  : (shared_state.dma_cache | 0x0400_0000) & !0x07,
                             count         : count,
                             length        : length,
                             source_stride : skip,
@@ -1632,8 +1634,8 @@ impl RspCpuCore {
 
                         let dma_info = DmaInfo {
                             initiator     : "RSP-WRITE",
-                            source_address: shared_state.dma_cache | 0x0400_0000,
-                            dest_address  : shared_state.dma_dram,
+                            source_address: (shared_state.dma_cache | 0x0400_0000) & !0x07,
+                            dest_address  : (shared_state.dma_dram) & !0x07,
                             count         : count,
                             length        : length,
                             dest_stride   : skip,
