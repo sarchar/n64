@@ -269,7 +269,7 @@ impl Rcp {
 
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {
-            //info!(target: "DMA", "reading source_address=${:08X} length=${:08X} dest_address=${:08X}", source_address
+            //info!(target: "DMA", "reading source_address=${:08X} length=${:08X} dest_address=${:08X}", source_address, dma_info.length, dest_address);
             let block = self.read_block(source_address as usize, dma_info.length)?;
             source_address += dma_info.length + dma_info.source_stride;
 

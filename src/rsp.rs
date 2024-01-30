@@ -827,18 +827,31 @@ impl Addressable for Rsp {
     }
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
-        if offset < 0x2000 { // I/DRAM
-            let mut mem = self.mem.write().unwrap();
-            let (dram, iram) = mem.split_at_mut(0x1000 >> 2);
-            let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
-            let offset = offset & 0x0FFC;
+        // wrap offset into local memory
+        let mut offset = offset & 0x1FF8;
 
-            let (_, right) = which_mem.split_at_mut(offset >> 2);
+        if offset < 0x2000 { // I/DRAM
+            let mem = self.mem.read().unwrap();
+            let (dram, iram) = mem.split_at(0x1000 >> 2);
+            let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
+            offset &= 0xFF8; // drop the high bit
+
+            let (_, right) = which_mem.split_at(offset >> 2);
             if (length >> 2) as usize <= right.len() {
-                let (left, _) = right.split_at_mut((length >> 2) as usize);
+                let (left, _) = right.split_at((length >> 2) as usize);
                 Ok(left.to_owned())
             } else {
-                todo!("DMA out of RSP mem offset=${:04X} length={}", offset, length)
+                // start with all the data from the right chunk
+                let mut ret = right.to_owned();
+                // and read the rest from the beginning of ram
+                let mut length = length - ret.len() as u32 * 4;
+                while length > 0 {
+                    let amount_to_copy = std::cmp::min(0x1000, length);
+                    let (left, _) = which_mem.split_at((amount_to_copy >> 2) as usize);
+                    ret.extend_from_slice(&left);
+                    length -= amount_to_copy;
+                }
+                Ok(ret)
             }
         } else {
             todo!("DMA out of ${offset:8X}");
@@ -846,14 +859,16 @@ impl Addressable for Rsp {
     }
 
     fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
-        let offset = offset & !7;
+        // wrap offset into local memory
+        let mut offset = offset & 0x1FF8;
 
         if offset < 0x2000 { // I/DRAM
             {
                 let mut mem = self.mem.write().unwrap();
                 let (dram, iram) = mem.split_at_mut(0x1000 >> 2);
                 let which_mem = if (offset & 0x1000) != 0 { iram } else { dram };
-                let offset = offset & 0x0FFC;
+                offset &= 0xFF8; // drop the high bit
+
                 let (_, right) = which_mem.split_at_mut(offset >> 2);
                 if block.len() <= right.len() {
                     let (left, _) = right.split_at_mut(block.len());
