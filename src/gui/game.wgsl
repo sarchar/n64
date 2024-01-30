@@ -236,16 +236,15 @@ fn select_alpha(letter: u32, src: u32, rc: f32, in: VertexOutput) -> f32 {
 
 // (A-B)*C+D
 fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
-    // So ugly.  Why can't I use u8 types in this language?
-    let a0c_source =  color_combiner_state.color1_source / 16777216u;
-    let b0c_source = (color_combiner_state.color1_source / 65536u) % 256u; 
-    let c0c_source = (color_combiner_state.color1_source / 256u) % 256u;
-    let d0c_source =  color_combiner_state.color1_source % 256u;
+    let a0c_source = extractBits(color_combiner_state.color1_source, 24u, 8u);
+    let b0c_source = extractBits(color_combiner_state.color1_source, 16u, 8u);
+    let c0c_source = extractBits(color_combiner_state.color1_source,  8u, 8u);
+    let d0c_source = extractBits(color_combiner_state.color1_source,  0u, 8u);
 
-    let a0a_source =  color_combiner_state.alpha1_source / 16777216u;
-    let b0a_source = (color_combiner_state.alpha1_source / 65536u) % 256u; 
-    let c0a_source = (color_combiner_state.alpha1_source / 256u) % 256u;
-    let d0a_source =  color_combiner_state.alpha1_source % 256u;
+    let a0a_source = extractBits(color_combiner_state.alpha1_source, 24u, 8u);
+    let b0a_source = extractBits(color_combiner_state.alpha1_source, 16u, 8u);
+    let c0a_source = extractBits(color_combiner_state.alpha1_source,  8u, 8u);
+    let d0a_source = extractBits(color_combiner_state.alpha1_source,  0u, 8u);
 
     let a = vec4(select_color(0u, a0c_source, rc.rgb, in), select_alpha(0u, a0a_source, rc.a, in));
     let b = vec4(select_color(1u, b0c_source, rc.rgb, in), select_alpha(1u, b0a_source, rc.a, in));
