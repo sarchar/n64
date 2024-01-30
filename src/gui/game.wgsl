@@ -1,5 +1,9 @@
-const VERTEX_FLAG_TEXTURED     : u32 = 0x01u;
-const VERTEX_FLAG_LINEAR_FILTER: u32 = 0x02u;
+const VERTEX_FLAG_TEXTURED     : u32 = 0x00u;
+const VERTEX_FLAG_LINEAR_FILTER: u32 = 0x01u;
+const VERTEX_FLAG_TEXMODE_S    : u32 = 0x02u;
+const VERTEX_FLAG_TEXMODE_T    : u32 = 0x04u;
+
+const VERTEX_FLAG_TEXMODE_MASK : u32 = 0x03u;
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -77,12 +81,45 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     return out;
 }
 
-fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
-    let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, in.tex_coords);
-    let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, in.tex_coords);
+fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
+    switch(mode) {
+        case 0u: { // NOMIRROR | WRAP
+            // we need to wramp within the (minval,maxval) range
+            let range = maxval - minval;
+            return minval + fract((st - minval) / range) * range;
+        }
+        case 1u: { // MIRROR
+            // TODO mirror might only make sense after maskST and shiftST are implemented
+            return st;
+            //.let range = maxval - minval;
+            //.let wraps = (st - minval) / range;
+            //.let count = u32(trunc(wraps));
+            //.if (extractBits(count, 0u, 1u) == 1u) {
+            //.    return minval + (1.0 - fract(wraps)) * range;
+            //.} else {
+            //.    return minval + fract(wraps) * range;
+            //.}
+        }
+        case 2u: { // CLAMP
+            return clamp(st, minval, maxval);
+        }
+        default: { // invalid, shouldn't happen
+            return 0.0;
+        }
+    }
+}
 
-    if ((in.flags & VERTEX_FLAG_TEXTURED) == VERTEX_FLAG_TEXTURED) {
-        if ((in.flags & VERTEX_FLAG_LINEAR_FILTER) == VERTEX_FLAG_LINEAR_FILTER) {
+fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
+    let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S, 2u);
+    let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T, 2u);
+    let tex_coords = vec2(texcoord(in.tex_coords.x, in.tex_params.x, in.tex_params.y, texmode_s),
+                         texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
+
+    let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords);
+    let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords);
+
+    if (extractBits(in.flags, VERTEX_FLAG_TEXTURED, 1u) == 1u) {
+        if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER, 1u) == 1u) {
             return tex_linear;
         } else {
             return tex_nearest;

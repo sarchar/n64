@@ -1344,9 +1344,9 @@ impl Hle {
 
                 // the texture parameters need to be set to the bounding box of the texture
                 vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;
-                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0;
+                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;
                 vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;
-                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1;
+                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;
 
                 // scale to 0..1 on the mapped texture
                 vtx.tex_coords[0] /= self.mapped_texture_width as f32;
