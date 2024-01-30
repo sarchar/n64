@@ -1973,7 +1973,7 @@ impl Hle {
             _ => {
                 // no viewport set?
                 warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
-                return;
+                (319.0, 239.0)
             },
         };
 
