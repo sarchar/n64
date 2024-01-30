@@ -69,16 +69,43 @@ pub struct F3DZEX2_Vertex {
     pub color_or_normal: [u8; 4],
 }
 
-#[derive(Copy,Clone,Default,Debug)]
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position  : [f32; 4],
-    pub tex_coords: [f32; 2],
     pub color     : [f32; 4],
+    pub tex_coords: [f32; 2],
+    pub tex_params: [f32; 4],
     pub flags     : u32,
 }
 
-const VERTEX_FLAG_TEXTURED     : u32 = 1u32 << 0;
-const VERTEX_FLAG_LINEAR_FILTER: u32 = 1u32 << 1;
+impl Vertex {
+    pub const fn const_default() -> Self {
+        Self {
+            position  : [0.0, 0.0, 0.0, 1.0],
+            color     : [0.0, 0.0, 0.0, 1.0],
+            tex_coords: [0.0, 0.0],
+            tex_params: [0.0, 1.0, 0.0, 1.0],
+            flags     : 0,
+        }
+    }
+}
+
+impl Default for Vertex {
+    fn default() -> Self {
+        Self::const_default()
+    }
+
+}
+
+pub struct VertexFlags;
+impl VertexFlags {
+    pub const TEXTURED     : u32 = 1u32 << 0;
+    pub const LINEAR_FILTER: u32 = 1u32 << 1;
+    pub const TEXMODE_S    : u32 = 1u32 << 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T    : u32 = 1u32 << 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    // next VERTEX_FLAG at "<< 6"
+}
 
 #[allow(non_camel_case_types)]
 pub type F3DZEX2_Matrix = [[i32; 4]; 4];
@@ -314,12 +341,7 @@ impl Hle {
         }
 
         // keep a default vertex in self.vertices_internal in case anything draws before calling G_VTX
-        let vertices_internal = vec![Vertex {
-            position  : [0.0, 0.0, 0.0, 1.0],
-            tex_coords: [0.0, 0.0],
-            color     : [1.0, 0.0, 0.0, 1.0],
-            flags     : 0,
-        }];
+        let vertices_internal = vec![Vertex { color: [1.0, 0.0, 0.0, 1.0], ..Default::default() }];
 
         Self {
             comms: comms,
@@ -1090,6 +1112,12 @@ impl Hle {
                     ((data[1] >> 16) as i16) as f32,
                     1.0,
                 ],
+                color: [
+                    ((data[3] >> 24) as u8) as f32 / 255.0, 
+                    ((data[3] >> 16) as u8) as f32 / 255.0, 
+                    ((data[3] >>  8) as u8) as f32 / 255.0, 
+                    ( data[3]        as u8) as f32 / 255.0,
+                ],
                 tex_coords: [
                     // s,t are S10.5 format, and are scaled by the current s,t scale factors
                     // many games set s and t scale to 0.5, so this coordinate effectively becomes
@@ -1097,13 +1125,7 @@ impl Hle {
                     self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
                     self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
                 ],
-                color: [
-                    ((data[3] >> 24) as u8) as f32 / 255.0, 
-                    ((data[3] >> 16) as u8) as f32 / 255.0, 
-                    ((data[3] >>  8) as u8) as f32 / 255.0, 
-                    ( data[3]        as u8) as f32 / 255.0,
-                ],
-                flags: 0,
+                ..Default::default()
             };
 
             trace!(target: "HLE", "v{}: {:?}", i+vbidx, vtx);
@@ -1320,17 +1342,30 @@ impl Hle {
                 vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
                 vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
+                // the texture parameters need to be set to the bounding box of the texture
+                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;
+                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0;
+                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;
+                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1;
+
                 // scale to 0..1 on the mapped texture
                 vtx.tex_coords[0] /= self.mapped_texture_width as f32;
                 vtx.tex_coords[1] /= self.mapped_texture_height as f32;
+                vtx.tex_params[0] /= self.mapped_texture_width as f32;
+                vtx.tex_params[1] /= self.mapped_texture_width as f32;
+                vtx.tex_params[2] /= self.mapped_texture_height as f32;
+                vtx.tex_params[3] /= self.mapped_texture_height as f32;
             }
 
             if self.disable_textures {
-                vtx.flags &= !VERTEX_FLAG_TEXTURED;
+                vtx.flags &= !VertexFlags::TEXTURED;
             } else {
-                vtx.flags |= VERTEX_FLAG_TEXTURED;
+                vtx.flags |= VertexFlags::TEXTURED 
+                                | ((rdp_tile.clamp_s as u32) << VertexFlags::TEXMODE_S)
+                                | ((rdp_tile.clamp_t as u32) << VertexFlags::TEXMODE_T);
+
                 if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
-                    vtx.flags |= VERTEX_FLAG_LINEAR_FILTER;
+                    vtx.flags |= VertexFlags::LINEAR_FILTER;
                 }
             }
         }   
@@ -1943,27 +1978,27 @@ impl Hle {
         let cur_pos = self.vertices_internal.len() as u16; // save start index
         self.vertices_internal.push(Vertex { // TL
             position  : [scale_x(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
-            tex_coords: [uls, ult], 
             color     : [1.0, 0.0, 0.0, 1.0], 
-            flags     : 0, 
+            tex_coords: [uls, ult], 
+            ..Default::default()
         });
         self.vertices_internal.push(Vertex { // TR
             position  : [scale_x(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
-            tex_coords: [uls+sw, ult], 
             color     : [0.0, 1.0, 0.0, 1.0], 
-            flags     : 0, 
+            tex_coords: [uls+sw, ult], 
+            ..Default::default()
         });
         self.vertices_internal.push(Vertex { // BL
             position  : [scale_x(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
-            tex_coords: [uls, ult+th], 
             color     : [0.0, 0.0, 1.0, 1.0], 
-            flags     : 0, 
+            tex_coords: [uls, ult+th], 
+            ..Default::default()
         });
         self.vertices_internal.push(Vertex { // BR
             position  : [scale_x(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
-            tex_coords: [uls+sw, ult+th], 
             color     : [1.0, 0.0, 1.0, 1.0], 
-            flags     : 0, 
+            tex_coords: [uls+sw, ult+th], 
+            ..Default::default()
         });
 
         let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
@@ -2485,10 +2520,10 @@ impl Hle {
         let scale_x = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
         let scale_y = |s, maxs| ((((s as f32) / maxs) * 2.0) - 1.0) * -1.0;
         let cur_pos = self.vertices.len() as u16; // save start index
-        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TL
-        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // TR
-        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BR
-        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: color, flags: 0, }); // BL
+        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], color: color, ..Default::default() }); // TL
+        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], color: color, ..Default::default() }); // TR
+        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], color: color, ..Default::default() }); // BR
+        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], color: color, ..Default::default() }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
@@ -2509,10 +2544,10 @@ impl Hle {
         let cur_pos = self.vertices.len() as u16; // save start index
 
         // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VERTEX_FLAG_TEXTURED }); // BL
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // TL
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // TR
+        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // BR
+        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // BL
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);

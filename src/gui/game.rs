@@ -15,10 +15,10 @@ use crate::*;
 use gui::{App, AppWindow};
 
 use n64::{SystemCommunication, ButtonState};
-use n64::hle::{HleRenderCommand, HleCommandBuffer, ColorCombinerState};
+use n64::hle::{HleRenderCommand, HleCommandBuffer, ColorCombinerState, Vertex, VertexFlags};
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
-trait UniformData {
+trait ShaderData {
     fn desc() -> wgpu::VertexBufferLayout<'static>;
     fn size() -> usize;
 
@@ -28,7 +28,7 @@ trait UniformData {
 }
 
 // The implementation here needs to match the layout in hle
-impl UniformData for ColorCombinerState {
+impl ShaderData for ColorCombinerState {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ColorCombinerState>() as wgpu::BufferAddress,
@@ -74,35 +74,7 @@ impl UniformData for ColorCombinerState {
     }
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position  : [f32; 4],
-    tex_coords: [f32; 2],
-    color     : [f32; 4],
-    flags     : u32,
-}
-
-// Y texture coordinate is inverted to flip the resulting image
-const GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0, 1.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0, 1.0], tex_coords: [1.0, 0.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0, 1.0], tex_coords: [0.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], color: [0.0, 0.0, 0.0, 0.0], flags: 1, }, // BR
-];
-
-const GAME_TEXTURE_INDICES: &[u16] = &[
-    2, 1, 0,
-    1, 3, 2,
-];
-
-impl Vertex {
-    fn _new() -> Self {
-        Vertex { position: [0.0, 0.0, 0.0, 1.0], tex_coords: [0.0, 0.0], color: [0.0, 0.0, 0.0, 1.0], flags: 0, }
-    }
-}
-
-impl UniformData for Vertex {
+impl ShaderData for Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -113,19 +85,24 @@ impl UniformData for Vertex {
                     shader_location: 0,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute { // tex_coords
+                wgpu::VertexAttribute { // color
                     offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute { // tex_coords
+                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
                 },
-                wgpu::VertexAttribute { // color
-                    offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
-                    shader_location: 2,
+                wgpu::VertexAttribute { // tex_params
+                    offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // flags
-                    offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
-                    shader_location: 3,
+                    offset: std::mem::size_of::<[f32; 14]>() as wgpu::BufferAddress,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ]
@@ -133,10 +110,21 @@ impl UniformData for Vertex {
     }
 
     fn size() -> usize {
-        (std::mem::size_of::<[f32; 10]>() 
+        (std::mem::size_of::<[f32; 14]>() 
          + std::mem::size_of::<u32>()) as usize
     }
 }
+
+// Y texture coordinate is inverted to flip the resulting image
+// default sampler is Nearest, so we just need the textured flag 
+const GAME_TEXTURE_VERTICES: &[Vertex] = &[
+    Vertex { position: [-1.0,  1.0, 0.0, 1.0], tex_coords: [0.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TL
+    Vertex { position: [ 1.0,  1.0, 0.0, 1.0], tex_coords: [1.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TR
+    Vertex { position: [-1.0, -1.0, 0.0, 1.0], tex_coords: [0.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BL
+    Vertex { position: [ 1.0, -1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BR
+];
+
+const GAME_TEXTURE_INDICES: &[u16] = &[2, 1, 0, 1, 3, 2];
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1240,19 +1228,7 @@ impl Game {
                 },
 
                 HleRenderCommand::VertexData(v) => {
-                    let mut vcopy = Vec::new();
-                    for vdata in v.iter() {
-                        let vnew = Vertex {
-                            position  : vdata.position,
-                            tex_coords: vdata.tex_coords,
-                            color     : vdata.color,
-                            flags     : vdata.flags,
-                        };
-                        vcopy.push(vnew);
-                    }
-
-                    let vertices = &vcopy;
-                    appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+                    appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&v));
                 },
 
                 HleRenderCommand::IndexData(mut v) => {
