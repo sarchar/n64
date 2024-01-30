@@ -27,7 +27,6 @@ pub enum HleRenderCommand {
     Noop,
     DefineColorImage { bpp: u8, width: u16, framebuffer_address: u32 },
     DefineDepthImage { framebuffer_address: u32 },
-    Viewport { x: f32, y: f32, z: f32, w: f32, h: f32, d: f32 },
     VertexData(Vec<Vertex>),
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
@@ -138,8 +137,21 @@ pub struct RenderPassState {
     pub reason: Option<String>,
 }
 
+#[derive(Clone,Debug,Default,PartialEq)]
+pub struct Viewport {
+    pub x: f32, 
+    pub y: f32, 
+    pub z: f32, 
+    pub w: f32, 
+    pub h: f32, 
+    pub d: f32,
+}
+
 #[derive(Clone,Debug,Default)]
 pub struct TriangleList {
+    // viewport used in this draw call
+    pub viewport: Option<Viewport>,
+
     // uniform buffer indices to use for this draw list
     // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
     pub matrix_index: u32,
@@ -177,7 +189,7 @@ pub struct Hle {
     current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
     matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use current_matrix
 
-    current_viewport: Option<HleRenderCommand>,
+    current_viewport: Option<Viewport>,
 
     color_images: HashMap<u32, HleRenderCommand>,
     depth_images: HashMap<u32, HleRenderCommand>,
@@ -440,8 +452,8 @@ impl Hle {
                           // RDP state isn't reset from frame to frame
         self.mapped_texture_dirty = false;
 
-        // allow viewport to carry over into other display lists
-        //self.current_viewport = None;
+        self.current_viewport = None;
+
         // keep color and depth images from pass to pass
         //self.current_color_image = None;
         //self.current_color_image_format = None;
@@ -943,37 +955,49 @@ impl Hle {
         match index {
             8 => { // G_VIEWPORT
                 let segment = (addr >> 24) as u8;
-                let translated_addr = if (addr & 0x8000_0000) != 0 { addr } else { 
-                    (addr & 0x00FF_FFFF) + self.segments[segment as usize] 
+                let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
+                    ((addr & 0x00FF_FFFF) + self.segments[segment as usize]) & 0x00FF_FFFF
                 };
 
                 let vp = self.load_from_rdram(translated_addr, size as u32);
-                let frac: [f32; 4] = [0.00, 0.25, 0.5, 0.75];
+
                 let xs = (vp[0] >> 16) as i16;
                 let ys = vp[0] as i16;
                 let zs = (vp[1] >> 16) as i16;
-                let x_scale = (xs >> 2) as f32 + frac[(xs & 3) as usize];
-                let y_scale = (ys >> 2) as f32 + frac[(ys & 3) as usize];
-                let z_scale = (zs >> 2) as f32 + frac[(zs & 3) as usize];
+                let x_scale = (xs as f32) / 4.0;
+                let y_scale = (ys as f32) / 4.0;
+                let z_scale = (zs as f32) / 4.0;
                 let xt = (vp[2] >> 16) as i16;
                 let yt = vp[2] as i16;
                 let zt = (vp[3] >> 16) as i16;
-                let x_translate = (xt >> 2) as f32 + frac[(xt & 3) as usize];
-                let y_translate = (yt >> 2) as f32 + frac[(yt & 3) as usize];
-                let z_translate = (zt >> 2) as f32 + frac[(zt & 3) as usize];
+                let x_translate = (xt as f32) / 4.0;
+                let y_translate = (yt as f32) / 4.0;
+                let z_translate = (zt as f32) / 4.0;
 
                 trace!(target: "HLE", "{} gsSPViewport(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
-                //println!("Viewport {{ vscale: [ {}, {}, {} ], vtrans: [ {}, {}, {} ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
+                trace!(target: "HLE", "Viewport {{ vscale: [ {}, {}, {} ], vtrans: [ {}, {}, {} ] }}    ", x_scale, y_scale, z_scale, x_translate, y_translate, z_translate);
 
-                self.current_viewport = Some(HleRenderCommand::Viewport {
-                    x: -1.0 * x_scale + x_translate,
-                    y: -1.0 * y_scale + y_translate,
-                    z: -1.0 * z_scale + z_translate,
-                    w:  2.0 * x_scale,
-                    h:  2.0 * y_scale,
-                    d:  2.0 * z_scale,
+                let l = -x_scale + x_translate;
+                let w = 2.0 * x_scale;
+                let t = -y_scale + y_translate;
+                let h = 2.0 * y_scale;
+
+                self.current_viewport = Some(Viewport {
+                    x: l, 
+                    y: t,
+                    z: 0.0,
+                    w: w,
+                    h: h,
+                    d: 1.0,
                 });
-                //println!("{:?}", self.current_viewport);
+
+                // if the viewport changed from the current drawcall, we need to move on to a new draw call
+                let vp = self.current_viewport.clone().unwrap();
+                if self.current_triangle_list().viewport.as_ref().is_some_and(|v| *v != vp) {
+                    self.next_triangle_list();
+                }
+
+                trace!(target: "HLE", "Converted viewport: {:?}", self.current_viewport);
             },
 
             10 => { // G_MV_LIGHT
@@ -1259,6 +1283,9 @@ impl Hle {
             // set the render pass
             self.current_render_pass().pass_type = Some(pass_type);
 
+            // set the current viewport on the draw call
+            let viewport = self.current_viewport.clone();
+
             // transfer the current matrix to the uniform buffer but allow a matrix index override
             // you need to set self.matrix_index_override before any add_triangles call that requires it
             let matrix_index = match self.matrix_index_override {
@@ -1290,6 +1317,7 @@ impl Hle {
 
             // set the uniform indices
             let tl = self.current_triangle_list();
+            tl.viewport = viewport;
             tl.matrix_index = matrix_index; // set the matrix index
             tl.color_combiner_state_index = cc_index;
         }
@@ -1941,7 +1969,7 @@ impl Hle {
         trace!(target: "HLE", "{} gsSPTextureRectangle({}, {}, {}, {}, {}, {}, {}, {}, {})", self.command_prefix, ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy);
 
         let (vw, vh) = match self.current_viewport.clone() {
-            Some(HleRenderCommand::Viewport { w: vw, h: vh, .. }) => (vw, vh),
+            Some(Viewport { w: vw, h: vh, .. }) => (vw, vh),
             _ => {
                 // no viewport set?
                 warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
@@ -2462,15 +2490,10 @@ impl Hle {
 
         // we can only render fill rects when there's a valid viewport
         let (vx, _vy, vw, vh) = match self.current_viewport.clone() {
-            Some(HleRenderCommand::Viewport { x: vx, y: vy, w: vw, h: vh, .. }) => (vx, vy, vw, vh),
+            Some(Viewport { x: vx, y: vy, w: vw, h: vh, .. }) => (vx, vy, vw, vh),
             _ => {
-                // now viewport set?
-                if x0 == 0 && y0 == 0 && w == 320 && h == 240 {
-                    (0.0, 0.0, 320.0, 240.0)
-                } else {
-                    warn!(target: "HLE", "gsDPFillRectangle with empty viewport!");
-                    return;
-                }
+                // no viewport set?
+                (0.0, 0.0, 320.0, 240.0)
             },
         };
 

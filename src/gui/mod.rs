@@ -286,7 +286,7 @@ impl AppWindow {
 pub trait App {
     /// Called to create the app
     /// Create your pipeline here
-    fn create(appwnd: &AppWindow, comms: SystemCommunication) -> Self;
+    fn create(appwnd: &AppWindow, comms: SystemCommunication, args: crate::Args) -> Self;
 
     /// Called once per frame to update the internal state of the app
     /// Check key presses and controllers that may affect render() here
@@ -348,7 +348,7 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     comms.mi_interrupts_tx = Some(rx.recv().unwrap());
 
     // start the frontend
-    let mut app = T::create(&appwnd, comms.clone());
+    let mut app = T::create(&appwnd, comms.clone(), args.clone());
 
     // configure imgui to use wgpu 
     let renderer_config = RendererConfig {

@@ -161,6 +161,7 @@ enum ViewMode {
 }
 
 pub struct Game {
+    args: crate::Args,
     comms: SystemCommunication,
 
     check_inputs: bool,
@@ -187,7 +188,6 @@ pub struct Game {
     game_pipeline: wgpu::RenderPipeline,
     game_pipeline_no_depth: wgpu::RenderPipeline,
 
-    game_viewport: HleRenderCommand,
     game_modelview: cgmath::Matrix4<f32>,
     game_projection: cgmath::Matrix4<f32>,
 
@@ -219,7 +219,7 @@ pub struct Game {
 }
 
 impl App for Game {
-    fn create(appwnd: &AppWindow, mut comms: SystemCommunication) -> Self {
+    fn create(appwnd: &AppWindow, mut comms: SystemCommunication, args: crate::Args) -> Self {
         let device: &wgpu::Device = appwnd.device();
 
         // create the main color texture render shader
@@ -676,6 +676,7 @@ impl App for Game {
 
         let hle_command_buffer = std::mem::replace(&mut comms.hle_command_buffer, None).unwrap();
         Self {
+            args: args,
             comms: comms,
             check_inputs: true, 
 
@@ -701,7 +702,6 @@ impl App for Game {
             game_pipeline: game_pipeline,
             game_pipeline_no_depth: game_pipeline_no_depth,
 
-            game_viewport: HleRenderCommand::Noop,
             game_modelview: cgmath::Matrix4::identity(),
             game_projection: cgmath::Matrix4::identity(),
 
@@ -1220,13 +1220,6 @@ impl Game {
                 },
 
 
-                HleRenderCommand::Viewport { .. } => {
-                    //println!("Viewport: {:?}", cmd);
-                    self.game_viewport = cmd;
-                    //render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
-                    //render_pass.set_viewport(0.0, 0.0, 1024.0, 768.0, 0.0, 1.0);
-                },
-
                 HleRenderCommand::VertexData(v) => {
                     appwnd.queue().write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&v));
                 },
@@ -1327,12 +1320,25 @@ impl Game {
                         });
 
                         render_pass.set_pipeline(pipeline);
-                        //render_pass.set_viewport(0.0, 0.0, 1280.0, 960.0, 0.0, 1.0);
                         render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
                         for dl in rp.draw_list {
+                            let scale = self.args.window_scale as f32;
+                            match dl.viewport {
+                                Some(vp) => {
+                                    let xr = vp.x / 320.0;
+                                    let yr = vp.y / 240.0;
+                                    let wr = vp.w / 320.0;
+                                    let hr = vp.h / 240.0;
+                                    render_pass.set_viewport(320.0*scale*xr, 240.0*scale*yr, 320.0*scale*wr, 240.0*scale*hr, 0.0, 1.0);
+                                },
+                                None => {
+                                    render_pass.set_viewport(0.0, 0.0, 320.0*scale, 240.0*scale, 0.0, 1.0);
+                                }
+                            }
+
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix and CC state is used for the triangle list
                             render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
                                                                                   ColorCombinerState::offset_of(dl.color_combiner_state_index as usize) as wgpu::DynamicOffset]);
@@ -1383,7 +1389,6 @@ impl Game {
     }
 
     fn reset_render_state(&mut self) {
-        self.game_viewport   = HleRenderCommand::Noop;
         self.game_modelview  = cgmath::Matrix4::identity();
         self.game_projection = cgmath::Matrix4::identity();
     }
