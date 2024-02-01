@@ -11,11 +11,20 @@ use winit::event::VirtualKeyCode;
 use wgpu::util::DeviceExt;
 use cgmath::prelude::*;
 
+use image::GenericImageView;
+
 use crate::*;
 use gui::{App, AppWindow};
 
 use n64::{SystemCommunication, ButtonState};
-use n64::hle::{HleRenderCommand, HleCommandBuffer, ColorCombinerState, Vertex, VertexFlags};
+use n64::hle::{
+    self,
+    HleRenderCommand, 
+    HleCommandBuffer, 
+    ColorCombinerState, 
+    Vertex, VertexFlags, 
+};
+
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
 trait ShaderData {
@@ -193,8 +202,11 @@ pub struct Game {
 
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    diffuse_texture: wgpu::Texture,
-    diffuse_bind_group: wgpu::BindGroup,
+
+    game_texture_bind_group_layout: wgpu::BindGroupLayout,
+    game_textures: Vec<wgpu::Texture>,
+    game_texture_bind_groups: Vec<wgpu::BindGroup>,
+    game_texture_map: HashMap<u32, usize>,
 
     mvp_buffer: wgpu::Buffer,
     mvp_bind_group: wgpu::BindGroup,
@@ -382,48 +394,32 @@ impl App for Game {
             }
         );
 
-        //let diffuse_bytes = include_bytes!("happy-tree.png");
-        //let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
-        //let diffuse_rgba  = diffuse_image.to_rgba8();
-        //let diffuse_dim   = diffuse_image.dimensions();
+        let game_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Game Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("game.wgsl").into()),
+        });
 
-        let texture_size = wgpu::Extent3d {
-            width: 2048, //diffuse_dim.0,
-            height: 2048, //diffuse_dim.1,
-            depth_or_array_layers: 1,
-        };
-
-        let diffuse_texture = device.create_texture(
-            &wgpu::TextureDescriptor {
-                size: texture_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                label: Some("Game Diffuse Texture"),
-                view_formats: &[],
+        let mvp_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Game MVP Matrix Buffer"),
+                size : (MvpPacked::size() * 1024) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             }
         );
 
-        //appwnd.queue().write_texture(
-        //    wgpu::ImageCopyTexture {
-        //        texture: &diffuse_texture,
-        //        mip_level: 0,
-        //        origin: wgpu::Origin3d::ZERO,
-        //        aspect: wgpu::TextureAspect::All,
-        //    },
-        //    &diffuse_rgba,
-        //    wgpu::ImageDataLayout {
-        //        offset: 0,
-        //        bytes_per_row: Some(4 * texture_size.width),
-        //        rows_per_image: Some(teture_size.height),
-        //    },
-        //    texture_size,
-        //);
+        let color_combiner_state_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Color Combiner State Buffer"),
+                size : (ColorCombinerState::size() * 1024) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
 
-        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Game Texture Bind Group"),
+        // Need both filtering and nonfiltered samplers for this texture
+        let game_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Game Texture Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry { // TextureView
                     binding: 0,
@@ -460,75 +456,7 @@ impl App for Game {
             ],
         });
 
-        let diffuse_texture_view_linear = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter    : wgpu::FilterMode::Linear,
-            min_filter    : wgpu::FilterMode::Linear,
-            mipmap_filter : wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let diffuse_texture_view_nearest = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter    : wgpu::FilterMode::Nearest,
-            min_filter    : wgpu::FilterMode::Nearest,
-            mipmap_filter : wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let diffuse_bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
-            label: Some("Game Diffuse Bind Group"),
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view_linear),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler_linear),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view_nearest),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler_nearest),
-                },
-            ],
-        });
-
-        let game_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Game Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("game.wgsl").into()),
-        });
-
-        let mvp_buffer = device.create_buffer(
-            &wgpu::BufferDescriptor {
-                label: Some("Game MVP Matrix Buffer"),
-                size : (MvpPacked::size() * 1024) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }
-        );
-
-        let color_combiner_state_buffer = device.create_buffer(
-            &wgpu::BufferDescriptor {
-                label: Some("Color Combiner State Buffer"),
-                size : (ColorCombinerState::size() * 1024) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }
-        );
-
-        let mvp_bind_group_layout = device.create_bind_group_layout(
+    let mvp_bind_group_layout = device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 label: Some("Game MVP Matrix Bind Group Layout"),
                 entries: &[
@@ -586,7 +514,7 @@ impl App for Game {
         let game_render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Game Pipeline Layout"),
             bind_group_layouts: &[
-                &texture_bind_group_layout,
+                &game_texture_bind_group_layout,
                 &mvp_bind_group_layout,
             ],
             push_constant_ranges: &[],
@@ -675,7 +603,7 @@ impl App for Game {
         );
 
         let hle_command_buffer = std::mem::replace(&mut comms.hle_command_buffer, None).unwrap();
-        Self {
+        let mut ret = Self {
             args: args,
             comms: comms,
             check_inputs: true, 
@@ -708,8 +636,10 @@ impl App for Game {
             vertex_buffer: vertex_buffer,
             index_buffer: index_buffer,
 
-            diffuse_texture: diffuse_texture,
-            diffuse_bind_group: diffuse_bind_group,
+            game_texture_bind_group_layout: game_texture_bind_group_layout,
+            game_textures: vec![],
+            game_texture_bind_groups: vec![],
+            game_texture_map: HashMap::new(),
 
             mvp_buffer: mvp_buffer,
             mvp_bind_group: mvp_bind_group,
@@ -731,7 +661,44 @@ impl App for Game {
 
             capture_display_list: 0,
             capturing_display_list: false,
-        }
+        };
+
+        let null_texture_bytes = include_bytes!("nulltexture.png");
+        let null_texture_image = image::load_from_memory(null_texture_bytes).unwrap();
+        let null_texture_rgba  = null_texture_image.to_rgba8();
+        let null_texture_dim   = null_texture_image.dimensions();
+
+        let null_texture_size = wgpu::Extent3d {
+            width: null_texture_dim.0,
+            height: null_texture_dim.1,
+            depth_or_array_layers: 1,
+        };
+
+        let _ = ret.new_game_texture(appwnd, &hle::MappedTexture {
+            id: u32::MAX,
+            width: null_texture_size.width as usize,
+            height: null_texture_size.height as usize,
+            ..Default::default()
+        });
+
+        let null_texture = ret.game_textures.get(0).unwrap();
+        appwnd.queue().write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &null_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &null_texture_rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * null_texture_size.width),
+                rows_per_image: Some(null_texture_size.height),
+            },
+            null_texture_size,
+        );
+
+        ret
     }
 
     fn update(&mut self, appwnd: &AppWindow, _delta_time: f32) {
@@ -1187,6 +1154,78 @@ impl Game {
         (texture, bind_group)
     }
 
+    fn new_game_texture(&mut self, appwnd: &AppWindow, mapped_texture: &hle::MappedTexture) -> usize {
+        let texture_size = wgpu::Extent3d {
+            width: mapped_texture.width as u32,
+            height: mapped_texture.height as u32,
+            depth_or_array_layers: 1,
+        };
+
+        let texture_index = self.game_textures.len();
+        let device = appwnd.device();
+        let texture = device.create_texture(
+            &wgpu::TextureDescriptor {
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("Game Texture Cache"),
+                view_formats: &[],
+            }
+        );
+
+        let texture_view_linear = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter    : wgpu::FilterMode::Linear,
+            min_filter    : wgpu::FilterMode::Linear,
+            mipmap_filter : wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let texture_view_nearest = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter    : wgpu::FilterMode::Nearest,
+            min_filter    : wgpu::FilterMode::Nearest,
+            mipmap_filter : wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Game Texture Cache Bind Group"),
+            layout: &self.game_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&texture_view_nearest),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler_nearest),
+                },
+            ],
+        });
+
+        self.game_textures.push(texture);
+        self.game_texture_bind_groups.push(bind_group);
+        assert!(self.game_textures.len() == self.game_texture_bind_groups.len());
+        texture_index
+    }
 
     fn render_game(&mut self, appwnd: &AppWindow) {
         'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
@@ -1245,23 +1284,40 @@ impl Game {
                     appwnd.queue().write_buffer(&self.color_combiner_state_buffer, 0, bytemuck::cast_slice(&v));
                 },
 
-                HleRenderCommand::TextureData { tmem } => {
+                HleRenderCommand::UpdateTexture(mapped_texture_lock) => {
+                    let mapped_texture = mapped_texture_lock.read().unwrap();
+
+                    let texture = {
+                        match self.game_texture_map.get(&mapped_texture.id) {
+                            Some(ti) => {
+                                self.game_textures.get(*ti).unwrap()
+                            },
+
+                            // new id, new texture
+                            None => {
+                                let ti = self.new_game_texture(appwnd, &mapped_texture);
+                                self.game_texture_map.insert(mapped_texture.id, ti);
+                                self.game_textures.get(ti).unwrap()
+                            }
+                        }
+                    };
+
                     appwnd.queue().write_texture(
                         wgpu::ImageCopyTexture {
-                            texture: &self.diffuse_texture,
+                            texture: texture,
                             mip_level: 0,
                             origin: wgpu::Origin3d::ZERO,
                             aspect: wgpu::TextureAspect::All,
                         },
-                        bytemuck::cast_slice(&tmem),
+                        bytemuck::cast_slice(&mapped_texture.data),
                         wgpu::ImageDataLayout {
                             offset: 0,
-                            bytes_per_row: Some(4 * 2048),
-                            rows_per_image: Some(2048),
+                            bytes_per_row: Some(4 * mapped_texture.width as u32),
+                            rows_per_image: Some(mapped_texture.height as u32),
                         },
                         wgpu::Extent3d {
-                            width: 2048,
-                            height: 2048,
+                            width: mapped_texture.width as u32,
+                            height: mapped_texture.height as u32,
                             depth_or_array_layers: 1,
                         },
                     );
@@ -1320,7 +1376,6 @@ impl Game {
                         });
 
                         render_pass.set_pipeline(pipeline);
-                        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
@@ -1328,15 +1383,23 @@ impl Game {
                             let scale = self.args.window_scale as f32;
                             match dl.viewport {
                                 Some(vp) => {
-                                    let xr = vp.x / 320.0;
-                                    let yr = vp.y / 240.0;
-                                    let wr = vp.w / 320.0;
-                                    let hr = vp.h / 240.0;
-                                    render_pass.set_viewport(320.0*scale*xr, 240.0*scale*yr, 320.0*scale*wr, 240.0*scale*hr, 0.0, 1.0);
+                                    render_pass.set_viewport(scale*vp.x, scale*vp.y, scale*vp.w, scale*vp.h, 0.0, 1.0);
                                 },
                                 None => {
                                     render_pass.set_viewport(0.0, 0.0, 320.0*scale, 240.0*scale, 0.0, 1.0);
                                 }
+                            }
+
+                            // set the selected texture index, which even if not textured should be set to some value
+                            // texture 0 is the null texture
+                            if let Some(mti) = dl.mapped_texture_index {
+                                if let Some(ti) = self.game_texture_map.get(&mti) {
+                                    render_pass.set_bind_group(0, &self.game_texture_bind_groups.get(*ti).unwrap(), &[]);
+                                } else {
+                                    render_pass.set_bind_group(0, &self.game_texture_bind_groups.get(0).unwrap(), &[]);
+                                }
+                            } else {
+                                render_pass.set_bind_group(0, &self.game_texture_bind_groups.get(0).unwrap(), &[]);
                             }
 
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix and CC state is used for the triangle list

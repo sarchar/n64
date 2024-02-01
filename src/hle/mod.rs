@@ -31,7 +31,7 @@ pub enum HleRenderCommand {
     IndexData(Vec<u16>),
     MatrixData(Vec<Matrix4<f32>>),
     ColorCombinerStateData(Vec<ColorCombinerState>),
-    TextureData { tmem: Vec<u8> },
+    UpdateTexture(Arc<RwLock<MappedTexture>>),
     RenderPass(RenderPassState),
     Sync,
 }
@@ -152,6 +152,9 @@ pub struct TriangleList {
     // viewport used in this draw call
     pub viewport: Option<Viewport>,
 
+    // texture map for this draw call
+    pub mapped_texture_index: Option<u32>,
+
     // uniform buffer indices to use for this draw list
     // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
     pub matrix_index: u32,
@@ -220,13 +223,8 @@ pub struct Hle {
     tex: TextureState,
 
     // mapped textures
-    mapped_texture_data: Vec<u8>,
-    mapped_texture_width: u32,
-    mapped_texture_height: u32,
-    mapped_texture_alloc_x: u32,
-    mapped_texture_alloc_y: u32,
-    mapped_texture_alloc_max_h: u32,
-    mapped_texture_dirty: bool,
+    // when a new texture overflows in y, we start a new texture
+    mapped_textures: Vec<Arc<RwLock<MappedTexture>>>,
 
     command_table: [DLCommand; 256],
     command_address: u32,
@@ -240,11 +238,23 @@ pub struct Hle {
     view_texture_map: u32,
 }
 
+#[derive(Debug,Default)]
+pub struct MappedTexture {
+    pub id         : u32,
+    pub data       : Vec<u8>,
+    pub width      : usize,
+    pub height     : usize,
+    pub alloc_x    : u32,
+    pub alloc_y    : u32,
+    pub alloc_max_h: u32,
+    pub dirty      : bool,
+}
+
 struct TextureState {
     tmem: [u32; 1024], // 4KiB of TMEM
 
     // texture map cache
-    mapped_texture_cache: HashMap<u64, (u32, u32)>,
+    mapped_texture_cache: HashMap<u64, (u32, u32, u32)>,
 
     // gSPTexture
     s_scale: f32,  // s coordinate texture scale
@@ -279,7 +289,8 @@ struct RdpTileState {
     ul     : (f32, f32), // upper-left coordinate
     lr     : (f32, f32), // lower-right coordinate, for wrapping
 
-    mapped_coordinates: Option<(u32, u32)>,
+    // texture_index, texture_x, texture_y
+    mapped_coordinates: Option<(u32, u32, u32)>,
 }
 
 impl TextureState {
@@ -337,25 +348,19 @@ impl ColorCombinerState {
     }
 }
 
+pub const TEXSIZE_WIDTH: usize = 512;
+pub const TEXSIZE_HEIGHT: usize = 512;
+
 const DL_FETCH_SIZE: u32 = 168; // dunno why 168 is used so much on LoZ, but let's use it too?
 
 type DLCommand = fn(&mut Hle) -> ();
 
 impl Hle {
     pub fn new(comms: SystemCommunication, hle_command_buffer: Arc<HleCommandBuffer>) -> Self {
-        let texwidth = 2048;
-        let texheight = 2048;
-        let mut texdata = Vec::new();
-        texdata.resize(std::mem::size_of::<u32>()*texwidth*texheight, 0);
-        for v in texdata.chunks_mut(4) {
-            v[1] = 0x7F;
-            v[3] = 0xFF;
-        }
-
         // keep a default vertex in self.vertices_internal in case anything draws before calling G_VTX
         let vertices_internal = vec![Vertex { color: [1.0, 0.0, 0.0, 1.0], ..Default::default() }];
 
-        Self {
+        let mut ret = Self {
             comms: comms,
 
             hle_command_buffer: hle_command_buffer,
@@ -405,13 +410,7 @@ impl Hle {
 
             tex: TextureState::new(),
 
-            mapped_texture_data: texdata,
-            mapped_texture_width: texwidth as u32,
-            mapped_texture_height: texheight as u32,
-            mapped_texture_alloc_x: 0,
-            mapped_texture_alloc_y: 0,
-            mapped_texture_alloc_max_h: 0,
-            mapped_texture_dirty: false,
+            mapped_textures: vec![],
 
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
@@ -422,7 +421,33 @@ impl Hle {
 
             disable_textures: false,
             view_texture_map: 0,
+        };
+
+        ret.new_texture_cache();
+        ret
+    }
+
+    fn new_texture_cache(&mut self) {
+        let mut texdata = Vec::new();
+        texdata.resize(std::mem::size_of::<u32>()*TEXSIZE_WIDTH*TEXSIZE_HEIGHT, 0);
+        // At some point this for loop should go away (for performance?)
+        // and we can either all 0 or all 0xFF in the resize() call
+        for v in texdata.chunks_mut(4) {
+            v[1] = 0x7F;
+            v[3] = 0xFF;
         }
+
+        let index = self.mapped_textures.len();
+
+        let mt = MappedTexture {
+            id    : index as u32,
+            data  : texdata,
+            width : TEXSIZE_WIDTH,
+            height: TEXSIZE_HEIGHT,
+            ..Default::default()
+        };
+
+        self.mapped_textures.push(Arc::new(RwLock::new(mt)));
     }
 
     fn reset_display_list(&mut self) {
@@ -450,7 +475,10 @@ impl Hle {
         self.clear_color_happened = false;
         self.tex.reset(); // TODO this probably shouldn't be done, as it looks like
                           // RDP state isn't reset from frame to frame
-        self.mapped_texture_dirty = false;
+
+        for mtl in &self.mapped_textures {
+            mtl.write().unwrap().dirty = false;
+        }
 
         self.current_viewport = None;
 
@@ -646,10 +674,19 @@ impl Hle {
         // find the maximum length of all the texture fetches
         //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
 
-        // Yay, a 4MB copy every frame. This needs to change to Arc<>
-        if self.mapped_texture_dirty {
-            self.send_hle_render_command(HleRenderCommand::TextureData { tmem: self.mapped_texture_data.clone() });
-            self.mapped_texture_dirty = false;
+        // upload dirty textures
+        let dirty_textures: Vec<_> = self.mapped_textures.iter().map(|mtl| {
+            let mt = mtl.read().unwrap();
+            if mt.dirty {
+                Some(HleRenderCommand::UpdateTexture(mtl.clone()))
+            } else {
+                None
+            }
+        }).collect();
+        for dt in dirty_textures {
+            if let Some(cmd) = dt {
+                self.send_hle_render_command(cmd);
+            }
         }
 
         // finalize current render pass
@@ -850,10 +887,8 @@ impl Hle {
         trace!(target: "HLE", "{} gsSPMatrix(0x{:08X}, {})", self.command_prefix, addr, s);
 
         let mtx_data = self.load_from_rdram(translated_addr, 64);
-        //let mut mtx: F3DZEX2_Matrix = [[0i32; 4]; 4];
-        //let mut fmtx = [[0f32; 4]; 4];
 
-        // incoming data (numbers are the whole part, letters the fractional part):
+        // incoming data (0-9a-f are whole part, g-v are the fractional parts)
         // 00001111 22223333 44445555 66667777
         // 88889999 aaaabbbb ccccdddd eeeeffff
         // gggghhhh iiiijjjj kkkkllll mmmmnnnn
@@ -900,7 +935,6 @@ impl Hle {
             // (if there were no triangles yet, this call this does nothing)
             self.next_triangle_list();
         }
-
     }
 
     fn handle_popmtx(&mut self) { // G_POPMTX
@@ -1050,7 +1084,7 @@ impl Hle {
         }
     }
 
-    fn handle_culldl(&mut self) {
+    fn handle_culldl(&mut self) { // G_CULLDL
         let vfirst = ((self.command >> 32) as u16) >> 1;
         let vlast  = (self.command as u16) >> 1;
 
@@ -1064,7 +1098,7 @@ impl Hle {
         // if entirely outside of viewspace, execute gsSPEndDisplayList()
     }
 
-    fn handle_branch_z(&mut self) {
+    fn handle_branch_z(&mut self) { // G_BRANCH_Z
         let addr = self.rdp_half_hi;
 
         let vbidx = ((self.command >> 32) & 0xFFF) >> 1;
@@ -1267,13 +1301,31 @@ impl Hle {
         // set pass type for the new render pass (or one that is None)
         self.current_render_pass().pass_type = Some(pass_type);
 
-        // check if any uniforms change and start a new draw call
+        // check if any states change to start a new draw call
         if self.current_triangle_list().num_indices != 0 {
             // if the matrix index requested is different than the current matrix
             if let Some(matrix_index_override) = self.matrix_index_override {
                 if self.current_triangle_list().matrix_index != matrix_index_override { // must be valid here
                     // pass type is the same, draw calls exist, matrix changed, we need a new list
                     self.next_triangle_list();
+                }
+            }
+
+            // if the mapped texture index has changed, switch to a new draw call
+            if !self.tex.enabled && self.current_triangle_list().mapped_texture_index.is_some() { 
+                // textures have been disabled
+                self.next_triangle_list();
+            } else if self.tex.enabled {
+                if self.current_triangle_list().mapped_texture_index.is_none() {
+                    // textures have been enabled
+                    self.next_triangle_list();
+                } else {
+                    let ti = self.current_triangle_list().mapped_texture_index.unwrap();
+                    // tile.mapped_coordinates must be set (you have to call map_current_texture()
+                    // before adding textured triangles)
+                    if ti != self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates.unwrap().0 {
+                        self.next_triangle_list();
+                    }
                 }
             }
         }
@@ -1299,6 +1351,15 @@ impl Hle {
                 },
             };
 
+            // set the mapped texture index for this draw call
+            let mapped_texture_index = {
+                let rdp_tile = &self.tex.rdp_tiles[self.tex.tile as usize];
+                match rdp_tile.mapped_coordinates {
+                    Some((ti, _, _)) => Some(ti),
+                    _ => None,
+                }
+            };
+
             // transfer the current combiner state to the uniform buffer
             let cc_index = if self.color_combiner_states.len() == 0 {
                 self.color_combiner_states.push(self.current_color_combiner_state);
@@ -1319,6 +1380,7 @@ impl Hle {
             let tl = self.current_triangle_list();
             tl.viewport = viewport;
             tl.matrix_index = matrix_index; // set the matrix index
+            tl.mapped_texture_index = mapped_texture_index;
             tl.color_combiner_state_index = cc_index;
         }
 
@@ -1364,25 +1426,26 @@ impl Hle {
             let current_tile = self.tex.tile;
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
 
-            if let Some((mx, my)) = rdp_tile.mapped_coordinates {
+            if let Some((ti, mx, my)) = rdp_tile.mapped_coordinates {
                 // texture coordinate needs to be shifted by the tile's upper left position,
                 // and also shifted to the location in the mapped texture
                 vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
                 vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
                 // the texture parameters need to be set to the bounding box of the texture
-                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;
-                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;
-                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;
-                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;
+                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;        // x start
+                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;  // x end
+                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;        // y start
+                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;  // y end
 
                 // scale to 0..1 on the mapped texture
-                vtx.tex_coords[0] /= self.mapped_texture_width as f32;
-                vtx.tex_coords[1] /= self.mapped_texture_height as f32;
-                vtx.tex_params[0] /= self.mapped_texture_width as f32;
-                vtx.tex_params[1] /= self.mapped_texture_width as f32;
-                vtx.tex_params[2] /= self.mapped_texture_height as f32;
-                vtx.tex_params[3] /= self.mapped_texture_height as f32;
+                let mt = self.mapped_textures.get(ti as usize).unwrap().read().unwrap();
+                vtx.tex_coords[0] /= mt.width as f32;
+                vtx.tex_coords[1] /= mt.height as f32;
+                vtx.tex_params[0] /= mt.width as f32;
+                vtx.tex_params[1] /= mt.width as f32;
+                vtx.tex_params[2] /= mt.height as f32;
+                vtx.tex_params[3] /= mt.height as f32;
             }
 
             if self.disable_textures {
@@ -1403,45 +1466,67 @@ impl Hle {
         Some((self.vertices.get(index).unwrap(), index as u16))
     }
 
-    fn allocate_mapped_texture_space(&mut self, width: u32, height: u32) -> (u32, u32) {
+    fn allocate_mapped_texture_space(&mut self, width: u32, height: u32) -> (u32, u32, u32) {
         trace!("allocating texture space for {}x{} tile", width, height);
+        assert!(width < (TEXSIZE_WIDTH as u32) && height < (TEXSIZE_HEIGHT as u32));
 
         // TODO I guess I need some spacial tree structure to allocate rectangular regions.
         // It wouldn't really need to be super space efficient, just not needlessly wasteful.
         // Modern gpus have tons of ram to work with.
         
-        // For now, we allocate left to right, top to bottom. To move from row to row, we keep
-        // track of the tallest texture
-        if (self.mapped_texture_width - self.mapped_texture_alloc_x) < width {
-            // move down and to the beginning of the row
-            self.mapped_texture_alloc_x = 0;
-            self.mapped_texture_alloc_y += self.mapped_texture_alloc_max_h;
-            // reset max h for this row
-            self.mapped_texture_alloc_max_h = 0;
+        // loop over mapped textures in reverse order looking for space before allocating new textures
+        let mut i = self.mapped_textures.len() - 1;
+        loop {
+            let fits = {
+                let mut mt = self.mapped_textures.get(i).unwrap().write().unwrap();
+
+                // For now, we allocate left to right, top to bottom. To move from row to row, we keep
+                // track of the tallest texture
+                if ((mt.width as u32) - mt.alloc_x) < width {
+                    // move down and to the beginning of the row
+                    mt.alloc_x = 0;
+                    mt.alloc_y += mt.alloc_max_h;
+
+                    // reset max h for this row
+                    mt.alloc_max_h = 0;
+                }
+
+                // if Y doesn't fit then we ran out of space
+                !(((mt.height as u32) - mt.alloc_y) < height)
+            };
+
+            // check another texture if it doesn't fit
+            if !fits {
+                if i > 0 {
+                    i -= 1;
+                    continue;
+                } 
+
+                // otherwise create a new texture and then it definitely fits
+                self.new_texture_cache();
+                i = self.mapped_textures.len() - 1; // index of the newly created texture
+            }
+
+            // update values and return result
+            let mut mt = self.mapped_textures.get(i).unwrap().write().unwrap();
+            let rx = mt.alloc_x; // texture start position
+            let ry = mt.alloc_y;
+            mt.alloc_x += width;
+            if height > mt.alloc_max_h {
+                mt.alloc_max_h = height;
+            }
+
+            mt.dirty = true;
+
+            break (i as u32, rx, ry);
         }
-
-        if (self.mapped_texture_height - self.mapped_texture_alloc_y) < height {
-            // out of space!
-            panic!("out of mapped texture space");
-        }
-
-        let rx = self.mapped_texture_alloc_x;
-        let ry = self.mapped_texture_alloc_y;
-        self.mapped_texture_alloc_x += width;
-        if height > self.mapped_texture_alloc_max_h {
-            self.mapped_texture_alloc_max_h = height;
-        }
-
-        self.mapped_texture_dirty = true;
-
-        (rx, ry)
     }
 
     // Convert CI 4b in TMEM to RGBA 32bpp
     fn map_tmem_ci_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
 
         let tlut_mode = self.other_modes.get_tlut_mode();
 
@@ -1487,16 +1572,16 @@ impl Hle {
                         [255, 0, 0, 255]
                     },
                 };
-                plot(self, x, y, &p);
+                plot(x, y, &p);
             }
         }
     }
 
     // Convert IA 4b in TMEM to RGBA 32bpp
     fn map_tmem_ia_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
 
         for y in 0..texture_height {
             for x in 0..texture_width {
@@ -1517,16 +1602,16 @@ impl Hle {
                 // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
                 let c = src >> 1;
                 let v = (c << 5) | (c << 2) | (c >> 1);
-                plot(self, x, y, &[v as u8, v as u8, v as u8, if (src & 0x01) != 0 { 255 } else { 0 }]);
+                plot(x, y, &[v as u8, v as u8, v as u8, if (src & 0x01) != 0 { 255 } else { 0 }]);
             }
         }
     }
 
     // Convert I 4b in TMEM to RGBA 32bpp
     fn map_tmem_i_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
@@ -1545,16 +1630,16 @@ impl Hle {
                 // duplicate the nibble in both halves to give a more gradual flow and maximum
                 // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
                 let v = (src << 4) | src;
-                plot(self, x, y, &[v as u8, v as u8, v as u8, v as u8]);
+                plot(x, y, &[v as u8, v as u8, v as u8, v as u8]);
             }
         }
     }
 
     // Convert CI 8b in TMEM to RGBA 32bpp
     fn map_tmem_ci_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
 
         let tlut_mode = self.other_modes.get_tlut_mode();
 
@@ -1598,16 +1683,16 @@ impl Hle {
                     },
                 };
 
-                plot(self, x, y, &p);
+                plot(x, y, &p);
             }
         }
     }
 
     // Convert IA 8b in TMEM to RGBA 32bpp
     fn map_tmem_ia_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
 
         for y in 0..texture_height {
             for x in 0..texture_width {
@@ -1627,16 +1712,16 @@ impl Hle {
                 let c = src >> 4;
                 let v = (c << 4) | c;
                 let a = src & 0x0F;
-                plot(self, x, y, &[v as u8, v as u8, v as u8, ((a << 4) | a) as u8]);
+                plot(x, y, &[v as u8, v as u8, v as u8, ((a << 4) | a) as u8]);
             }
         }
     }
 
     // Convert I 8b in TMEM to RGBA 32bpp
     fn map_tmem_i_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
@@ -1651,16 +1736,16 @@ impl Hle {
 
                     (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
                 };
-                plot(self, x, y, &[src as u8, src as u8, src as u8, src as u8]);
+                plot(x, y, &[src as u8, src as u8, src as u8, src as u8]);
             }
         }
     }
 
     // Convert IA 16b in TMEM to RGBA 32bpp
     fn map_tmem_ia_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F) 
+                            line_bytes: u32, mut plot: F) 
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
 
         for y in 0..texture_height {
             for x in 0..texture_width {
@@ -1679,7 +1764,7 @@ impl Hle {
 
                 let c = src >> 8;
                 let a = src & 0xFF;
-                plot(self, x, y, &[c as u8, c as u8, c as u8, a as u8]);
+                plot(x, y, &[c as u8, c as u8, c as u8, a as u8]);
             }
         }
     }
@@ -1687,9 +1772,9 @@ impl Hle {
 
     // Convert RGBA 16b in TMEM to RGBA 32bpp
     fn map_tmem_rgba_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F)
+                            line_bytes: u32, mut plot: F)
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
+            F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
@@ -1706,16 +1791,16 @@ impl Hle {
                 let g = ((src >>  6) & 0x1F) as u8;
                 let b = ((src >>  1) & 0x1F) as u8;
                 let a = (src & 0x01) != 0;
-                plot(self, x, y, &[(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), if a {255} else {0}]);
+                plot(x, y, &[(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), if a {255} else {0}]);
             }
         }
     }
 
     fn map_tmem_rgba_32b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, plot: F)
+                            line_bytes: u32, mut plot: F)
         where 
-            F: Fn(&mut Self, u32, u32, &[u8]) {
-        println!("texture_width={}", texture_width);
+            F: FnMut(u32, u32, &[u8]) {
+
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
@@ -1737,7 +1822,7 @@ impl Hle {
                     let b = (self.tex.tmem[(address >> 2) as usize | 0x200] >> shift) & 0xFFFF;
                     (a << 16) | b
                 };
-                plot(self, x, y, &src.to_be_bytes());
+                plot(x, y, &src.to_be_bytes());
             }
         }
     }
@@ -1794,52 +1879,62 @@ impl Hle {
             }
         };
 
-        if let Some((mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
+        if let Some((ti, mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
             //println!("saw crc=${:X} before", crc);
             let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
-            current_tile.mapped_coordinates = Some((*mx, *my));
+            current_tile.mapped_coordinates = Some((*ti, *mx, *my));
             return;
         }
 
         // we need to duplicate the top row and left column of every texture so that "clamping"
         // works for bilinear filters.
-        let (mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+1, texture_height+1);
-        info!(target: "HLE", "allocated texture space at {},{} for texture size {}x{} (crc=${:X})", mx, my, texture_width, texture_height, crc);
+        let (ti, mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+1, texture_height+1);
+        info!(target: "HLE", "allocated texture space at {},{} in ti={} for texture size {}x{} (crc=${:X})", mx, my, ti, texture_width, texture_height, crc);
 
         // coordinates that the polys use will be increased by 1 to accomodate the duplicate texture data
         mx += 1;
         my += 1;
 
+        // we need to take the mapped texture out of the array so we don't keep a mutable reference to self
+        // don't take the data directly either, since the render thread might be about to read it
+        let mapped_texture_lock = {
+            std::mem::replace(self.mapped_textures.get_mut(ti as usize).unwrap(),
+                              Arc::new(RwLock::new(MappedTexture::default())))
+        };
+        let mut mapped_texture = mapped_texture_lock.write().unwrap();
+
+        let mtw = mapped_texture.width as u32;
+        let texdata = &mut mapped_texture.data;
+
         // now we need to copy the texture from tmem to mapped texture space, converting
         // before formats and unswizzling odd rows. this plot fuction shifts x and y right/down by
         // 1, and will duplicate a pixel if x == 0 or y == 0
-        let mtw = self.mapped_texture_width;
         let calc_offset = |x, y| (4 * (((my + y) * mtw) + (mx + x))) as usize; // *4 => sizeof(u32)
-        let plot = |myself: &mut Self, x: u32, y: u32, color: &[u8]| {
+        let plot = move |x: u32, y: u32, color: &[u8]| {
             let offset = calc_offset(x, y);
             {
-                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             }
 
             // copy color into (-1,-1)
             if x == 0 && y == 0 {
                 let offset = offset - 4*(mtw as usize + 1);
-                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             } 
 
             // copy color into (-1, y)
             if x == 0 {
                 let offset = offset - 4; // sizeof(u32)
-                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             } 
 
             // copy color into (x, -1)
             if y == 0 {
                 let offset = offset - 4*mtw as usize; // sizeof(u32)
-                let mapped_texture_dest = &mut myself.mapped_texture_data[offset as usize..][..4];
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             }
         };
@@ -1887,10 +1982,14 @@ impl Hle {
             },
         };
 
+        // put the mapped texture back into the array
+        drop(mapped_texture);
+        let _ = std::mem::replace(self.mapped_textures.get_mut(ti as usize).unwrap(), mapped_texture_lock);
+
         // mapped tile needs to be used to transform upcoming texture coordinates
         let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
-        current_tile.mapped_coordinates = Some((mx, my));
-        self.tex.mapped_texture_cache.insert(crc, (mx, my));
+        current_tile.mapped_coordinates = Some((ti, mx, my));
+        self.tex.mapped_texture_cache.insert(crc, (ti, mx, my));
     }
 
     fn handle_tri1(&mut self) { // G_TRI1
@@ -1995,6 +2094,8 @@ impl Hle {
         // apparently textures don't have to be enabled with gSPTexture to use TextureRectangle..
         let old_enabled = self.tex.enabled;
         self.tex.enabled = true;
+        let old_tile = self.tex.tile;
+        self.tex.tile = tile;
 
         self.map_current_texture();
 
@@ -2034,11 +2135,12 @@ impl Hle {
         let (_, v2) = self.make_final_vertex((cur_pos+2) as usize).unwrap();
         let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
 
-        self.tex.enabled = old_enabled;
-
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);
         self.add_triangles(RenderPassType::FillRectangles, &[v0, v1, v2, v1, v2, v3]);
+
+        self.tex.enabled = old_enabled;
+        self.tex.tile = old_tile;
     }
 
     fn handle_settilesize(&mut self) { // G_SETTILESIZE
