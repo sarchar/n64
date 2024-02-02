@@ -2322,14 +2322,20 @@ impl Hle {
             match rdp_tile.size { 
                 1 | 2 => { // 8,16b
                     if (y & 0x01) == 1 {
+                        // if tile_words_per_row was odd, extend with one blank word
+                        if (tile_words_per_row % 2) == 1 {
+                            row.push(0);
+                        }
+                        // now swap for TMEM layout
                         for r in row.chunks_mut(2) {
                             r.swap(0, 1);
                         }
                     }
 
-                    dst[dest_offset..][..tile_words_per_row].copy_from_slice(&row);
+                    dst[dest_offset..][..row.len()].copy_from_slice(&row);
+
                     // increment by one row in TMEM
-                    dest_offset += tile_words_per_row;
+                    dest_offset += (rdp_tile.line as usize) << 1;
                 },
 
                 3 => { // 32b half is stored in low memory, other half in high memory
