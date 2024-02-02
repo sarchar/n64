@@ -1235,8 +1235,8 @@ impl Game {
                     ..
                 } => {
                     if !self.game_render_textures.contains_key(&addr) {
-                        let width = appwnd.surface_config().width;
-                        let height = appwnd.surface_config().height;
+                        let width = (self.args.window_scale as u32) * 320;
+                        let height = (self.args.window_scale as u32) * 240;
                         let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", addr).as_str(), width, height, false, false);
                         self.game_render_textures.insert(addr, texture);
                         self.game_render_texture_bind_groups.insert(addr, bind_group);
@@ -1249,8 +1249,8 @@ impl Game {
                     ..
                 } => {
                     if !self.game_depth_textures.contains_key(&addr) {
-                        let width = appwnd.surface_config().width;
-                        let height = appwnd.surface_config().height;
+                        let width = (self.args.window_scale as u32) * 320;
+                        let height = (self.args.window_scale as u32) * 240;
                         let (texture, bind_group) = self.create_depth_texture(appwnd, format!("${:08X}", addr).as_str(), width, height);
                         self.game_depth_textures.insert(addr, texture);
                         self.game_depth_texture_bind_groups.insert(addr, bind_group);
