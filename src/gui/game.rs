@@ -99,19 +99,24 @@ impl ShaderData for Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute { // tex_coords
-                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                wgpu::VertexAttribute { // normal
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute { // tex_coords
+                    offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute { // tex_params
-                    offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
-                    shader_location: 3,
+                    offset: std::mem::size_of::<[f32; 13]>() as wgpu::BufferAddress,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // flags
-                    offset: std::mem::size_of::<[f32; 14]>() as wgpu::BufferAddress,
-                    shader_location: 4,
+                    offset: std::mem::size_of::<[f32; 17]>() as wgpu::BufferAddress,
+                    shader_location: 5,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ]
@@ -119,7 +124,7 @@ impl ShaderData for Vertex {
     }
 
     fn size() -> usize {
-        (std::mem::size_of::<[f32; 14]>() 
+        (std::mem::size_of::<[f32; 17]>() 
          + std::mem::size_of::<u32>()) as usize
     }
 }
@@ -769,10 +774,17 @@ impl App for Game {
                 ef.view_texture_map = (ef.view_texture_map + 1) % 5;
             }
 
+            // CTLR+L to disable lighting (and view normals as if they're the model color)
+            if appwnd.input().key_pressed(VirtualKeyCode::L) {
+                let mut ef = self.comms.emulation_flags.write().unwrap();
+                ef.disable_lighting = !ef.disable_lighting;
+            }
+
             // CTRL+P to print one frame of displaylists
             if appwnd.input().key_pressed(VirtualKeyCode::P) {
                 self.capture_display_list = 1;
             }
+
         }
 
         // Reset

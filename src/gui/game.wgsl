@@ -27,9 +27,10 @@ var<uniform> color_combiner_state: ColorCombinerState;
 struct VertexInput {
     @location(0) position  : vec4<f32>,
     @location(1) color     : vec4<f32>,
-    @location(2) tex_coords: vec2<f32>,
-    @location(3) tex_params: vec4<f32>,
-    @location(4) flags     : u32,
+    @location(2) normal    : vec3<f32>,
+    @location(3) tex_coords: vec2<f32>,
+    @location(4) tex_params: vec4<f32>,
+    @location(5) flags     : u32,
 };
 
 struct VertexOutput {
@@ -90,7 +91,8 @@ fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
         }
         case 1u: { // MIRROR
             // TODO mirror might only make sense after maskST and shiftST are implemented
-            return st;
+            let d = st - minval;
+            return maxval - d;
             //.let range = maxval - minval;
             //.let wraps = (st - minval) / range;
             //.let count = u32(trunc(wraps));
@@ -173,7 +175,7 @@ fn select_color(letter: u32, src: u32, rc: vec3<f32>, in: VertexOutput) -> vec3<
                 // TODO CCMUX_K4
                 // TODO CCMUX_COMBINED_ALPHA
                 default: {
-                    return vec3(0.0, 1.0, 0.0);
+                    return vec3(1.0, 1.0, 0.0);
                 }
             }
         }

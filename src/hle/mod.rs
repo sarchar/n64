@@ -73,6 +73,7 @@ pub struct F3DZEX2_Vertex {
 pub struct Vertex {
     pub position  : [f32; 4],
     pub color     : [f32; 4],
+    pub normal    : [f32; 3],
     pub tex_coords: [f32; 2],
     pub tex_params: [f32; 4],
     pub flags     : u32,
@@ -83,6 +84,7 @@ impl Vertex {
         Self {
             position  : [0.0, 0.0, 0.0, 1.0],
             color     : [0.0, 0.0, 0.0, 1.0],
+            normal    : [1.0, 0.0, 0.0],
             tex_coords: [0.0, 0.0],
             tex_params: [0.0, 1.0, 0.0, 1.0],
             flags     : 0,
@@ -103,7 +105,8 @@ impl VertexFlags {
     pub const LINEAR_FILTER  : u32 = 1u32 << 1;
     pub const TEXMODE_S_SHIFT: u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     pub const TEXMODE_T_SHIFT: u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    // next VERTEX_FLAG at "<< 6"
+    pub const LIT            : u32 = 1u32 << 6;
+    // next VERTEX_FLAG at "<< 7"
 }
 
 #[allow(non_camel_case_types)]
@@ -175,6 +178,8 @@ pub struct Hle {
     dl_stack: Vec<DLStackEntry>,
     segments: [u32; 16],
 
+    geometry_mode: u32,
+
     // RDP Other Modes
     other_modes: OtherModes,
 
@@ -226,6 +231,9 @@ pub struct Hle {
     // when a new texture overflows in y, we start a new texture
     mapped_textures: Vec<Arc<RwLock<MappedTexture>>>,
 
+    // lighting
+    ambient_light_color: [f32; 3],
+
     command_table: [DLCommand; 256],
     command_address: u32,
     command: u64,
@@ -236,6 +244,7 @@ pub struct Hle {
     // copied emulation flags 
     disable_textures: bool,
     view_texture_map: u32,
+    disable_lighting: bool,
 }
 
 #[derive(Debug,Default)]
@@ -370,6 +379,8 @@ impl Hle {
             dl_stack: vec![],
             segments: [0u32; 16],
 
+            geometry_mode: 0,
+
             other_modes: OtherModes::default(),
 
             vertices_internal: vertices_internal,
@@ -412,6 +423,8 @@ impl Hle {
 
             mapped_textures: vec![],
 
+            ambient_light_color: [1.0; 3],
+
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
             command: 0,
@@ -421,6 +434,7 @@ impl Hle {
 
             disable_textures: false,
             view_texture_map: 0,
+            disable_lighting: false,
         };
 
         ret.new_texture_cache();
@@ -459,6 +473,7 @@ impl Hle {
         self.indices.clear();
         self.matrices.clear();
         self.matrix_stack.clear();
+        self.geometry_mode = 1 << 19; // G_CLIPPING is on by default
         self.current_matrix = Matrix4::identity();
         self.matrix_index_override = None;
         self.current_projection_matrix = Matrix4::identity();
@@ -480,6 +495,8 @@ impl Hle {
             mtl.write().unwrap().dirty = false;
         }
 
+        self.ambient_light_color = [1.0; 3];
+
         self.current_viewport = None;
 
         // keep color and depth images from pass to pass
@@ -497,6 +514,7 @@ impl Hle {
         let ef = self.comms.emulation_flags.read().unwrap();
         self.disable_textures = ef.disable_textures;
         self.view_texture_map = ef.view_texture_map;
+        self.disable_lighting = ef.disable_lighting;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -1035,7 +1053,27 @@ impl Hle {
             },
 
             10 => { // G_MV_LIGHT
-                trace!(target: "HLE", "{} gsSPLight...?", self.command_prefix);
+                trace!(target: "HLE", "{} gsSPLight(size={}, address=${:08X})", self.command_prefix, size, addr);
+
+                let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
+                    let segment = (addr >> 24) as u8;
+                    ((addr & 0x00FF_FFFF) + self.segments[segment as usize]) & 0x00FF_FFFF
+                };
+
+                let light_data = self.load_from_rdram(translated_addr, size as u32);
+
+                let num_lights = size / 16; // Light structure is 16 bytes long
+
+                // the last light is the ambient color
+                let ambient_data = &light_data[((16 * (num_lights - 1)) as usize) >> 2..];
+
+                self.ambient_light_color = [
+                    (((ambient_data[0] >> 24) as u8) as f32) / 255.0,
+                    (((ambient_data[0] >> 16) as u8) as f32) / 255.0,
+                    (((ambient_data[0] >>  8) as u8) as f32) / 255.0,
+                ];
+
+                trace!(target: "HLE", "amblient light color = {:?}", self.ambient_light_color);
             },
 
             14 => { // G_MV_MATRIX
@@ -1163,27 +1201,59 @@ impl Hle {
             let data = &vtx_data[(vtx_size * i as usize) >> 2..];
 
             // convert F3DZEX2_Vertex to Vertex
-            let vtx = Vertex {
-                position: [
-                    ((data[0] >> 16) as i16) as f32, 
-                    ( data[0]        as i16) as f32, 
-                    ((data[1] >> 16) as i16) as f32,
-                    1.0,
-                ],
-                color: [
-                    ((data[3] >> 24) as u8) as f32 / 255.0, 
-                    ((data[3] >> 16) as u8) as f32 / 255.0, 
-                    ((data[3] >>  8) as u8) as f32 / 255.0, 
-                    ( data[3]        as u8) as f32 / 255.0,
-                ],
-                tex_coords: [
-                    // s,t are S10.5 format, and are scaled by the current s,t scale factors
-                    // many games set s and t scale to 0.5, so this coordinate effectively becomes
-                    // S9.6, and ranges -512..511
-                    self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
-                    self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
-                ],
-                ..Default::default()
+            let vtx = if self.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // G_LIGHTING
+                // Lighting disabled, we have vertex colors
+                Vertex {
+                    position: [
+                        ((data[0] >> 16) as i16) as f32, 
+                        ( data[0]        as i16) as f32, 
+                        ((data[1] >> 16) as i16) as f32,
+                        1.0,
+                    ],
+                    color: [
+                        ((data[3] >> 24) as u8) as f32 / 255.0, 
+                        ((data[3] >> 16) as u8) as f32 / 255.0, 
+                        ((data[3] >>  8) as u8) as f32 / 255.0, 
+                        ( data[3]        as u8) as f32 / 255.0,
+                    ],
+                    tex_coords: [
+                        // s,t are S10.5 format, and are scaled by the current s,t scale factors
+                        // many games set s and t scale to 0.5, so this coordinate effectively becomes
+                        // S9.6, and ranges -512..511
+                        self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
+                        self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
+                    ],
+                    ..Default::default()
+                }
+            } else {
+                // Lighting enabled, so we have a normal and lights
+                Vertex {
+                    position: [
+                        ((data[0] >> 16) as i16) as f32, 
+                        ( data[0]        as i16) as f32, 
+                        ((data[1] >> 16) as i16) as f32,
+                        1.0,
+                    ],
+                    color: [
+                        self.ambient_light_color[0],
+                        self.ambient_light_color[1],
+                        self.ambient_light_color[2],
+                        // Alpha is still present
+                        (data[3] as u8) as f32 / 255.0,
+                    ],
+                    normal: [
+                        1.0, // ((data[3] >> 24) as u8) as f32 / 255.0, 
+                        0.0, // ((data[3] >> 16) as u8) as f32 / 255.0, 
+                        0.0, // ((data[3] >>  8) as u8) as f32 / 255.0, 
+                        // ( data[3]        as u8) as f32 / 255.0,
+                    ],
+                    tex_coords: [
+                        self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
+                        self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
+                    ],
+                    flags: VertexFlags::LIT,
+                    ..Default::default()
+                }
             };
 
             trace!(target: "HLE", "v{}: {:?}", i+vbidx, vtx);
@@ -1462,7 +1532,14 @@ impl Hle {
             }
         }   
 
+        // adjust color according to G_SHADE. If shading is not enabled, the color value is not
+        // passed to the RDP.
+        if (self.geometry_mode & 0x04) == 0 { // G_SHADE
+            vtx.color = [ 0.0, 0.0, 0.0, 0.0 ];
+        }
+
         let index = self.vertices.len();
+        trace!(target: "HLE", "final: {:?}", vtx);
         self.vertices.push(vtx);
         Some((self.vertices.get(index).unwrap(), index as u16))
     }
@@ -2013,6 +2090,13 @@ impl Hle {
         let (_iv, v2) = self.make_final_vertex(*vi as usize).unwrap();
         //println!("iv2: {:?}", _iv);
 
+        // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
+        // all other vertices take the color of the first vertex
+        if (self.geometry_mode & 0x0020_0000) == 0 { // G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
+            self.vertices[v1 as usize].color = self.vertices[v0 as usize].color;
+            self.vertices[v2 as usize].color = self.vertices[v0 as usize].color;
+        }
+
         // place indices into draw list
         self.add_triangles(RenderPassType::DrawTriangles, &[v0, v1, v2]);
     }
@@ -2043,6 +2127,15 @@ impl Hle {
         let vi = self.vertex_stack.get(v12 as usize).unwrap();
         let (_, v12) = self.make_final_vertex(*vi as usize).unwrap();
 
+        // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
+        // all other vertices take the color of the first vertex
+        if (self.geometry_mode & 0x0020_0000) == 0 { // G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
+            self.vertices[v01 as usize].color = self.vertices[v00 as usize].color;
+            self.vertices[v02 as usize].color = self.vertices[v00 as usize].color;
+            self.vertices[v11 as usize].color = self.vertices[v10 as usize].color;
+            self.vertices[v12 as usize].color = self.vertices[v10 as usize].color;
+        }
+
         self.add_triangles(RenderPassType::DrawTriangles, &[v00, v01, v02, v10, v11, v12]);
     }
 
@@ -2072,7 +2165,7 @@ impl Hle {
             Some(Viewport { w: vw, h: vh, .. }) => (vw, vh),
             _ => {
                 // no viewport set?
-                warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
+                //warn!(target: "HLE", "gsSPTextureRectangle with empty viewport!");
                 (319.0, 239.0)
             },
         };
@@ -2420,6 +2513,8 @@ impl Hle {
         } else {} {
             trace!(target: "HLE", "{} gsSPGeometryMode(0x{:08X}, 0x{:08X})", self.command_prefix, clearbits, setbits);
         }
+
+        self.geometry_mode = (self.geometry_mode & !clearbits) | setbits;
     }
 
     fn handle_rdploadsync(&mut self) { // G_RDPLOADSYNC

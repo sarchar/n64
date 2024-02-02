@@ -1,9 +1,10 @@
 struct VertexInput {
     @location(0) position  : vec4<f32>,
     @location(1) color     : vec4<f32>,
-    @location(2) tex_coords: vec2<f32>,
-    @location(3) tex_params: vec4<f32>,
-    @location(4) position  : u32,
+    @location(2) normal    : vec3<f32>,
+    @location(3) tex_coords: vec2<f32>,
+    @location(4) tex_params: vec4<f32>,
+    @location(5) position  : u32,
 };
 
 struct VertexOutput {
