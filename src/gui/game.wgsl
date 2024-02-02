@@ -1,7 +1,7 @@
-const VERTEX_FLAG_TEXTURED     : u32 = 0x00u;
-const VERTEX_FLAG_LINEAR_FILTER: u32 = 0x01u;
-const VERTEX_FLAG_TEXMODE_S    : u32 = 0x02u;
-const VERTEX_FLAG_TEXMODE_T    : u32 = 0x04u;
+const VERTEX_FLAG_TEXTURED_SHIFT     : u32 = 0x00u;
+const VERTEX_FLAG_LINEAR_FILTER_SHIFT: u32 = 0x01u;
+const VERTEX_FLAG_TEXMODE_S_SHIFT    : u32 = 0x02u;
+const VERTEX_FLAG_TEXMODE_T_SHIFT    : u32 = 0x04u;
 
 const VERTEX_FLAG_TEXMODE_MASK : u32 = 0x03u;
 
@@ -110,16 +110,16 @@ fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
 }
 
 fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
-    let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S, 2u);
-    let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T, 2u);
+    let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S_SHIFT, 2u);
+    let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T_SHIFT, 2u);
     let tex_coords = vec2(texcoord(in.tex_coords.x, in.tex_params.x, in.tex_params.y, texmode_s),
-                         texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
+                          texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
 
     let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords);
     let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords);
 
-    if (extractBits(in.flags, VERTEX_FLAG_TEXTURED, 1u) == 1u) {
-        if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER, 1u) == 1u) {
+    if (extractBits(in.flags, VERTEX_FLAG_TEXTURED_SHIFT, 1u) == 1u) {
+        if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER_SHIFT, 1u) == 1u) {
             return tex_linear;
         } else {
             return tex_nearest;

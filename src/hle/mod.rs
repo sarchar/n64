@@ -99,10 +99,10 @@ impl Default for Vertex {
 
 pub struct VertexFlags;
 impl VertexFlags {
-    pub const TEXTURED     : u32 = 1u32 << 0;
-    pub const LINEAR_FILTER: u32 = 1u32 << 1;
-    pub const TEXMODE_S    : u32 = 1u32 << 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const TEXMODE_T    : u32 = 1u32 << 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXTURED       : u32 = 1u32 << 0;
+    pub const LINEAR_FILTER  : u32 = 1u32 << 1;
+    pub const TEXMODE_S_SHIFT: u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T_SHIFT: u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     // next VERTEX_FLAG at "<< 6"
 }
 
@@ -1433,17 +1433,18 @@ impl Hle {
                 vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
                 // the texture parameters need to be set to the bounding box of the texture
-                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;        // x start
-                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;  // x end
-                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;        // y start
-                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;  // y end
+                // mx,my correspond to the upper left coordinate (rdp_tile.ul) of the tile
+                vtx.tex_params[0] = mx as f32;        // x start
+                vtx.tex_params[1] = mx as f32 + (rdp_tile.lr.0 - rdp_tile.ul.0) + 1.0;  // x end
+                vtx.tex_params[2] = my as f32;        // y start
+                vtx.tex_params[3] = my as f32 + (rdp_tile.lr.1 - rdp_tile.ul.1) + 1.0;  // y end
 
                 // scale to 0..1 on the mapped texture
                 let mt = self.mapped_textures.get(ti as usize).unwrap().read().unwrap();
-                vtx.tex_coords[0] /= mt.width as f32;
+                vtx.tex_coords[0] /= mt.width  as f32;
                 vtx.tex_coords[1] /= mt.height as f32;
-                vtx.tex_params[0] /= mt.width as f32;
-                vtx.tex_params[1] /= mt.width as f32;
+                vtx.tex_params[0] /= mt.width  as f32;
+                vtx.tex_params[1] /= mt.width  as f32;
                 vtx.tex_params[2] /= mt.height as f32;
                 vtx.tex_params[3] /= mt.height as f32;
             }
@@ -1452,8 +1453,8 @@ impl Hle {
                 vtx.flags &= !VertexFlags::TEXTURED;
             } else {
                 vtx.flags |= VertexFlags::TEXTURED 
-                                | ((rdp_tile.clamp_s as u32) << VertexFlags::TEXMODE_S)
-                                | ((rdp_tile.clamp_t as u32) << VertexFlags::TEXMODE_T);
+                                | ((rdp_tile.clamp_s as u32) << VertexFlags::TEXMODE_S_SHIFT)
+                                | ((rdp_tile.clamp_t as u32) << VertexFlags::TEXMODE_T_SHIFT);
 
                 if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
                     vtx.flags |= VertexFlags::LINEAR_FILTER;
@@ -1855,6 +1856,7 @@ impl Hle {
         // but I'm not sure where the height of the texture would come from
 
         // tile bounds are inclusive of texels, so add 1 in each dim
+        // TODO I guess when these change we end up with a different crc and so a new upload
         let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) as u32) + 1;
         let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
 
@@ -1945,7 +1947,6 @@ impl Hle {
             },
 
             (0, 3) => { // RGBA_32b
-                // TODO ideally this would just be a direct memcpy, so we need unswizzled data in tmem
                 self.map_tmem_rgba_32b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
 
@@ -2155,7 +2156,7 @@ impl Hle {
         rdp_tile.ul = ((uls as f32) / 4.0, (ult as f32) / 4.0);
         rdp_tile.lr = ((lrs as f32) / 4.0, (lrt as f32) / 4.0);
 
-        trace!(target: "HLE", "{} gsDPSetTileSize({}, {} [{}], {} [{}], {} [{}], {} [{}])", 
+        trace!(target: "HLE", "{} gsDPSetTileSize(tile={}, uls={} [{}], ult={} [{}], lrs={} [{}], lrt={} [{}])", 
                self.command_prefix, tile, uls, rdp_tile.ul.0, ult, rdp_tile.ul.1, lrs, rdp_tile.lr.0, lrt, rdp_tile.lr.1);
     }
 
