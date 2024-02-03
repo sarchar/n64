@@ -130,9 +130,6 @@ pub struct RenderPassState {
     pub clear_color: Option<[f32; 4]>,
     pub clear_depth: bool,
 
-    pub depth_compare_enable: bool,
-    pub depth_write: bool,
-
     // draw_list an array of triangle lists, where each triangle shares common state
     pub draw_list: Vec<TriangleList>,
 
@@ -154,6 +151,10 @@ pub struct Viewport {
 pub struct TriangleList {
     // viewport used in this draw call
     pub viewport: Option<Viewport>,
+
+    // pipeline state for this draw call
+    pub depth_compare_enable: bool,
+    pub depth_write: bool,
 
     // texture map for this draw call
     pub mapped_texture_index: Option<u32>,
@@ -752,14 +753,14 @@ impl Hle {
         // run each render pass
         for i in 0..self.render_passes.len() {
             let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
-            //println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
-            //println!("rp{} pass_type={:?} rp.color_buffer={:?} depth_buffer={:?} rp.clear_depth={:?} rp.depth_compare_enable={:?} rp.depth_write={:?} draw_list.len={}", 
-            //         i, rp.pass_type, rp.color_buffer, rp.depth_buffer, rp.clear_depth, rp.depth_compare_enable, rp.depth_write, rp.draw_list.len());
+            println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
+            println!("rp{} pass_type={:?} rp.color_buffer={:?} depth_buffer={:?} rp.clear_depth={:?} draw_list.len={}", 
+                     i, rp.pass_type, rp.color_buffer, rp.depth_buffer, rp.clear_depth, rp.draw_list.len());
             self.send_hle_render_command(HleRenderCommand::RenderPass(rp));
         }
 
         self.send_hle_render_command(HleRenderCommand::Sync);
-        //println!("sync");
+        println!("sync");
     }
 
     fn current_display_list_address(&mut self) -> u32 {
@@ -1266,15 +1267,10 @@ impl Hle {
     }
         
     fn update_render_pass_state(&mut self) {
-        let depth_compare_enable = self.other_modes.get_depth_compare_enable();
-        let depth_write          = self.other_modes.get_depth_update_enable();
-
         let color_image = self.current_color_image;
         let depth_image = self.current_depth_image;
 
         let rp = self.current_render_pass();
-        rp.depth_compare_enable = depth_compare_enable;
-        rp.depth_write          = depth_write;
         rp.color_buffer         = color_image;
         rp.depth_buffer         = depth_image;
     }
@@ -1320,9 +1316,9 @@ impl Hle {
         match self.current_render_pass().pass_type {
             // no depth on FillRectangles
             Some(RenderPassType::FillRectangles) => {
+                // disabling the depth buffer makes the draw calls 
+                // depth_write/compare variables go unused
                 self.current_render_pass().depth_buffer = None;
-                self.current_render_pass().depth_compare_enable = false;
-                self.current_render_pass().depth_write = false;
             },
 
             Some(RenderPassType::DrawTriangles) => {},
@@ -1402,6 +1398,10 @@ impl Hle {
             // set the current viewport on the draw call
             let viewport = self.current_viewport.clone();
 
+            // set the pipeline state
+            let depth_compare_enable = self.other_modes.get_depth_compare_enable();
+            let depth_write          = self.other_modes.get_depth_update_enable();
+
             // transfer the current matrix to the uniform buffer but allow a matrix index override
             // you need to set self.matrix_index_override before any add_triangles call that requires it
             let matrix_index = match self.matrix_index_override {
@@ -1443,9 +1443,12 @@ impl Hle {
 
             trace!(target: "HLE", "CC State: {:?}", self.color_combiner_states[cc_index as usize]);
 
-            // set the uniform indices
+            // set all the state values
+            // now with num_indices > 0, they can't change. a new draw call is needed
             let tl = self.current_triangle_list();
             tl.viewport = viewport;
+            tl.depth_compare_enable = depth_compare_enable;
+            tl.depth_write = depth_write;
             tl.matrix_index = matrix_index; // set the matrix index
             tl.mapped_texture_index = mapped_texture_index;
             tl.color_combiner_state_index = cc_index;
@@ -2570,14 +2573,14 @@ impl Hle {
     }
 
     // start a new render pass if any of the critical render states change, i.e., depth compare is disabled
-    fn check_render_pass_state_change(&mut self) {
-        if self.current_render_pass().depth_compare_enable != self.other_modes.get_depth_compare_enable() {
-            self.next_render_pass(Some(format!("depth compare change to {}", self.other_modes.get_depth_compare_enable())));
+    fn check_othermode_state_change(&mut self) {
+        if self.current_triangle_list().depth_compare_enable != self.other_modes.get_depth_compare_enable() {
+            self.next_triangle_list();
             return;
         }
 
-        if self.current_render_pass().depth_write != self.other_modes.get_depth_update_enable() {
-            self.next_render_pass(Some(format!("depth write change to {}", self.other_modes.get_depth_update_enable())));
+        if self.current_triangle_list().depth_write != self.other_modes.get_depth_update_enable() {
+            self.next_triangle_list();
             return;
         }
     }
@@ -2589,7 +2592,7 @@ impl Hle {
         self.other_modes.hi = hi;
         self.other_modes.lo = lo;
 
-        self.check_render_pass_state_change();
+        self.check_othermode_state_change();
     }
 
     fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
@@ -2604,7 +2607,7 @@ impl Hle {
         self.other_modes.hi &= !(mask << shift);
         self.other_modes.hi |= data;
 
-        self.check_render_pass_state_change();
+        self.check_othermode_state_change();
     }
 
     fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
@@ -2620,7 +2623,7 @@ impl Hle {
         self.other_modes.lo &= !(mask << shift);
         self.other_modes.lo |= data;
 
-        self.check_render_pass_state_change();
+        self.check_othermode_state_change();
 
         // Opaque surface: has Z_CMP, Z_UPD, ALPHA_CVG_SEL,           GL_BL_A_MEM
         // Transl surface: has               CLR_ON_CVG,    FORCE_BL, G_BL_1MA

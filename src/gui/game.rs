@@ -1418,17 +1418,15 @@ impl Game {
 
                     // determine the depth render target, and if none is set we can use a dummy target with depth_write disabled
                     let depth_view = self.game_depth_texture_views.get(&rp.depth_buffer.or(Some(0xFFFF_FFFF)).unwrap()); // always pass a valid # to .get()
-                    let (pipeline, depth_stencil_attachment) = if depth_view.is_none() {
-                        (&self.game_pipeline_no_depth_attachment, None)
+                    let depth_stencil_attachment = if depth_view.is_none() {
+                        None
                     } else {
                         // select the pipeline based on depth_write and depth_compare_enable:
-                        let index = ((rp.depth_write as u8) + ((rp.depth_compare_enable as u8) << 1)) as usize;
-                        (&self.game_pipelines[index],
-                         Some(wgpu::RenderPassDepthStencilAttachment {
+                        Some(wgpu::RenderPassDepthStencilAttachment {
                             view: depth_view.unwrap(),
                             depth_ops: Some(wgpu::Operations {
                                 // if clear depth load 1.0, if compare is disabled we load 1.0 so all compares pass
-                                load: if rp.clear_depth || !rp.depth_compare_enable { 
+                                load: if rp.clear_depth {
                                     wgpu::LoadOp::Clear(1.0) 
                                 } else { 
                                     wgpu::LoadOp::Load
@@ -1439,7 +1437,7 @@ impl Game {
                             }),
 
                             stencil_ops: None,
-                        }))
+                        })
                     };
 
                     let mut encoder: wgpu::CommandEncoder =
@@ -1459,10 +1457,14 @@ impl Game {
                                     store: true,
                                 },
                             })],
-                            depth_stencil_attachment: depth_stencil_attachment,
+                            depth_stencil_attachment: depth_stencil_attachment.clone(),
                         });
 
-                        render_pass.set_pipeline(pipeline);
+                        // set this one only once
+                        if depth_stencil_attachment.is_none() {
+                            render_pass.set_pipeline(&self.game_pipeline_no_depth_attachment);
+                        }
+
                         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
@@ -1475,6 +1477,12 @@ impl Game {
                                 None => {
                                     render_pass.set_viewport(0.0, 0.0, 320.0*scale, 240.0*scale, 0.0, 1.0);
                                 }
+                            }
+
+                            // if we have a depth attachment, select the pipeline based on depth write and compare
+                            if depth_stencil_attachment.is_some() {
+                                let index = ((dl.depth_write as u8) + ((dl.depth_compare_enable as u8) << 1)) as usize;
+                                render_pass.set_pipeline(&self.game_pipelines[index]);
                             }
 
                             // set the selected texture index, which even if not textured should be set to some value
