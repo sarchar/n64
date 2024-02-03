@@ -41,6 +41,10 @@ struct Args {
     /// Specify window scaling ratio. (1 = 320x240, 2 = 640x480, 3 = 960x720 [default], etc.)
     #[arg(short('s'), long("scale"), value_name("S"), default_value_t = 3)]
     window_scale: u8,
+
+    /// Synchronize the UI with the Game render (useful for RenderDoc captures)
+    #[arg(short('S'), long("syncui"))]
+    sync_ui_to_game: bool,
 }
 
 fn main() {

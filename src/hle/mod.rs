@@ -221,9 +221,6 @@ pub struct Hle {
     current_color_combiner_state: ColorCombinerState,
     color_combiner_states: Vec<ColorCombinerState>,
 
-    // TEMP HACK only let a clear happen once
-    clear_color_happened: bool,
-
     // texture state
     tex: TextureState,
 
@@ -417,8 +414,6 @@ impl Hle {
             current_color_combiner_state: ColorCombinerState::new(),
             color_combiner_states: vec![],
 
-            clear_color_happened: false,
-
             tex: TextureState::new(),
 
             mapped_textures: vec![],
@@ -487,10 +482,10 @@ impl Hle {
         self.total_texture_data = 0;
         self.fill_color = 0;
         self.color_combiner_states.clear();
-        self.clear_color_happened = false;
         self.tex.reset(); // TODO this probably shouldn't be done, as it looks like
                           // RDP state isn't reset from frame to frame
 
+        // clear dirty flag on all textures
         for mtl in &self.mapped_textures {
             mtl.write().unwrap().dirty = false;
         }
@@ -758,10 +753,13 @@ impl Hle {
         for i in 0..self.render_passes.len() {
             let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
             //println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
+            //println!("rp{} pass_type={:?} rp.color_buffer={:?} depth_buffer={:?} rp.clear_depth={:?} rp.depth_compare_enable={:?} rp.depth_write={:?} draw_list.len={}", 
+            //         i, rp.pass_type, rp.color_buffer, rp.depth_buffer, rp.clear_depth, rp.depth_compare_enable, rp.depth_write, rp.draw_list.len());
             self.send_hle_render_command(HleRenderCommand::RenderPass(rp));
         }
 
         self.send_hle_render_command(HleRenderCommand::Sync);
+        //println!("sync");
     }
 
     fn current_display_list_address(&mut self) -> u32 {
@@ -1005,6 +1003,8 @@ impl Hle {
         let addr  = (self.command & 0xFFFF_FFFF) as u32;
 
         match index {
+            2 => todo!("G_MV_MMTX"),
+            6 => todo!("G_MV_PMTX"),
             8 => { // G_VIEWPORT
                 let segment = (addr >> 24) as u8;
                 let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
@@ -1287,7 +1287,7 @@ impl Hle {
         if self.render_passes.len() > 0 {
             // don't create a new render pass if this one isn't rendering anything, however, keep the current state
             // if there's no draw_list or the one there is empty, this render pass can still be used and doesn't need to be finalized
-            if !self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices != 0) {
+            if !self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices == 0) {
                 // No draw calls, so update render state
                 self.update_render_pass_state();
                 return;
@@ -1339,16 +1339,9 @@ impl Hle {
             (rp.color_buffer, rp.depth_buffer)
         };
 
-        trace!(target: "HLE", "rp: color_buffer = ${:X?} depth_buffer = ${:X?}", color_buffer, depth_buffer);
-
         if let Some(color_addr) = color_buffer {
             let clear_color = self.clear_images.remove(&color_addr);
-            //if !self.clear_color_happened {
-                self.current_render_pass().clear_color = clear_color;
-            //    if clear_color.is_some() {
-            //        self.clear_color_happened = true;
-            //    }
-            //}
+            self.current_render_pass().clear_color = clear_color;
         }
 
         if let Some(depth_addr) = depth_buffer {
@@ -1365,7 +1358,6 @@ impl Hle {
         if self.current_render_pass().pass_type.is_some_and(|v| v != pass_type) {
             let cur_pass_type = self.current_render_pass().pass_type.unwrap();
             self.next_render_pass(Some(format!("change pass type from {:?} to {:?}", cur_pass_type, pass_type)));
-
         }
 
         // set pass type for the new render pass (or one that is None)
@@ -1402,8 +1394,10 @@ impl Hle {
 
         // upon the first addition of a triangle, we need to note what the current uniform buffers are
         if self.current_triangle_list().num_indices == 0 {
-            // set the render pass
-            self.current_render_pass().pass_type = Some(pass_type);
+            // if this is the first draw call in the render pass, update render state
+            if self.current_render_pass().draw_list.len() == 1 {
+                self.update_render_pass_state();
+            }
 
             // set the current viewport on the draw call
             let viewport = self.current_viewport.clone();
@@ -1420,6 +1414,9 @@ impl Hle {
                     matrix_index
                 },
             };
+
+            trace!(target: "HLE", "new draw call uses proj matrix: {:?}", self.current_projection_matrix);
+            //println!("new draw call uses proj matrix: {:?}", self.current_projection_matrix);
 
             // set the mapped texture index for this draw call
             let mapped_texture_index = {
@@ -1534,8 +1531,9 @@ impl Hle {
 
         // adjust color according to G_SHADE. If shading is not enabled, the color value is not
         // passed to the RDP.
+        // I think this is correct but things go 
         if (self.geometry_mode & 0x04) == 0 { // G_SHADE
-            vtx.color = [ 0.0, 0.0, 0.0, 0.0 ];
+            vtx.color = [ 0.7, 0.7, 0.7, 1.0 ];
         }
 
         let index = self.vertices.len();
@@ -2313,6 +2311,9 @@ impl Hle {
                 2 => { // 16b
                     // rows are 4 texels long
                     if (line_number & 0x01) == 0 {
+                        if dst[dest_offset..].len() < 2 || v.len() < 2 {
+                            error!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
+                        }
                         dst[dest_offset..][..2].copy_from_slice(&v);
                     } else {
                         dst[dest_offset..][..2].copy_from_slice(&[v[1], v[0]]);

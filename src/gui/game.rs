@@ -195,12 +195,13 @@ pub struct Game {
 
     game_depth_textures: HashMap<u32, wgpu::Texture>,
     game_depth_texture_bind_groups: HashMap<u32, wgpu::BindGroup>,
+    game_depth_texture_views: HashMap<u32, wgpu::TextureView>,
 
     raw_render_texture: Option<wgpu::Texture>,
     raw_render_texture_bind_group: Option<wgpu::BindGroup>,
 
-    game_pipeline: wgpu::RenderPipeline,
-    game_pipeline_no_depth: wgpu::RenderPipeline,
+    game_pipelines: Vec<wgpu::RenderPipeline>,
+    game_pipeline_no_depth_attachment: wgpu::RenderPipeline,
 
     game_modelview: cgmath::Matrix4<f32>,
     game_projection: cgmath::Matrix4<f32>,
@@ -385,7 +386,7 @@ impl App for Game {
 
         let game_render_texture_vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Game Render Texture Vertex Buffer"),
+                label: Some("Render Game Texture Vertex Buffer"),
                 contents: bytemuck::cast_slice(GAME_TEXTURE_VERTICES),
                 usage: wgpu::BufferUsages::VERTEX,
             }
@@ -393,7 +394,7 @@ impl App for Game {
 
         let game_render_texture_index_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("Game Render Texture Index Buffer"),
+                label: Some("Render Game Texture Index Buffer"),
                 contents: bytemuck::cast_slice(GAME_TEXTURE_INDICES),
                 usage: wgpu::BufferUsages::INDEX,
             }
@@ -551,36 +552,92 @@ impl App for Game {
             conservative: false,
         };
 
-        let game_pipeline_depth_stencil_state = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default()
-        };
-
         let game_pipeline_multisample_state = wgpu::MultisampleState {
             count: 1,
             mask: !0,
             alpha_to_coverage_enabled: false,
         };
 
-        let game_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Game Pipeline"),
+        // I need four different game pipelines for the various depth buffer states:
+        //         no compare +    no write (commonish)     00
+        //         no compare + depth write (rare)          01
+        //      depth compare +    no write (common)        10
+        //      depth compare + depth write (commonest)     11
+        let game_pipelines = vec![
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label        : Some("Game Pipeline w/ No DT No WE"),
+                layout       : Some(&game_render_pipeline_layout),
+                vertex       : game_pipeline_vertex_state.clone(),
+                fragment     : Some(game_pipeline_fragment_state.clone()),
+                primitive    : game_pipeline_primitive_state,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format             : wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare      : wgpu::CompareFunction::Always,
+                    stencil            : wgpu::StencilState::default(),
+                    bias               : wgpu::DepthBiasState::default()
+                }),
+                multisample: game_pipeline_multisample_state,
+                multiview: None,
+            }),
+
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label        : Some("Game Pipeline w/ WE No DT"),
+                layout       : Some(&game_render_pipeline_layout),
+                vertex       : game_pipeline_vertex_state.clone(),
+                fragment     : Some(game_pipeline_fragment_state.clone()),
+                primitive    : game_pipeline_primitive_state,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format             : wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare      : wgpu::CompareFunction::Always,
+                    stencil            : wgpu::StencilState::default(),
+                    bias               : wgpu::DepthBiasState::default()
+                }),
+                multisample: game_pipeline_multisample_state,
+                multiview: None,
+            }),
+
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label        : Some("Game Pipeline w/ DT No WE"),
+                layout       : Some(&game_render_pipeline_layout),
+                vertex       : game_pipeline_vertex_state.clone(),
+                fragment     : Some(game_pipeline_fragment_state.clone()),
+                primitive    : game_pipeline_primitive_state,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format             : wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare      : wgpu::CompareFunction::Less,
+                    stencil            : wgpu::StencilState::default(),
+                    bias               : wgpu::DepthBiasState::default()
+                }),
+                multisample: game_pipeline_multisample_state,
+                multiview: None,
+            }),
+
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label        : Some("Game Pipeline w/ DT+WE"),
+                layout       : Some(&game_render_pipeline_layout),
+                vertex       : game_pipeline_vertex_state.clone(),
+                fragment     : Some(game_pipeline_fragment_state.clone()),
+                primitive    : game_pipeline_primitive_state,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format             : wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare      : wgpu::CompareFunction::Less,
+                    stencil            : wgpu::StencilState::default(),
+                    bias               : wgpu::DepthBiasState::default()
+                }),
+                multisample: game_pipeline_multisample_state,
+                multiview: None,
+            }),
+        ];
+
+        let game_pipeline_no_depth_attachment = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Game Pipeline w/ No Depth Attachment"),
             layout: Some(&game_render_pipeline_layout),
             vertex: game_pipeline_vertex_state.clone(),
             fragment: Some(game_pipeline_fragment_state.clone()),
-            primitive: game_pipeline_primitive_state,
-            depth_stencil: Some(game_pipeline_depth_stencil_state),
-            multisample: game_pipeline_multisample_state,
-            multiview: None,
-        });
-
-        let game_pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Game Pipeline"),
-            layout: Some(&game_render_pipeline_layout),
-            vertex: game_pipeline_vertex_state,
-            fragment: Some(game_pipeline_fragment_state),
             primitive: game_pipeline_primitive_state,
             depth_stencil: None,
             multisample: game_pipeline_multisample_state,
@@ -628,12 +685,13 @@ impl App for Game {
 
             game_depth_textures: HashMap::new(),
             game_depth_texture_bind_groups: HashMap::new(),
+            game_depth_texture_views: HashMap::new(),
 
             raw_render_texture: None,
             raw_render_texture_bind_group: None,
 
-            game_pipeline: game_pipeline,
-            game_pipeline_no_depth: game_pipeline_no_depth,
+            game_pipelines: game_pipelines,
+            game_pipeline_no_depth_attachment: game_pipeline_no_depth_attachment,
 
             game_modelview: cgmath::Matrix4::identity(),
             game_projection: cgmath::Matrix4::identity(),
@@ -785,6 +843,10 @@ impl App for Game {
                 self.capture_display_list = 1;
             }
 
+            // CTRL+S to toggle sync_ui_to_game
+            if appwnd.input().key_pressed(VirtualKeyCode::S) {
+                self.args.sync_ui_to_game = !self.args.sync_ui_to_game;
+            }
         }
 
         // Reset
@@ -846,13 +908,14 @@ impl App for Game {
     }
 
     fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView) {
-        self.render_game(appwnd);
+        // run once or sync
+        while !self.render_game(appwnd) && self.args.sync_ui_to_game {}
 
         let mut encoder: wgpu::CommandEncoder =
-            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Game Render Texture Encoder") });
+            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Game Texture Encoder") });
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Game Render Texture Pass"),
+                label: Some("Render Game Texture Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -1062,7 +1125,7 @@ impl Game {
         // OR maybe the render texture should be mapped to the n64 viewport?
         let texture = device.create_texture(
             &wgpu::TextureDescriptor {
-                label: Some(format!("Game Render Texture: {name}").as_str()),
+                label: Some(format!("Game Texture: {name}").as_str()),
                 size: wgpu::Extent3d {
                     width: width,
                     height: height,
@@ -1092,7 +1155,7 @@ impl Game {
         });
 
         let bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
-            label: Some(format!("Game Render Texture Bind Group: {name}").as_str()),
+            label: Some(format!("Render Game Texture Bind Group: {name}").as_str()),
             layout: &self.game_render_color_texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1109,7 +1172,7 @@ impl Game {
         (texture, bind_group)
     }
 
-    fn create_depth_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32) -> (wgpu::Texture, wgpu::BindGroup) {
+    fn create_depth_texture(&mut self, appwnd: &AppWindow, name: &str, width: u32, height: u32) -> (wgpu::Texture, wgpu::BindGroup, wgpu::TextureView) {
         let device = appwnd.device();
 
         // create texture for the depth buffer
@@ -1163,7 +1226,9 @@ impl Game {
             ],
         });
 
-        (texture, bind_group)
+        let render_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        (texture, bind_group, render_view)
     }
 
     fn new_game_texture(&mut self, appwnd: &AppWindow, mapped_texture: &hle::MappedTexture) -> usize {
@@ -1239,8 +1304,8 @@ impl Game {
         texture_index
     }
 
-    fn render_game(&mut self, appwnd: &AppWindow) {
-        'cmd_loop: while let Some(cmd) = self.hle_command_buffer.try_pop() {
+    fn render_game(&mut self, appwnd: &AppWindow) -> bool {
+        while let Some(cmd) = self.hle_command_buffer.try_pop() {
             match cmd {
                 HleRenderCommand::DefineColorImage {
                     framebuffer_address: addr,
@@ -1263,9 +1328,10 @@ impl Game {
                     if !self.game_depth_textures.contains_key(&addr) {
                         let width = (self.args.window_scale as u32) * 320;
                         let height = (self.args.window_scale as u32) * 240;
-                        let (texture, bind_group) = self.create_depth_texture(appwnd, format!("${:08X}", addr).as_str(), width, height);
+                        let (texture, bind_group, render_view) = self.create_depth_texture(appwnd, format!("${:08X}", addr).as_str(), width, height);
                         self.game_depth_textures.insert(addr, texture);
                         self.game_depth_texture_bind_groups.insert(addr, bind_group);
+                        self.game_depth_texture_views.insert(addr, render_view);
                         info!(target: "RENDER", "created depth render target for address ${:08X} (width={})", addr, width);
                     }
                 },
@@ -1336,7 +1402,8 @@ impl Game {
                 },
 
                 HleRenderCommand::RenderPass(rp) => {
-                    let res = self.game_render_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap());
+                    // determine the color render target, which we should always have
+                    let res = self.game_render_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap()); // always pass a valid # to .get()
                     let color_texture: &wgpu::Texture = if res.is_none() {
                         warn!(target: "HLE", "render pass without a color target (rp.color_buffer={:X?}!", rp.color_buffer);
                         let res = self.game_depth_textures.get(&rp.color_buffer.or(Some(0xFFFF_FFFF)).unwrap());
@@ -1349,20 +1416,28 @@ impl Game {
                     };
                     let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                    let res = self.game_depth_textures.get(&rp.depth_buffer.or(Some(0xFFFF_FFFF)).unwrap());
-                    let depth_view: Option<wgpu::TextureView>;
-                    let (pipeline, depth_stencil_attachment) = if res.is_none() {
-                        (&self.game_pipeline_no_depth, None)
+                    // determine the depth render target, and if none is set we can use a dummy target with depth_write disabled
+                    let depth_view = self.game_depth_texture_views.get(&rp.depth_buffer.or(Some(0xFFFF_FFFF)).unwrap()); // always pass a valid # to .get()
+                    let (pipeline, depth_stencil_attachment) = if depth_view.is_none() {
+                        (&self.game_pipeline_no_depth_attachment, None)
                     } else {
-                        depth_view = Some(res.unwrap().create_view(&wgpu::TextureViewDescriptor::default()));
-                        (&self.game_pipeline, Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: depth_view.as_ref().unwrap(),
+                        // select the pipeline based on depth_write and depth_compare_enable:
+                        let index = ((rp.depth_write as u8) + ((rp.depth_compare_enable as u8) << 1)) as usize;
+                        (&self.game_pipelines[index],
+                         Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view.unwrap(),
                             depth_ops: Some(wgpu::Operations {
                                 // if clear depth load 1.0, if compare is disabled we load 1.0 so all compares pass
-                                load: if rp.clear_depth || !rp.depth_compare_enable { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
+                                load: if rp.clear_depth || !rp.depth_compare_enable { 
+                                    wgpu::LoadOp::Clear(1.0) 
+                                } else { 
+                                    wgpu::LoadOp::Load
+                                },
+
                                 // if clear depth or write is enabled, set store
-                                store: (rp.clear_depth || rp.depth_write),
+                                store: true,
                             }),
+
                             stencil_ops: None,
                         }))
                     };
@@ -1455,12 +1530,13 @@ impl Game {
                         }
                     }
 
-                    break 'cmd_loop;
+                    return true;
                 },
     
                 z => unimplemented!("unhandled HLE render comand {:?}", z),
             };
         }
+        false
     }
 
     fn reset_render_state(&mut self) {
