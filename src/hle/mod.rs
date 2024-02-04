@@ -29,8 +29,9 @@ pub enum HleRenderCommand {
     DefineDepthImage { framebuffer_address: u32 },
     VertexData(Vec<Vertex>),
     IndexData(Vec<u16>),
-    MatrixData(Vec<Matrix4<f32>>),
+    MatrixData(Vec<MatrixState>),
     ColorCombinerStateData(Vec<ColorCombinerState>),
+    LightStateData(Vec<LightState>),
     UpdateTexture(Arc<RwLock<MappedTexture>>),
     RenderPass(RenderPassState),
     Sync,
@@ -109,8 +110,30 @@ impl VertexFlags {
     // next VERTEX_FLAG at "<< 7"
 }
 
-#[allow(non_camel_case_types)]
-pub type F3DZEX2_Matrix = [[i32; 4]; 4];
+// TODO at some point other ucode might support different types of lighting?
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightState {
+    pub lights : [[f32; 4]; LightState::NUM_LIGHTS], // w coordinate != 0.0 indicates light is enabled
+    pub colors : [[f32; 4]; LightState::NUM_LIGHTS], // alpha component not used but present for alignment
+    
+    pub _alignment: [u64; 4],
+}
+
+impl LightState {
+    pub const NUM_LIGHTS: usize = 7;
+}
+
+impl Default for LightState {
+    fn default() -> Self {
+        Self {
+            lights: [[0.0; 4]; LightState::NUM_LIGHTS],
+            colors: [[0.0; 4]; LightState::NUM_LIGHTS],
+
+            _alignment: [0; 4],
+        }
+    }
+}
 
 #[derive(Default)]
 struct DLStackEntry {
@@ -163,6 +186,7 @@ pub struct TriangleList {
     // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
     pub matrix_index: u32,
     pub color_combiner_state_index: u32,
+    pub light_state_index: Option<u32>,
 
     // start index and number of indices
     pub start_index: u32,
@@ -191,12 +215,11 @@ pub struct Hle {
     vertex_stack: [u16; 32],                 // F3DZEX has storage for 32 vertices
     indices: Vec<u16>,
 
-    matrices: Vec<Matrix4<f32>>,             // all the unique matrices in the DL
+    matrices: Vec<MatrixState>,              // all the unique matrices in the DL
     matrix_stack: Vec<Matrix4<f32>>,         // modelview only, not multiplied by proj
     current_projection_matrix: Matrix4<f32>, // current projection matrix
 
-    current_matrix: Matrix4<f32>,            // current modelview matrix multiplied by projection
-    matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use current_matrix
+    matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use the current matrices
 
     current_viewport: Option<Viewport>,
 
@@ -230,7 +253,10 @@ pub struct Hle {
     mapped_textures: Vec<Arc<RwLock<MappedTexture>>>,
 
     // lighting
+    num_lights: u32,
     ambient_light_color: [f32; 3],
+    current_light_state: LightState,
+    light_states: Vec<LightState>,
 
     command_table: [DLCommand; 256],
     command_address: u32,
@@ -243,6 +269,27 @@ pub struct Hle {
     disable_textures: bool,
     view_texture_map: u32,
     disable_lighting: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MatrixState {
+    pub projection: [[f32; 4]; 4],
+    pub modelview : [[f32; 4]; 4],
+    pub mv_inverse: [[f32; 4]; 4],
+    // need some alignment
+    pub _alignment: [u64; 8],
+}
+
+impl Default for MatrixState {
+    fn default() -> Self {
+        Self {
+            projection: Matrix4::identity().into(),
+            modelview : Matrix4::identity().into(),
+            mv_inverse: Matrix4::identity().into(),
+            _alignment: [0; 8],
+        }
+    }
 }
 
 #[derive(Debug,Default)]
@@ -389,7 +436,6 @@ impl Hle {
             matrices: vec![],
             matrix_stack: vec![],
             current_projection_matrix: Matrix4::identity(),
-            current_matrix: Matrix4::identity(),
             matrix_index_override: None,
 
             current_viewport: None,
@@ -419,7 +465,10 @@ impl Hle {
 
             mapped_textures: vec![],
 
+            num_lights: 0,
             ambient_light_color: [1.0; 3],
+            current_light_state: LightState::default(),
+            light_states: vec![],
 
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
@@ -470,7 +519,6 @@ impl Hle {
         self.matrices.clear();
         self.matrix_stack.clear();
         self.geometry_mode = 1 << 19; // G_CLIPPING is on by default
-        self.current_matrix = Matrix4::identity();
         self.matrix_index_override = None;
         self.current_projection_matrix = Matrix4::identity();
         self.color_images.clear();
@@ -491,7 +539,10 @@ impl Hle {
             mtl.write().unwrap().dirty = false;
         }
 
+        self.num_lights = 0;
         self.ambient_light_color = [1.0; 3];
+        self.current_light_state = LightState::default();
+        self.light_states.clear();
 
         self.current_viewport = None;
 
@@ -501,7 +552,10 @@ impl Hle {
         //self.current_depth_image = None;
 
         // set matrix 0 to be an ortho projection
-        self.matrices.push(cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0));
+        self.matrices.push(MatrixState {
+            projection: cgmath::ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0).into(),
+            ..Default::default()
+        });
 
         // always have a render pass and draw list started
         self.next_render_pass(None);
@@ -707,9 +761,10 @@ impl Hle {
         self.finalize_render_pass(Some(format!("end of display list")));
 
         debug!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls, \
-                               {} total tris, {} texels read ({} bytes), {} cc states", 
+                               {} total tris, {} texels read ({} bytes), {} cc states, {} light states", 
                self.matrices.len(), self.vertices.len(), self.indices.len(), self.render_passes.len(), self.num_draws, 
-               self.num_tris, self.num_texels, self.total_texture_data, self.color_combiner_states.len());
+               self.num_tris, self.num_texels, self.total_texture_data, self.color_combiner_states.len(),
+               self.light_states.len());
 
         // if there's nothing to draw, just Sync with the renderer and return
         if self.render_passes.len() == 0 {
@@ -750,17 +805,21 @@ impl Hle {
         let cc_states = std::mem::replace(&mut self.color_combiner_states, vec![]);
         self.send_hle_render_command(HleRenderCommand::ColorCombinerStateData(cc_states));
 
+        // upload light states
+        let light_states = std::mem::replace(&mut self.light_states, vec![]);
+        self.send_hle_render_command(HleRenderCommand::LightStateData(light_states));
+
         // run each render pass
         for i in 0..self.render_passes.len() {
             let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
-            println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
-            println!("rp{} pass_type={:?} rp.color_buffer={:?} depth_buffer={:?} rp.clear_depth={:?} draw_list.len={}", 
-                     i, rp.pass_type, rp.color_buffer, rp.depth_buffer, rp.clear_depth, rp.draw_list.len());
+            //println!("sending RP that was terminated because: {}", rp.reason.as_ref().unwrap_or(&String::from("None")));
+            //println!("rp{} pass_type={:?} rp.color_buffer={:?} depth_buffer={:?} rp.clear_depth={:?} draw_list.len={}", 
+            //         i, rp.pass_type, rp.color_buffer, rp.depth_buffer, rp.clear_depth, rp.draw_list.len());
             self.send_hle_render_command(HleRenderCommand::RenderPass(rp));
         }
 
         self.send_hle_render_command(HleRenderCommand::Sync);
-        println!("sync");
+        //println!("sync");
     }
 
     fn current_display_list_address(&mut self) -> u32 {
@@ -945,9 +1004,6 @@ impl Hle {
                 self.matrix_stack[count - 1] = cgmat;
             }
 
-            // the matrices used on n64 expect the vertex to be left-multiplied: v' = v*(M*V*P)
-            self.current_matrix = cgmat * self.current_projection_matrix;
-
             // when current_matrix changes we need to start a new draw call
             // (if there were no triangles yet, this call this does nothing)
             self.next_triangle_list();
@@ -967,9 +1023,18 @@ impl Hle {
 
     fn handle_moveword(&mut self, index: u8, offset: u16, data: u32) {
         match index {
+            2 => { // G_MW_NUMLIGHTS
+                self.num_lights = data / 24;
+                trace!(target: "HLE", "{} gsSPNumLights({})", self.command_prefix, self.num_lights);
+            },
+
             6 => { // G_MW_SEGMENT
                 trace!(target: "HLE", "{} gsSPSegment({}, 0x{:08X})", self.command_prefix, offset >> 2, data);
                 self.segments[(offset >> 2) as usize] = data;
+            },
+
+            10 => { // G_MW_LIGHTCOL
+                todo!();
             },
 
             14 => { // G_MW_PERSPNORM
@@ -1054,7 +1119,19 @@ impl Hle {
             },
 
             10 => { // G_MV_LIGHT
-                trace!(target: "HLE", "{} gsSPLight(size={}, address=${:08X})", self.command_prefix, size, addr);
+                let mut light_index = ((((self.command >> 40) & 0xFF) << 3) / 24) as usize;
+                trace!(target: "HLE", "{} gsSPLight(index={}, size={}, address=${:08X}) [num_lights={}]", self.command_prefix, light_index, size, addr, size / 16);
+
+                if light_index < 2 {
+                    debug!(target: "HLE", "TODO: G_MV_LIGHT with light_index < 2");
+                    return;
+                }
+                light_index -= 2;
+
+                if light_index >= LightState::NUM_LIGHTS {
+                    warn!(target: "HLE", "invalid light index {}", light_index);
+                    return;
+                }
 
                 let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
                     let segment = (addr >> 24) as u8;
@@ -1065,16 +1142,65 @@ impl Hle {
 
                 let num_lights = size / 16; // Light structure is 16 bytes long
 
-                // the last light is the ambient color
-                let ambient_data = &light_data[((16 * (num_lights - 1)) as usize) >> 2..];
+                let norm_scale = |i: i8| if i < 0 { (i as f32) / 128.0 } else { (i as f32) / 127.0 };
 
-                self.ambient_light_color = [
-                    (((ambient_data[0] >> 24) as u8) as f32) / 255.0,
-                    (((ambient_data[0] >> 16) as u8) as f32) / 255.0,
-                    (((ambient_data[0] >>  8) as u8) as f32) / 255.0,
-                ];
+                let cur_draw_is_lit = self.current_triangle_list().light_state_index.is_some();
 
-                trace!(target: "HLE", "amblient light color = {:?}", self.ambient_light_color);
+                for li in 0..num_lights as usize {
+                    // if the write index is the ambient light, done
+                    if light_index == self.num_lights as usize { break; }
+
+                    let data = &light_data[(16 * li) >> 2..];
+
+                    let color = [
+                        (((data[0] >> 24) as u8) as f32) / 255.0,
+                        (((data[0] >> 16) as u8) as f32) / 255.0,
+                        (((data[0] >>  8) as u8) as f32) / 255.0,
+                        1.0,
+                    ];
+
+                    let light = [
+                        norm_scale((data[0] >> 24) as i8),
+                        norm_scale((data[0] >> 16) as i8),
+                        norm_scale((data[0] >>  8) as i8),
+                        1.0, // enable light
+                    ];
+                    
+                    if cur_draw_is_lit && (self.current_light_state.lights[light_index] != light || self.current_light_state.colors[light_index] != color) {
+                        // light state changed, new draw call
+                        self.next_triangle_list();
+                    }
+
+                    self.current_light_state.lights[light_index] = light;
+                    self.current_light_state.colors[light_index] = color;
+                    println!("light{} color = {:?}", light_index, color);
+                    light_index += 1;
+                }
+
+                if light_index == self.num_lights as usize {
+                    // disable the remaining lights
+                    for li in self.num_lights as usize..LightState::NUM_LIGHTS {
+                        if cur_draw_is_lit && (self.current_light_state.lights[li][3] != 0.0) {
+                            // disabling a light -> new draw call
+                            self.next_triangle_list();
+                        }
+                        self.current_light_state.lights[li][3] = 0.0;
+                    }
+
+                    // the last light is the ambient color
+                    let ambient_data = &light_data[((16 * (num_lights - 1)) as usize) >> 2..];
+
+                    // ambient color change doesn't affect light state since we pass it in the 
+                    // color value of the vertex, so we can change ambient lighting without issuing
+                    // a new draw call
+                    self.ambient_light_color = [
+                        (((ambient_data[0] >> 24) as u8) as f32) / 255.0,
+                        (((ambient_data[0] >> 16) as u8) as f32) / 255.0,
+                        (((ambient_data[0] >>  8) as u8) as f32) / 255.0,
+                    ];
+
+                    trace!(target: "HLE", "amblient light color = {:?}", self.ambient_light_color);
+                }
             },
 
             14 => { // G_MV_MATRIX
@@ -1227,7 +1353,10 @@ impl Hle {
                     ..Default::default()
                 }
             } else {
+                let norm_scale = |i: i8| if i < 0 { (i as f32) / 128.0 } else { (i as f32) / 127.0 };
+
                 // Lighting enabled, so we have a normal and lights
+                // the normal vector must be normalized by the game
                 Vertex {
                     position: [
                         ((data[0] >> 16) as i16) as f32, 
@@ -1243,10 +1372,9 @@ impl Hle {
                         (data[3] as u8) as f32 / 255.0,
                     ],
                     normal: [
-                        1.0, // ((data[3] >> 24) as u8) as f32 / 255.0, 
-                        0.0, // ((data[3] >> 16) as u8) as f32 / 255.0, 
-                        0.0, // ((data[3] >>  8) as u8) as f32 / 255.0, 
-                        // ( data[3]        as u8) as f32 / 255.0,
+                        norm_scale((data[3] >> 24) as i8), 
+                        norm_scale((data[3] >> 16) as i8), 
+                        norm_scale((data[3] >>  8) as i8), 
                     ],
                     tex_coords: [
                         self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
@@ -1410,7 +1538,14 @@ impl Hle {
                 },
                 None => {
                     let matrix_index = self.matrices.len() as u32;
-                    self.matrices.push(self.current_matrix);
+                    // top of self.matrix_index is the current modelview matrix
+                    let modelview = *self.matrix_stack.last().or(Some(&Matrix4::identity())).unwrap();
+                    self.matrices.push(MatrixState {
+                        projection: self.current_projection_matrix.into(),
+                        modelview : modelview.into(),
+                        mv_inverse: modelview.invert().unwrap().into(),
+                        ..Default::default()
+                    });
                     matrix_index
                 },
             };
@@ -1428,11 +1563,10 @@ impl Hle {
             };
 
             // transfer the current combiner state to the uniform buffer
-            let cc_index = if self.color_combiner_states.len() == 0 {
-                self.color_combiner_states.push(self.current_color_combiner_state);
-                0
-            } else {
-                if self.current_color_combiner_state != *self.color_combiner_states.last().unwrap() {
+            let cc_index = {
+                let need_new = self.color_combiner_states.len() == 0 
+                                || self.current_color_combiner_state != *self.color_combiner_states.last().unwrap();
+                if need_new {
                     let cc_index = self.color_combiner_states.len() as u32;
                     self.color_combiner_states.push(self.current_color_combiner_state);
                     cc_index
@@ -1443,6 +1577,23 @@ impl Hle {
 
             trace!(target: "HLE", "CC State: {:?}", self.color_combiner_states[cc_index as usize]);
 
+            // transfer the current light state to the uniform buffer
+            let ls_index = {
+                // we only enable lighting on vertices that are light, otherwise ls_index can be left empty
+                if (self.vertices[v[0] as usize].flags & VertexFlags::LIT) != 0 {
+                    let need_new = self.light_states.len() == 0 || self.current_light_state != *self.light_states.last().unwrap();
+                    if need_new {
+                        let index = self.light_states.len();
+                        self.light_states.push(self.current_light_state);
+                        Some(index as u32)
+                    } else {
+                        Some((self.light_states.len() - 1) as u32)
+                    }
+                } else {
+                    None
+                }
+            };
+
             // set all the state values
             // now with num_indices > 0, they can't change. a new draw call is needed
             let tl = self.current_triangle_list();
@@ -1452,6 +1603,7 @@ impl Hle {
             tl.matrix_index = matrix_index; // set the matrix index
             tl.mapped_texture_index = mapped_texture_index;
             tl.color_combiner_state_index = cc_index;
+            tl.light_state_index = ls_index;
         }
 
         // clear overrides even if they weren't used

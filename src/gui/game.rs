@@ -21,14 +21,21 @@ use n64::hle::{
     self,
     HleRenderCommand, 
     HleCommandBuffer, 
-    ColorCombinerState, 
-    Vertex, VertexFlags, 
+    MatrixState, Vertex, VertexFlags,
+    ColorCombinerState, LightState,
 };
 
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
 trait ShaderData {
-    fn desc() -> wgpu::VertexBufferLayout<'static>;
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ColorCombinerState>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[],
+        }
+    }
+
     fn size() -> usize;
 
     fn offset_of(index: usize) -> wgpu::BufferAddress {
@@ -36,50 +43,13 @@ trait ShaderData {
     }
 }
 
-// The implementation here needs to match the layout in hle
-impl ShaderData for ColorCombinerState {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ColorCombinerState>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute { // color1_source
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-                wgpu::VertexAttribute { // alpha1_source
-                    offset: std::mem::size_of::<[u32; 1]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-                wgpu::VertexAttribute { // color2_source
-                    offset: std::mem::size_of::<[u32; 2]>() as wgpu::BufferAddress,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-                wgpu::VertexAttribute { // alpha2_source
-                    offset: std::mem::size_of::<[u32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-                wgpu::VertexAttribute { // prim_color
-                    offset: std::mem::size_of::<[u32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute { // env_color
-                    offset: (std::mem::size_of::<[u32; 4]>() 
-                              + std::mem::size_of::<[f32; 4]>()) as wgpu::BufferAddress,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ]
-        }
-    }
-
+impl ShaderData for MatrixState {
     fn size() -> usize {
-        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 8]>() + std::mem::size_of::<[u64; 26]>()) as usize
+        (std::mem::size_of::<[f32; 16]>()    // projection
+          + std::mem::size_of::<[f32; 16]>() // modelview
+          + std::mem::size_of::<[f32; 16]>() // mv_inverse
+          + std::mem::size_of::<[u64; 8]>() // alignment
+        ) as usize
     }
 }
 
@@ -129,6 +99,21 @@ impl ShaderData for Vertex {
     }
 }
 
+// The implementation here needs to match the layout in hle
+impl ShaderData for ColorCombinerState {
+    fn size() -> usize {
+        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 8]>() + std::mem::size_of::<[u64; 26]>()) as usize
+    }
+}
+
+impl ShaderData for LightState {
+    fn size() -> usize {
+        std::mem::size_of::<[f32; 4*LightState::NUM_LIGHTS]>()        // lights[]
+            + std::mem::size_of::<[f32; 4*LightState::NUM_LIGHTS]>()  // color[]
+            + std::mem::size_of::<[u64; 4]>()                         // _alignment
+    }
+}
+
 // Y texture coordinate is inverted to flip the resulting image
 // default sampler is Nearest, so we just need the textured flag 
 const GAME_TEXTURE_VERTICES: &[Vertex] = &[
@@ -139,32 +124,6 @@ const GAME_TEXTURE_VERTICES: &[Vertex] = &[
 ];
 
 const GAME_TEXTURE_INDICES: &[u16] = &[2, 1, 0, 1, 3, 2];
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct MvpPacked {
-    mvp_matrix: [[f32; 4]; 4], // 64
-    // padding to 256 bytes
-    padding: [u64; 24],
-}
-
-impl MvpPacked {
-    fn new(mat: [[f32; 4]; 4]) -> Self {
-        Self {
-           mvp_matrix: mat,
-           padding: [0; 24]
-        }
-    }
-
-    fn size() -> usize {
-        (std::mem::size_of::<[f32; 16]>() 
-          + std::mem::size_of::<[u64; 24]>()) as usize
-    }
-
-    fn offset_of(index: usize) -> wgpu::DynamicOffset {
-        (index * Self::size()) as wgpu::DynamicOffset
-    }
-}
 
 #[derive(Debug,Copy,Clone,PartialEq)]
 enum ViewMode {
@@ -217,6 +176,7 @@ pub struct Game {
     mvp_buffer: wgpu::Buffer,
     mvp_bind_group: wgpu::BindGroup,
     color_combiner_state_buffer: wgpu::Buffer,
+    light_state_buffer: wgpu::Buffer,
 
     //speed: f32,
     //is_forward_pressed: bool,
@@ -408,7 +368,7 @@ impl App for Game {
         let mvp_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Game MVP Matrix Buffer"),
-                size : (MvpPacked::size() * 1024) as u64,
+                size : (MatrixState::size() * 1024) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }
@@ -418,6 +378,15 @@ impl App for Game {
             &wgpu::BufferDescriptor {
                 label: Some("Color Combiner State Buffer"),
                 size : (ColorCombinerState::size() * 1024) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
+
+        let light_state_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Light State Buffer"),
+                size : (LightState::size() * 1024) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }
@@ -486,6 +455,16 @@ impl App for Game {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry { // light state
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             }
         );
@@ -500,7 +479,7 @@ impl App for Game {
                         wgpu::BufferBinding {
                             buffer: &mvp_buffer,
                             offset: 0,
-                            size: core::num::NonZeroU64::new(MvpPacked::size() as u64),
+                            size: core::num::NonZeroU64::new(MatrixState::size() as u64),
                         }
                     ),
                 },
@@ -511,6 +490,16 @@ impl App for Game {
                             buffer: &color_combiner_state_buffer,
                             offset: 0,
                             size  : core::num::NonZeroU64::new(ColorCombinerState::size() as u64),
+                        }
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(
+                        wgpu::BufferBinding {
+                            buffer: &light_state_buffer,
+                            offset: 0,
+                            size  : core::num::NonZeroU64::new(LightState::size() as u64),
                         }
                     ),
                 },
@@ -708,6 +697,7 @@ impl App for Game {
             mvp_bind_group: mvp_bind_group,
 
             color_combiner_state_buffer: color_combiner_state_buffer,
+            light_state_buffer: light_state_buffer,
 
             //speed: 0.2,
             //is_forward_pressed: false,
@@ -1349,18 +1339,17 @@ impl Game {
                 },
 
                 HleRenderCommand::MatrixData(v) => {
-                    let mut vcopy = Vec::new();
-                    for vdata in v.iter() {
-                        let vnew = MvpPacked::new((*vdata).into());
-                        vcopy.push(vnew);
-                    }
-
-                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&vcopy));
+                    appwnd.queue().write_buffer(&self.mvp_buffer, 0, bytemuck::cast_slice(&v));
                 },
 
                 HleRenderCommand::ColorCombinerStateData(v) => {
                     appwnd.queue().write_buffer(&self.color_combiner_state_buffer, 0, bytemuck::cast_slice(&v));
                 },
+
+                HleRenderCommand::LightStateData(v) => {
+                    appwnd.queue().write_buffer(&self.light_state_buffer, 0, bytemuck::cast_slice(&v));
+                },
+
 
                 HleRenderCommand::UpdateTexture(mapped_texture_lock) => {
                     let mapped_texture = mapped_texture_lock.read().unwrap();
@@ -1498,8 +1487,9 @@ impl Game {
                             }
 
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix and CC state is used for the triangle list
-                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[MvpPacked::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
-                                                                                  ColorCombinerState::offset_of(dl.color_combiner_state_index as usize) as wgpu::DynamicOffset]);
+                            render_pass.set_bind_group(1, &self.mvp_bind_group, &[MatrixState::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
+                                                                                  ColorCombinerState::offset_of(dl.color_combiner_state_index as usize) as wgpu::DynamicOffset,
+                                                                                  LightState::offset_of(dl.light_state_index.or(Some(0)).unwrap() as usize) as wgpu::DynamicOffset]);
 
                             let last_index = dl.start_index + dl.num_indices;
                             render_pass.draw_indexed(dl.start_index..last_index as _, 0, 0..1);
