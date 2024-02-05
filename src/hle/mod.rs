@@ -219,7 +219,8 @@ pub struct Hle {
     matrix_stack: Vec<Matrix4<f32>>,         // modelview only, not multiplied by proj
     current_projection_matrix: Matrix4<f32>, // current projection matrix
 
-    matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use the current matrices
+    matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use current_matrix
+    disable_depth_override: Option<()>,      // set to force no depth on the next draw call
 
     current_viewport: Option<Viewport>,
 
@@ -437,6 +438,7 @@ impl Hle {
             matrix_stack: vec![],
             current_projection_matrix: Matrix4::identity(),
             matrix_index_override: None,
+            disable_depth_override: None,
 
             current_viewport: None,
 
@@ -520,6 +522,7 @@ impl Hle {
         self.matrix_stack.clear();
         self.geometry_mode = 1 << 19; // G_CLIPPING is on by default
         self.matrix_index_override = None;
+        self.disable_depth_override = None;
         self.current_projection_matrix = Matrix4::identity();
         self.color_images.clear();
         self.depth_images.clear();
@@ -1407,11 +1410,17 @@ impl Hle {
         self.render_passes.last_mut().expect("must always have a valid RP")
     }
 
+    // true if this render pass has something drawn in it
+    fn current_render_pass_has_tris(&mut self) -> bool {
+        self.current_render_pass().draw_list.len() > 1 ||
+            self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices != 0)
+    }
+
     fn next_render_pass(&mut self, reason: Option<String>) {
         if self.render_passes.len() > 0 {
             // don't create a new render pass if this one isn't rendering anything, however, keep the current state
             // if there's no draw_list or the one there is empty, this render pass can still be used and doesn't need to be finalized
-            if !self.current_render_pass().draw_list.last().is_some_and(|v| v.num_indices == 0) {
+            if !self.current_render_pass_has_tris() {
                 // No draw calls, so update render state
                 self.update_render_pass_state();
                 return;
@@ -1487,8 +1496,15 @@ impl Hle {
         // set pass type for the new render pass (or one that is None)
         self.current_render_pass().pass_type = Some(pass_type);
 
-        // check if any states change to start a new draw call
+        // check if any states need to change to start a new draw call
         if self.current_triangle_list().num_indices != 0 {
+            // if requested no depth, change to a new draw call
+            if self.disable_depth_override.is_some() {
+                if self.current_triangle_list().depth_write || self.current_triangle_list().depth_compare_enable {
+                    self.next_triangle_list();
+                }
+            }
+
             // if the matrix index requested is different than the current matrix
             if let Some(matrix_index_override) = self.matrix_index_override {
                 if self.current_triangle_list().matrix_index != matrix_index_override { // must be valid here
@@ -1527,8 +1543,12 @@ impl Hle {
             let viewport = self.current_viewport.clone();
 
             // set the pipeline state
-            let depth_compare_enable = self.other_modes.get_depth_compare_enable();
-            let depth_write          = self.other_modes.get_depth_update_enable();
+            let (depth_write, depth_compare_enable) = if self.disable_depth_override.is_some() {
+                (false, false)
+            } else {
+                (self.other_modes.get_depth_update_enable(),
+                 self.other_modes.get_depth_compare_enable())
+            };
 
             // transfer the current matrix to the uniform buffer but allow a matrix index override
             // you need to set self.matrix_index_override before any add_triangles call that requires it
@@ -1608,6 +1628,7 @@ impl Hle {
 
         // clear overrides even if they weren't used
         self.matrix_index_override = None;
+        self.disable_depth_override = None;
 
         self.indices.extend_from_slice(v);
         self.current_triangle_list().num_indices += v.len() as u32;
@@ -2233,6 +2254,12 @@ impl Hle {
         let v2 = ((self.command >> 33) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP1Triangle({}, {}, {})", self.command_prefix, v0, v1, v2);
 
+        // if a previous *RECT call forced depth we need to re-enable depth
+        if self.disable_depth_override.is_some() {
+            self.disable_depth_override = None;
+            self.check_othermode_state_change();
+        }
+
         // make sure texture is mapped
         self.map_current_texture();
 
@@ -2266,6 +2293,12 @@ impl Hle {
         let v11 = ((self.command >>  9) & 0x1F) as u16;
         let v12 = ((self.command >>  1) & 0x1F) as u16;
         trace!(target: "HLE", "{} gsSP2Triangle({}, {}, {}, 0, {}, {}, {}, 0)", self.command_prefix, v00, v01, v02, v10, v11, v12);
+
+        // if a previous *RECT call forced depth we need to re-enable depth
+        if self.disable_depth_override.is_some() {
+            self.disable_depth_override = None;
+            self.check_othermode_state_change();
+        }
 
         // make sure texture is mapped
         self.map_current_texture();
@@ -2387,11 +2420,17 @@ impl Hle {
         let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
+        // and disable the depth buffer
         self.matrix_index_override = Some(0);
-        self.add_triangles(RenderPassType::FillRectangles, &[v0, v1, v2, v1, v2, v3]);
+        self.disable_depth_override = Some(());
+        self.add_triangles(RenderPassType::DrawTriangles, &[v0, v1, v2, v1, v2, v3]);
 
         self.tex.enabled = old_enabled;
         self.tex.tile = old_tile;
+
+        // G_TRI* calls coming up will need to change to a new draw call if depth state
+        // is different than being disabled, so we reuse disable_depth_override
+        self.disable_depth_override = Some(());
     }
 
     fn handle_settilesize(&mut self) { // G_SETTILESIZE
@@ -2906,14 +2945,42 @@ impl Hle {
         // so (rx/vx * 2) - 1
         let scale_x = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
         let scale_y = |s, maxs| ((((s as f32) / maxs) * 2.0) - 1.0) * -1.0;
-        let cur_pos = self.vertices.len() as u16; // save start index
-        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], color: color, ..Default::default() }); // TL
-        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], color: color, ..Default::default() }); // TR
-        self.vertices.push(Vertex { position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], color: color, ..Default::default() }); // BR
-        self.vertices.push(Vertex { position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], color: color, ..Default::default() }); // BL
+        let cur_pos = self.vertices_internal.len() as u16; // save start index
+        self.vertices_internal.push(Vertex {  // TL
+            position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], 
+            color: color, 
+            ..Default::default() 
+        });
+        self.vertices_internal.push(Vertex {  // TR
+            position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], 
+            color: color, 
+            ..Default::default() 
+        });
+        self.vertices_internal.push(Vertex {  // BL
+            position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], 
+            color: color, 
+            ..Default::default() 
+        }); 
+        self.vertices_internal.push(Vertex {  // BR
+            position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], 
+            color: color, 
+            ..Default::default() 
+        });
+
+        let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
+        let (_, v1) = self.make_final_vertex((cur_pos+1) as usize).unwrap();
+        let (_, v2) = self.make_final_vertex((cur_pos+2) as usize).unwrap();
+        let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
-        self.add_triangles(RenderPassType::FillRectangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
+        // and disable the depth buffer
+        self.matrix_index_override = Some(0);
+        self.disable_depth_override = Some(());
+        self.add_triangles(RenderPassType::DrawTriangles, &[v0, v1, v2, v1, v2, v3]);
+
+        // G_TRI* calls coming up will need to change to a new draw call if depth state
+        // is different than being disabled, so we reuse disable_depth_override
+        self.disable_depth_override = Some(());
     }
 
     #[allow(dead_code)]
