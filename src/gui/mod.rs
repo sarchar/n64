@@ -1,12 +1,13 @@
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use tracing_core::Level;
 
 use winit::{
     dpi::{LogicalSize, PhysicalSize},
-    event::{Event, WindowEvent, VirtualKeyCode}, // VirtualKeyCode
+    event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    keyboard::KeyCode,
     window::{Window, WindowBuilder},
 };
 
@@ -23,9 +24,9 @@ use n64::hle::HleCommandBuffer;
 
 pub mod game;
 
-struct WgpuInfo {
+struct WgpuInfo<'a> {
     //instance      : wgpu::Instance,
-    surface       : wgpu::Surface,
+    surface       : wgpu::Surface<'a>,
     surface_config: wgpu::SurfaceConfiguration,
     device        : wgpu::Device,
     queue         : wgpu::Queue,
@@ -33,24 +34,24 @@ struct WgpuInfo {
     needs_reconfigure: bool,
 }
 
-pub struct AppWindow {
+pub struct AppWindow<'a> {
     event_loop  : Option<EventLoop<()>>,
     size        : LogicalSize<u32>,
-    window      : Window,
+    window      : Arc<Window>,
     input_helper: WinitInputHelper,
-    wgpu        : WgpuInfo,
+    wgpu        : WgpuInfo<'a>,
     gilrs       : gilrs::Gilrs,
     connected_gamepads: [Option<gilrs::GamepadId>; 4],
     change_logging_func: Box<dyn Fn(&str, Level) -> ()>,
 }
 
-impl AppWindow {
+impl<'a> AppWindow<'a> {
     async fn new(title: &str, width: u32, height: u32, allow_vulkan: bool, change_logging: Box<dyn Fn(&str, Level) -> ()>, gilrs: gilrs::Gilrs) -> Self {
-        let event_loop = EventLoop::new();
+        let event_loop = EventLoop::new().expect("error creating event loop");
 
         // Create the platform window with winit
         let window_size = LogicalSize::new(width, height);
-        let window = {
+        let window = Arc::new({
             WindowBuilder::new()
                 .with_title(title)
                 .with_inner_size(window_size)
@@ -59,7 +60,7 @@ impl AppWindow {
                                               // backend, so I'm disabling window resize in OpenGL
                 .build(&event_loop)
                 .expect("Error creating window")
-        };
+        });
 
         // Create a wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -68,15 +69,15 @@ impl AppWindow {
         });
 
         // Create a wgpu surface
-        let surface = unsafe { instance.create_surface(&window) }.expect("error creating window surface");
+        let surface = instance.create_surface(window.clone()).expect("error creating window surface");
 
         for adapter in instance.enumerate_adapters(wgpu::Backends::all()).into_iter() {
             debug!(target: "GUI", "detected {:?}", adapter.get_info());
         }
 
         // Find an adapter to use
-        let adapter = instance
-            .enumerate_adapters(wgpu::Backends::all())
+        let adapter_list = instance.enumerate_adapters(wgpu::Backends::all());
+        let adapter = adapter_list.iter()
             .filter(|adapter| {
                 adapter.is_surface_supported(&surface) && 
                     ((allow_vulkan && adapter.get_info().backend == wgpu::Backend::Vulkan)
@@ -86,9 +87,9 @@ impl AppWindow {
         // Create the wgpu device and device queue
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
-                limits  : wgpu::Limits::default(),
                 label   : None,
+                required_features: wgpu::Features::empty(),
+                required_limits  : wgpu::Limits::default(),
             },
             None,
         ).await.unwrap();
@@ -105,6 +106,7 @@ impl AppWindow {
             present_mode: wgpu::PresentMode::AutoNoVsync, //surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
+            desired_maximum_frame_latency: 0,
         };
 
         Self {
@@ -219,13 +221,12 @@ impl AppWindow {
     {
         // take ownership of the event loop so that we can pass AppWindow around freely
         let event_loop = std::mem::replace(&mut appwnd.event_loop, None).unwrap();
-        event_loop.run(move |event, _, control_flow| {
-            *control_flow = ControlFlow::Poll; // continously update
-
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let _ = event_loop.run(move |event, elwt| {
             // check for input events
             if appwnd.input_helper.update(&event) {
-                if appwnd.input_helper.quit() {
-                    *control_flow = ControlFlow::Exit;
+                if appwnd.input_helper.close_requested() || appwnd.input_helper.destroyed() {
+                    elwt.exit();
                     return;
                 }
             }
@@ -263,11 +264,15 @@ impl AppWindow {
                     appwnd.resize_surface(size);
                 },
 
-                Event::MainEventsCleared => {
+                Event::AboutToWait => {
                     appwnd.window.request_redraw();
                 },
 
-                Event::RedrawEventsCleared => {
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::RedrawRequested,
+                        ..
+                } => {
                     if appwnd.wgpu.needs_reconfigure {
                         appwnd.wgpu.surface.configure(&appwnd.wgpu.device, &appwnd.wgpu.surface_config);
                         appwnd.wgpu.needs_reconfigure = false;
@@ -360,12 +365,16 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     let mut last_frame = Instant::now();
     let mut demo_open = false;
     AppWindow::run(appwnd, move |appwnd: &mut AppWindow, event| {
-        if appwnd.input().key_pressed(VirtualKeyCode::F12) {
+        if appwnd.input().key_pressed(KeyCode::F12) {
             demo_open = true;
         }
 
         match event {
-            Event::RedrawEventsCleared => {
+            Event::WindowEvent {
+                event:
+                    WindowEvent::RedrawRequested,
+                    ..
+            } => {
                 let now = Instant::now();
                 imgui.io_mut().update_delta_time(now - last_frame);
                 last_frame = now;
@@ -408,12 +417,12 @@ pub async fn run<T: App + 'static>(args: crate::Args,
                                 resolve_target: None,
                                 ops: wgpu::Operations {
                                     load: wgpu::LoadOp::Load, // Do not clear
-                                    store: true, //. wgpu::StoreOp::Store,
+                                    store: wgpu::StoreOp::Store,
                                 },
                             })],
                             depth_stencil_attachment: None,
-                            //.occlusion_query_set: None,
-                            //.timestamp_writes: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
                         });
 
                         renderer

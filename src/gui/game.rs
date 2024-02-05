@@ -7,7 +7,7 @@ use std::time::Instant;
 use tracing::{trace, debug, error, info, warn};
 use tracing_core::Level;
 
-use winit::event::VirtualKeyCode;
+use winit::keyboard::KeyCode;
 use wgpu::util::DeviceExt;
 use cgmath::prelude::*;
 
@@ -762,10 +762,10 @@ impl App for Game {
         }
 
         // CTRL+F5+n to generate interrupt signal n
-        if appwnd.input().key_held(VirtualKeyCode::LControl) {
-            const KEYS: &[VirtualKeyCode] = &[
-                VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7,
-                VirtualKeyCode::F8, VirtualKeyCode::F9, VirtualKeyCode::F10,
+        if appwnd.input().key_held(KeyCode::ControlLeft) {
+            const KEYS: &[KeyCode] = &[
+                KeyCode::F5, KeyCode::F6, KeyCode::F7,
+                KeyCode::F8, KeyCode::F9, KeyCode::F10,
             ];
             if let Some(mi) = &self.comms.mi_interrupts_tx {
                 for i in 0..6 {
@@ -777,7 +777,7 @@ impl App for Game {
             }
 
             // CTLR+V to change the view mode
-            if appwnd.input().key_pressed(VirtualKeyCode::V) {
+            if appwnd.input().key_pressed(KeyCode::KeyV) {
                 self.view_mode = match self.view_mode {
                     ViewMode::Game => {
                         if self.game_render_texture_bind_groups.len() > 0 {
@@ -811,37 +811,37 @@ impl App for Game {
             }
 
             // CTRL+T to toggle disable textures
-            if appwnd.input().key_pressed(VirtualKeyCode::T) {
+            if appwnd.input().key_pressed(KeyCode::KeyT) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
                 ef.disable_textures = !ef.disable_textures;
             }
 
             // CTRL+U to view the texture map 
-            if appwnd.input().key_pressed(VirtualKeyCode::U) {
+            if appwnd.input().key_pressed(KeyCode::KeyU) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
                 ef.view_texture_map = (ef.view_texture_map + 1) % 5;
             }
 
             // CTLR+L to disable lighting (and view normals as if they're the model color)
-            if appwnd.input().key_pressed(VirtualKeyCode::L) {
+            if appwnd.input().key_pressed(KeyCode::KeyL) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
                 ef.disable_lighting = !ef.disable_lighting;
             }
 
             // CTRL+P to print one frame of displaylists
-            if appwnd.input().key_pressed(VirtualKeyCode::P) {
+            if appwnd.input().key_pressed(KeyCode::KeyP) {
                 self.capture_display_list = 1;
             }
 
             // CTRL+S to toggle sync_ui_to_game
-            if appwnd.input().key_pressed(VirtualKeyCode::S) {
+            if appwnd.input().key_pressed(KeyCode::KeyS) {
                 self.args.sync_ui_to_game = !self.args.sync_ui_to_game;
             }
         }
 
         // Reset
-        if appwnd.input().key_pressed(VirtualKeyCode::F11) {
-            let soft_reset = appwnd.input().key_held(VirtualKeyCode::LControl);
+        if appwnd.input().key_pressed(KeyCode::F11) {
+            let soft_reset = appwnd.input().key_held(KeyCode::ControlLeft);
 
             // send reset 1 for hard reset, 2 for soft reset
             // then break out any cpu step cycle
@@ -857,10 +857,10 @@ impl App for Game {
         }
 
         //let input = appwnd.input();
-        //self.is_forward_pressed  = input.key_held(VirtualKeyCode::W) || input.key_held(VirtualKeyCode::Up);
-        //self.is_backward_pressed = input.key_held(VirtualKeyCode::S) || input.key_held(VirtualKeyCode::Down);
-        //self.is_left_pressed     = input.key_held(VirtualKeyCode::A) || input.key_held(VirtualKeyCode::Left);
-        //self.is_right_pressed    = input.key_held(VirtualKeyCode::D) || input.key_held(VirtualKeyCode::Right);
+        //self.is_forward_pressed  = input.key_held(KeyCode::KeyW) || input.key_held(KeyCode::ArrowUp);
+        //self.is_backward_pressed = input.key_held(KeyCode::KeyS) || input.key_held(KeyCode::ArrowDown);
+        //self.is_left_pressed     = input.key_held(KeyCode::KeyA) || input.key_held(KeyCode::ArrowLeft);
+        //self.is_right_pressed    = input.key_held(KeyCode::KeyD) || input.key_held(KeyCode::ArrowRight);
 
         //let forward = self.camera.target - self.camera.eye;
         //let forward_norm = forward.normalize();
@@ -912,12 +912,12 @@ impl App for Game {
                     ops: wgpu::Operations {
                         // the old color doesn't matter, so LoadOp::Load is more efficient
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
-                        store: true, //. wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
-                //.occlusion_query_set: None,
-                //.timestamp_writes: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
             });
 
             // look for the texture associated with the color image address
@@ -1074,34 +1074,34 @@ impl Game {
         };
 
         let controllers = &mut self.comms.controllers.write().unwrap();
-        set_button_state(&mut controllers[0].a    , appwnd.gamepad_ispressed(0, gilrs::Button::South)         || appwnd.input().key_held(VirtualKeyCode::Slash));
-        set_button_state(&mut controllers[0].b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)          || appwnd.input().key_held(VirtualKeyCode::Period));
-        set_button_state(&mut controllers[0].z    , appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger2)  || appwnd.input().key_held(VirtualKeyCode::Space));
-        set_button_state(&mut controllers[0].start, appwnd.gamepad_ispressed(0, gilrs::Button::Start)         || appwnd.input().key_held(VirtualKeyCode::Return));
+        set_button_state(&mut controllers[0].a    , appwnd.gamepad_ispressed(0, gilrs::Button::South)         || appwnd.input().key_held(KeyCode::Slash));
+        set_button_state(&mut controllers[0].b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)          || appwnd.input().key_held(KeyCode::Period));
+        set_button_state(&mut controllers[0].z    , appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger2)  || appwnd.input().key_held(KeyCode::Space));
+        set_button_state(&mut controllers[0].start, appwnd.gamepad_ispressed(0, gilrs::Button::Start)         || appwnd.input().key_held(KeyCode::Enter));
 
-        set_button_state(&mut controllers[0].l_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger)  || appwnd.input().key_held(VirtualKeyCode::Semicolon));
-        set_button_state(&mut controllers[0].r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || appwnd.input().key_held(VirtualKeyCode::Apostrophe));
+        set_button_state(&mut controllers[0].l_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger)  || appwnd.input().key_held(KeyCode::Semicolon));
+        set_button_state(&mut controllers[0].r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || appwnd.input().key_held(KeyCode::Quote));
 
         // C buttons - IJKL
-        set_button_state(&mut controllers[0].c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)>0.2) || appwnd.input().key_held(VirtualKeyCode::I));
-        set_button_state(&mut controllers[0].c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)<0.2) || appwnd.input().key_held(VirtualKeyCode::K));
-        set_button_state(&mut controllers[0].c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)<0.2) || appwnd.input().key_held(VirtualKeyCode::J));
-        set_button_state(&mut controllers[0].c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)>0.2) || appwnd.input().key_held(VirtualKeyCode::L));
+        set_button_state(&mut controllers[0].c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)>0.2) || appwnd.input().key_held(KeyCode::KeyI));
+        set_button_state(&mut controllers[0].c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)<0.2) || appwnd.input().key_held(KeyCode::KeyK));
+        set_button_state(&mut controllers[0].c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)<0.2) || appwnd.input().key_held(KeyCode::KeyJ));
+        set_button_state(&mut controllers[0].c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)>0.2) || appwnd.input().key_held(KeyCode::KeyL));
 
         // DPad - Arrow keys
-        set_button_state(&mut controllers[0].d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || appwnd.input().key_held(VirtualKeyCode::Up));
-        set_button_state(&mut controllers[0].d_down , appwnd.gamepad_ispressed(0, gilrs::Button::DPadDown)    || appwnd.input().key_held(VirtualKeyCode::Down));
-        set_button_state(&mut controllers[0].d_left , appwnd.gamepad_ispressed(0, gilrs::Button::DPadLeft)    || appwnd.input().key_held(VirtualKeyCode::Left));
-        set_button_state(&mut controllers[0].d_right, appwnd.gamepad_ispressed(0, gilrs::Button::DPadRight)   || appwnd.input().key_held(VirtualKeyCode::Right));
+        set_button_state(&mut controllers[0].d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || appwnd.input().key_held(KeyCode::ArrowUp));
+        set_button_state(&mut controllers[0].d_down , appwnd.gamepad_ispressed(0, gilrs::Button::DPadDown)    || appwnd.input().key_held(KeyCode::ArrowDown));
+        set_button_state(&mut controllers[0].d_left , appwnd.gamepad_ispressed(0, gilrs::Button::DPadLeft)    || appwnd.input().key_held(KeyCode::ArrowLeft));
+        set_button_state(&mut controllers[0].d_right, appwnd.gamepad_ispressed(0, gilrs::Button::DPadRight)   || appwnd.input().key_held(KeyCode::ArrowRight));
 
         // Analog Stick - WASD
         // x-axis assign -1 to A and 1 to D
-        let mut x_kb = (-(appwnd.input().key_held(VirtualKeyCode::A) as i32) + (appwnd.input().key_held(VirtualKeyCode::D) as i32)) as f32;
+        let mut x_kb = (-(appwnd.input().key_held(KeyCode::KeyA) as i32) + (appwnd.input().key_held(KeyCode::KeyD) as i32)) as f32;
         x_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickX);
         controllers[0].x_axis = x_kb.clamp(-1.0, 1.0);
 
         // y-axis assign -1 to S and 1 to W
-        let mut y_kb = (-(appwnd.input().key_held(VirtualKeyCode::S) as i32) + (appwnd.input().key_held(VirtualKeyCode::W) as i32)) as f32;
+        let mut y_kb = (-(appwnd.input().key_held(KeyCode::KeyS) as i32) + (appwnd.input().key_held(KeyCode::KeyW) as i32)) as f32;
         y_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickY);
         controllers[0].y_axis = y_kb.clamp(-1.0, 1.0);
     }
@@ -1422,7 +1422,7 @@ impl Game {
                                 },
 
                                 // if clear depth or write is enabled, set store
-                                store: true,
+                                store: wgpu::StoreOp::Store,
                             }),
 
                             stencil_ops: None,
@@ -1443,10 +1443,12 @@ impl Game {
                                     } else { 
                                         wgpu::LoadOp::Load 
                                     },
-                                    store: true,
+                                    store: wgpu::StoreOp::Store,
                                 },
                             })],
                             depth_stencil_attachment: depth_stencil_attachment.clone(),
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
                         });
 
                         // set this one only once
