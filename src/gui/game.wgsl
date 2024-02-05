@@ -101,7 +101,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
     switch(mode) {
         case 0u: { // NOMIRROR | WRAP
-            // we need to wramp within the (minval,maxval) range
+            // we need to wrap within the (minval,maxval) range
             let range = maxval - minval;
             return minval + fract((st - minval) / range) * range;
         }
@@ -130,6 +130,7 @@ fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
 fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S_SHIFT, 2u);
     let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T_SHIFT, 2u);
+
     let tex_coords = vec2(texcoord(in.tex_coords.x, in.tex_params.x, in.tex_params.y, texmode_s),
                           texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
 

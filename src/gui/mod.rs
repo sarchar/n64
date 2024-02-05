@@ -39,6 +39,7 @@ pub struct AppWindow<'a> {
     size        : LogicalSize<u32>,
     window      : Arc<Window>,
     input_helper: WinitInputHelper,
+    event_log   : Vec<WindowEvent>,
     wgpu        : WgpuInfo<'a>,
     gilrs       : gilrs::Gilrs,
     connected_gamepads: [Option<gilrs::GamepadId>; 4],
@@ -114,6 +115,7 @@ impl<'a> AppWindow<'a> {
             size        : window_size,
             window      : window,
             input_helper: WinitInputHelper::new(),
+            event_log   : vec![],
             gilrs       : gilrs,
             connected_gamepads: [None; 4],
             change_logging_func: change_logging,
@@ -146,6 +148,11 @@ impl<'a> AppWindow<'a> {
 
     fn input(&self) -> &WinitInputHelper {
         &self.input_helper
+    }
+
+    fn process_input(&mut self) {
+        self.input_helper.step_with_window_events(&self.event_log);
+        self.event_log.clear();
     }
 
     fn queue(&self) -> &wgpu::Queue {
@@ -217,18 +224,16 @@ impl<'a> AppWindow<'a> {
 
     fn run<F>(mut appwnd: AppWindow, mut user_update: F)
     where 
-        F: FnMut(&mut AppWindow, Event<()>) -> () + 'static
+        F: FnMut(&mut AppWindow, &Event<()>) -> () + 'static
     {
         // take ownership of the event loop so that we can pass AppWindow around freely
         let event_loop = std::mem::replace(&mut appwnd.event_loop, None).unwrap();
         event_loop.set_control_flow(ControlFlow::Poll);
         let _ = event_loop.run(move |event, elwt| {
-            // check for input events
-            if appwnd.input_helper.update(&event) {
-                if appwnd.input_helper.close_requested() || appwnd.input_helper.destroyed() {
-                    elwt.exit();
-                    return;
-                }
+            // check if input helper has requested close
+            if appwnd.input_helper.close_requested() || appwnd.input_helper.destroyed() {
+                elwt.exit();
+                return;
             }
 
             let repeat_filter = gilrs::ev::filter::Repeat::new();
@@ -254,6 +259,10 @@ impl<'a> AppWindow<'a> {
                     //    println!("unhandled event {:?}", ev);
                     //}
                 }
+            }
+
+            if let Event::WindowEvent { event, .. } = &event {
+                appwnd.event_log.push(event.clone());
             }
 
             match event {
@@ -283,7 +292,7 @@ impl<'a> AppWindow<'a> {
                 _ => (),
             };
 
-            user_update(&mut appwnd, event);
+            user_update(&mut appwnd, &event);
         });
     }
 }
@@ -391,6 +400,9 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
                 let ui = imgui.frame();
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                // must process input at some point
+                appwnd.process_input();
 
                 // render bg
                 app.update(appwnd, ui.io().delta_time);

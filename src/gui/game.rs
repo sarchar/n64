@@ -762,7 +762,7 @@ impl App for Game {
         }
 
         // CTRL+F5+n to generate interrupt signal n
-        if appwnd.input().key_held(KeyCode::ControlLeft) {
+        if appwnd.input().held_control() {
             const KEYS: &[KeyCode] = &[
                 KeyCode::F5, KeyCode::F6, KeyCode::F7,
                 KeyCode::F8, KeyCode::F9, KeyCode::F10,

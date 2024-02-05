@@ -1173,7 +1173,7 @@ impl Hle {
 
                     self.current_light_state.lights[light_index] = light;
                     self.current_light_state.colors[light_index] = color;
-                    println!("light{} color = {:?}", light_index, color);
+                    trace!(target: "HLE", "light{} color = {:?}", light_index, color);
                     light_index += 1;
                 }
 
@@ -2089,6 +2089,10 @@ impl Hle {
         // TODO I guess when these change we end up with a different crc and so a new upload
         let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) as u32) + 1;
         let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
+
+        if current_tile.ul.0 != 0.0 || current_tile.ul.1 != 0.0 {
+            warn!(target: "HLE", "TODO: mapping tile with ul != (0,0): {:?}", current_tile.ul);
+        }
 
         // calculate CRC of texture data
         let crc: u64 = {
