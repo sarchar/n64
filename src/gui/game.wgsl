@@ -1,8 +1,9 @@
-const VERTEX_FLAG_TEXTURED_SHIFT     : u32 = 0x00u;
-const VERTEX_FLAG_LINEAR_FILTER_SHIFT: u32 = 0x01u;
-const VERTEX_FLAG_TEXMODE_S_SHIFT    : u32 = 0x02u;
-const VERTEX_FLAG_TEXMODE_T_SHIFT    : u32 = 0x04u;
-const VERTEX_FLAG_LIT                : u32 = 0x06u;
+const VERTEX_FLAG_TEXTURED_SHIFT     : u32 = 0u;
+const VERTEX_FLAG_LINEAR_FILTER_SHIFT: u32 = 1u;
+const VERTEX_FLAG_TEXMODE_S_SHIFT    : u32 = 2u;
+const VERTEX_FLAG_TEXMODE_T_SHIFT    : u32 = 4u;
+const VERTEX_FLAG_LIT_SHIFT          : u32 = 6u;
+const VERTEX_FLAG_TWO_CYCLE_SHIFT    : u32 = 7u;
 
 const VERTEX_FLAG_TEXMODE_MASK : u32 = 0x03u;
 
@@ -173,7 +174,7 @@ fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
 }
 
 fn shade(in: VertexOutput) -> vec4<f32> {
-    if (extractBits(in.flags, VERTEX_FLAG_LIT, 1u) == 0u) {
+    if (extractBits(in.flags, VERTEX_FLAG_LIT_SHIFT, 1u) == 0u) {
         return in.color;
     } else {
         // perform lighting with the ambient from in.color
@@ -188,14 +189,18 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     }
 }
 
-fn select_color(letter: u32, src: u32, rc: vec3<f32>, shade: vec3<f32>, in: VertexOutput) -> vec3<f32> {
+fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4<f32>, in: VertexOutput) -> vec3<f32> {
     switch(src) {
+        case 0u: {
+            return cc.rgb;
+        }
+
         case 1u: {
-            return rc;
+            return rc.rgb;
         }
 
         case 2u: { // TODO TEXEL1
-            return rc;//vec3(1.0, 1.0, 1.0);
+            return rc.rgb;//vec3(1.0, 1.0, 1.0);
         }
 
         case 3u: {
@@ -203,7 +208,7 @@ fn select_color(letter: u32, src: u32, rc: vec3<f32>, shade: vec3<f32>, in: Vert
         }
 
         case 4u: {
-            return shade;
+            return shade.rgb;
         }
 
         case 5u: {
@@ -225,32 +230,88 @@ fn select_color(letter: u32, src: u32, rc: vec3<f32>, shade: vec3<f32>, in: Vert
 
         case 7u: {
             switch(letter) {
+                case 0u: { // NOISE
+                    return vec3(1.0, 1.0, 1.0);
+                }
+
+                case 2u: { // COMBINED_ALPHA
+                    return cc.aaa;
+                }
+
                 case 3u: {
                     return vec3(0.0, 0.0, 0.0);
                 }
-                // TODO CCMUX_NOISE
+
                 // TODO CCMUX_K4
-                // TODO CCMUX_COMBINED_ALPHA
                 default: {
                     return vec3(1.0, 1.0, 0.0);
                 }
             }
         }
 
-        case 15u, 31u: {
-            return vec3(0.0, 0.0, 0.0);
+        case 8u, 9u: {
+            switch(letter) {
+                case 2u: { return rc.aaa; } // TEXELn_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
+        }
+
+        case 10u: {
+            switch(letter) {
+                case 2u: { return color_combiner_state.prim_color.aaa; } // PRIMITIVE_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
+        }
+
+        case 11u: {
+            switch(letter) {
+                case 2u: { return shade.aaa; } // SHADE_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
+        }
+
+        case 12u: {
+            switch(letter) {
+                case 2u: { return color_combiner_state.env_color.aaa; } // ENVIRONMENT_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
+        }
+
+        case 13u: {
+            switch(letter) {
+                case 2u: { return vec3(0.0, 0.0, 0.0); } // LOD_FRACTION (TODO might need to be 1.0?)
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
+        }
+
+        case 14u: {
+            switch(letter) {
+                case 2u: { return vec3(0.0, 0.0, 0.0); } // PRIM_LOD_FRACTION (TODO might need to be 1.0?)
+                default: { return vec3(0.0, 0.0, 0.0); }
+            }
         }
 
         default: {
-            return vec3(1.0, 0.0, 1.0);
+            return vec3(0.0, 0.0, 0.0);
         }
     }
 }
 
-fn select_alpha(letter: u32, src: u32, rc: f32, shade: f32, in: VertexOutput) -> f32 {
+fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, shade: f32, in: VertexOutput) -> f32 {
     // cases 0 and 6 will use `letter`
 
     switch(src) {
+        case 0u: {
+            switch(letter) {
+                case 0u, 1u, 3u: {
+                    return cc;
+                }
+                default: {
+                    return 0.0;
+                }
+            }
+        }
+
         case 1u: {
             return rc;
         }
@@ -278,17 +339,13 @@ fn select_alpha(letter: u32, src: u32, rc: f32, shade: f32, in: VertexOutput) ->
                 }
                 // TODO PRIM_LOD_FRAC
                 default: {
-                    return 0.5;
+                    return 0.0;
                 }
             }
         }
 
-        case 7u: {
-            return 0.0;
-        }
-
         default: {
-            return 1.0;
+            return 0.0;
         }
     }
 }
@@ -307,10 +364,32 @@ fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
     let c0a_source = extractBits(color_combiner_state.alpha1_source,  8u, 8u);
     let d0a_source = extractBits(color_combiner_state.alpha1_source,  0u, 8u);
 
-    let a = vec4(select_color(0u, a0c_source, rc.rgb, shade_color.rgb, in), select_alpha(0u, a0a_source, rc.a, shade_color.a, in));
-    let b = vec4(select_color(1u, b0c_source, rc.rgb, shade_color.rgb, in), select_alpha(1u, b0a_source, rc.a, shade_color.a, in));
-    let c = vec4(select_color(2u, c0c_source, rc.rgb, shade_color.rgb, in), select_alpha(2u, c0a_source, rc.a, shade_color.a, in));
-    let d = vec4(select_color(3u, d0c_source, rc.rgb, shade_color.rgb, in), select_alpha(3u, d0a_source, rc.a, shade_color.a, in));
+    let cc_in = vec4(0.5, 0.5, 1.0, 1.0);
+    let a = vec4(select_color(0u, a0c_source, cc_in, rc, shade_color, in), select_alpha(0u, a0a_source, cc_in.a, rc.a, shade_color.a, in));
+    let b = vec4(select_color(1u, b0c_source, cc_in, rc, shade_color, in), select_alpha(1u, b0a_source, cc_in.a, rc.a, shade_color.a, in));
+    let c = vec4(select_color(2u, c0c_source, cc_in, rc, shade_color, in), select_alpha(2u, c0a_source, cc_in.a, rc.a, shade_color.a, in));
+    let d = vec4(select_color(3u, d0c_source, cc_in, rc, shade_color, in), select_alpha(3u, d0a_source, cc_in.a, rc.a, shade_color.a, in));
 
-    return (a - b) * c + d;
+    let cc_out = (a - b) * c + d;
+
+    if (extractBits(in.flags, VERTEX_FLAG_TWO_CYCLE_SHIFT, 1u) == 0u) {
+        return cc_out;
+    } else {
+        let a1c_source = extractBits(color_combiner_state.color2_source, 24u, 8u);
+        let b1c_source = extractBits(color_combiner_state.color2_source, 16u, 8u);
+        let c1c_source = extractBits(color_combiner_state.color2_source,  8u, 8u);
+        let d1c_source = extractBits(color_combiner_state.color2_source,  0u, 8u);
+
+        let a1a_source = extractBits(color_combiner_state.alpha2_source, 24u, 8u);
+        let b1a_source = extractBits(color_combiner_state.alpha2_source, 16u, 8u);
+        let c1a_source = extractBits(color_combiner_state.alpha2_source,  8u, 8u);
+        let d1a_source = extractBits(color_combiner_state.alpha2_source,  0u, 8u);
+
+        let a2 = vec4(select_color(0u, a1c_source, cc_out, rc, shade_color, in), select_alpha(0u, a1a_source, cc_out.a, rc.a, shade_color.a, in));
+        let b2 = vec4(select_color(1u, b1c_source, cc_out, rc, shade_color, in), select_alpha(1u, b1a_source, cc_out.a, rc.a, shade_color.a, in));
+        let c2 = vec4(select_color(2u, c1c_source, cc_out, rc, shade_color, in), select_alpha(2u, c1a_source, cc_out.a, rc.a, shade_color.a, in));
+        let d2 = vec4(select_color(3u, d1c_source, cc_out, rc, shade_color, in), select_alpha(3u, d1a_source, cc_out.a, rc.a, shade_color.a, in));
+
+        return (a2 - b2) * c2 + d2;
+    }
 }

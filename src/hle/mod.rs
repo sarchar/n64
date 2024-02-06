@@ -109,7 +109,8 @@ impl VertexFlags {
     pub const TEXMODE_S_SHIFT: u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     pub const TEXMODE_T_SHIFT: u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     pub const LIT            : u32 = 1u32 << 6;
-    // next VERTEX_FLAG at "<< 7"
+    pub const TWO_CYCLE      : u32 = 1u32 << 7;
+    // next VERTEX_FLAG at "<< 8"
 }
 
 // TODO at some point other ucode might support different types of lighting?
@@ -1706,6 +1707,10 @@ impl Hle {
             }
         }   
 
+        if self.other_modes.get_cycle_type() == CycleType::TwoCycle {
+            vtx.flags |= VertexFlags::TWO_CYCLE;
+        }
+
         let index = self.vertices.len();
         trace!(target: "HLE", "final: {:?}", vtx);
         self.vertices.push(vtx);
@@ -2535,7 +2540,7 @@ impl Hle {
 
         trace!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
         for _ in 0..(data_size / 8) { // number of 64-bit words to copy
-            let v = &data[source_offset..][..2];
+            let v = &data[(source_offset & 0x3FF)..][..2];
             source_offset += 2;
 
             match selected_tile.size {
