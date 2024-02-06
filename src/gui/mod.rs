@@ -63,27 +63,27 @@ impl<'a> AppWindow<'a> {
                 .expect("Error creating window")
         });
 
+        let backends = if allow_vulkan { wgpu::util::backend_bits_from_env().unwrap_or_default() } else { wgpu::Backends::GL };
+        let dx12_shader_compiler = wgpu::util::dx12_shader_compiler_from_env().unwrap_or_default();
+        let gles_minor_version = wgpu::util::gles_minor_version_from_env().unwrap_or_default();
+
         // Create a wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: backends,
+            flags: wgpu::InstanceFlags::from_build_config().with_env(),
+            dx12_shader_compiler,
+            gles_minor_version,
             ..Default::default()
         });
 
         // Create a wgpu surface
         let surface = instance.create_surface(window.clone()).expect("error creating window surface");
 
-        for adapter in instance.enumerate_adapters(wgpu::Backends::all()).into_iter() {
-            debug!(target: "GUI", "detected {:?}", adapter.get_info());
-        }
-
-        // Find an adapter to use
-        let adapter_list = instance.enumerate_adapters(wgpu::Backends::all());
-        let adapter = adapter_list.iter()
-            .filter(|adapter| {
-                adapter.is_surface_supported(&surface) && 
-                    ((allow_vulkan && adapter.get_info().backend == wgpu::Backend::Vulkan)
-                     || (!allow_vulkan && adapter.get_info().backend == wgpu::Backend::Gl))
-            }).next().expect("could not find a working wgpu adapter");
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface))
+                                    .await
+                                    .expect("could not get adapter");
+        let adapter_info = adapter.get_info();
+        info!(target: "GUI", "Using adapter {} ({:?})", adapter_info.name, adapter_info.backend);
 
         // Create the wgpu device and device queue
         let (device, queue) = adapter.request_device(
@@ -93,21 +93,28 @@ impl<'a> AppWindow<'a> {
                 required_limits  : wgpu::Limits::default(),
             },
             None,
-        ).await.unwrap();
+        ).await.expect("Unable to initialize GPU device");
 
         // Configure the swap chain
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter().copied().filter(|f| f.is_srgb()).next().unwrap_or(surface_caps.formats[0]);
+        let surface_format = surface_caps.formats
+                                .iter()
+                                .copied()
+                                .filter(|f| f.is_srgb())
+                                .next()
+                                .unwrap_or(surface_caps.formats[0]);
+        info!(target: "GUI", "Surface format = {:?}", surface_format);
     
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: window_size.width as u32,
             height: window_size.height as u32,
+
+            desired_maximum_frame_latency: 2,
             present_mode: wgpu::PresentMode::AutoNoVsync, //surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 0,
+            view_formats: vec![surface_format],
         };
 
         Self {

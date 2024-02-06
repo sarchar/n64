@@ -61,27 +61,28 @@ version = "0.8"
 version = "0.10"
 
 [dependencies.imgui-wgpu]
-version = "0.24"
 optional = true
+git = "https://github.com/sarchar/imgui-wgpu-rs"
+branch = "wgpu-0.19"
 
 [dependencies.wgpu]
-version = "0.17"
+version = "0.19"
 optional = true
 
 [dependencies.winit]
-version = "0.27"
+version = "0.29"
 optional = true
 
 [dependencies.imgui]
-version = "0.11"
 optional = true
+git = "https://github.com/imgui-rs/imgui-rs"
 
 [dependencies.imgui-winit-support]
-version = "0.11"
 optional = true
+git = "https://github.com/imgui-rs/imgui-rs"
 
 [dependencies.winit_input_helper]
-version = "0.13"
+version = "0.15"
 optional = true
 
 [dependencies.pollster]
