@@ -1563,7 +1563,7 @@ impl Hle {
                     self.matrices.push(MatrixState {
                         projection: self.current_projection_matrix.into(),
                         modelview : modelview.into(),
-                        mv_inverse: modelview.invert().unwrap().into(),
+                        mv_inverse: modelview.invert().unwrap_or(Matrix4::identity()).into(),
                         ..Default::default()
                     });
                     matrix_index
@@ -1669,11 +1669,11 @@ impl Hle {
             let current_tile = self.tex.tile;
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
 
-            if let Some((ti, mx, my)) = rdp_tile.mapped_coordinates {
-                // texture coordinate needs to be shifted by the tile's upper left position,
-                // and also shifted to the location in the mapped texture
-                vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
-                vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
+            if let Some((_, mx, my)) = rdp_tile.mapped_coordinates {
+                // leave the vertex texture coordinates alone so clamping/mirroring can be
+                // done in that space.
+                //vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
+                //vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
                 // the texture parameters need to be set to the bounding box of the texture
                 // mx,my correspond to the upper left coordinate (rdp_tile.ul) of the tile
@@ -1682,14 +1682,8 @@ impl Hle {
                 vtx.tex_params[2] = my as f32;        // y start
                 vtx.tex_params[3] = my as f32 + (rdp_tile.lr.1 - rdp_tile.ul.1) + 1.0;  // y end
 
-                // scale to 0..1 on the mapped texture
-                let mt = self.mapped_textures.get(ti as usize).unwrap().read().unwrap();
-                vtx.tex_coords[0] /= mt.width  as f32;
-                vtx.tex_coords[1] /= mt.height as f32;
-                vtx.tex_params[0] /= mt.width  as f32;
-                vtx.tex_params[1] /= mt.width  as f32;
-                vtx.tex_params[2] /= mt.height as f32;
-                vtx.tex_params[3] /= mt.height as f32;
+                // all the tex coords and params stay in the unscaled form 
+                // they will be scaled in the shader
             }
 
             if self.disable_textures {
@@ -2111,6 +2105,7 @@ impl Hle {
         let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) as u32) + 1;
         let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
 
+        // TODO tiles with upper left coordinates not at 0,0 are getting the wrong texture data
         if current_tile.ul.0 != 0.0 || current_tile.ul.1 != 0.0 {
             warn!(target: "HLE", "TODO: mapping tile with ul != (0,0): {:?}", current_tile.ul);
         }

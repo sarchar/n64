@@ -103,23 +103,22 @@ fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
         case 0u: { // NOMIRROR | WRAP
             // we need to wrap within the (minval,maxval) range
             let range = maxval - minval;
-            return minval + fract((st - minval) / range) * range;
+            return minval + fract(st / range) * range;
         }
         case 1u: { // MIRROR
             // TODO mirror might only make sense after maskST and shiftST are implemented
-            let d = st - minval;
-            return maxval - d;
-            //.let range = maxval - minval;
-            //.let wraps = (st - minval) / range;
-            //.let count = u32(trunc(wraps));
-            //.if (extractBits(count, 0u, 1u) == 1u) {
-            //.    return minval + (1.0 - fract(wraps)) * range;
-            //.} else {
-            //.    return minval + fract(wraps) * range;
-            //.}
+            let range = maxval - minval;
+            let wraps = st / range;
+            let count = u32(trunc(wraps));
+            if (extractBits(count, 0u, 1u) == 1u) { 
+                return maxval - (1.0 - fract(wraps)) * range;
+            } else {
+                return minval + fract(wraps) * range;
+            }
         }
         case 2u: { // CLAMP
-            return clamp(st, minval, maxval);
+            let size = maxval - minval;
+            return minval + clamp(st, 0.0, size);
         }
         default: { // invalid, shouldn't happen
             return 0.0;
@@ -134,8 +133,8 @@ fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     let tex_coords = vec2(texcoord(in.tex_coords.x, in.tex_params.x, in.tex_params.y, texmode_s),
                           texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
 
-    let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords);
-    let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords);
+    let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords / 512.0);
+    let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords / 512.0);
 
     if (extractBits(in.flags, VERTEX_FLAG_TEXTURED_SHIFT, 1u) == 1u) {
         if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER_SHIFT, 1u) == 1u) {
