@@ -84,9 +84,14 @@ impl ShaderData for Vertex {
                     shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                wgpu::VertexAttribute { // flags
+                wgpu::VertexAttribute { // maskshift
                     offset: std::mem::size_of::<[f32; 17]>() as wgpu::BufferAddress,
                     shader_location: 5,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute { // flags
+                    offset: (std::mem::size_of::<[f32; 17]>() + std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+                    shader_location: 6,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ]
@@ -596,7 +601,7 @@ impl App for Game {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format             : wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: false,
-                    depth_compare      : wgpu::CompareFunction::Less,
+                    depth_compare      : wgpu::CompareFunction::LessEqual,
                     stencil            : wgpu::StencilState::default(),
                     bias               : wgpu::DepthBiasState::default()
                 }),
@@ -613,7 +618,7 @@ impl App for Game {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format             : wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: true,
-                    depth_compare      : wgpu::CompareFunction::Less,
+                    depth_compare      : wgpu::CompareFunction::LessEqual,
                     stencil            : wgpu::StencilState::default(),
                     bias               : wgpu::DepthBiasState::default()
                 }),
@@ -647,7 +652,7 @@ impl App for Game {
         let index_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Game Index Buffer"),
-                size : (std::mem::size_of::<u16>() * 10 * 1024) as u64,
+                size : (std::mem::size_of::<u16>() * 20 * 1024) as u64,
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }

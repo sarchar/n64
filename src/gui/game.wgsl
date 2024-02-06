@@ -41,7 +41,8 @@ struct VertexInput {
     @location(2) normal    : vec3<f32>,
     @location(3) tex_coords: vec2<f32>,
     @location(4) tex_params: vec4<f32>,
-    @location(5) flags     : u32,
+    @location(5) maskshift : u32,
+    @location(6) flags     : u32,
 };
 
 struct VertexOutput {
@@ -53,7 +54,8 @@ struct VertexOutput {
     @location(2) tex_coords: vec2<f32>,
     // flags and tex_params are the same at each vertex, so look as if they're constant
     @location(3) tex_params: vec4<f32>,
-    @location(4) flags     : u32,
+    @location(4) maskshift : u32,
+    @location(5) flags     : u32,
 };
 
 struct FragmentOutput {
@@ -72,6 +74,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.color         = in.color;
     out.tex_coords    = in.tex_coords;
     out.tex_params    = in.tex_params;
+    out.maskshift     = in.maskshift;
     out.flags         = in.flags;
 
     return out;
@@ -98,40 +101,62 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     return out;
 }
 
-fn texcoord(st: f32, minval: f32, maxval: f32, mode: u32) -> f32 {
-    switch(mode) {
-        case 0u: { // NOMIRROR | WRAP
-            // we need to wrap within the (minval,maxval) range
+fn texcoord(st_in: f32, minval: f32, maxval: f32, mask: f32, mode: u32) -> f32 {
+    if mask < 0.1 { // when not masking, clamp is implicit and mode is ignored
+        return clamp(minval + st_in, minval, maxval);
+    } else {
+        var st: f32;
+        let mask2 = pow(2.0, mask);
+
+        // optionally clamp input coordinate before mirror/wrap
+        if(extractBits(mode, 2u, 1u) == 1u) {
             let range = maxval - minval;
-            return minval + fract(st / range) * range;
+            st = clamp(st_in / range, 0.0, 1.0) * range;
+        } else {
+            st = st_in;
         }
-        case 1u: { // MIRROR
-            // TODO mirror might only make sense after maskST and shiftST are implemented
-            let range = maxval - minval;
-            let wraps = st / range;
-            let count = u32(trunc(wraps));
-            if (extractBits(count, 0u, 1u) == 1u) { 
-                return maxval - (1.0 - fract(wraps)) * range;
+
+        // -8, -7, .. -2, -1, 0, 1, 2, 3, 4, .. 8, 9, 10, ..
+        //  0   1      6   7  0, 1, 2, 3, 4, .. 0, 1, 2, ..   <-- WRAP
+        //      7      2   1  0, 1, 2, 3, 4, .. 7, 7, 5, ..   <-- MIRROR
+        if(extractBits(mode, 0u, 1u) == 0u) { // WRAP (performed by masking)
+            if st < 0.0 {
+                return minval + (mask2 + (st % mask2));
             } else {
-                return minval + fract(wraps) * range;
+                return minval + (st % mask2);
+            }
+        } else { // MIRROR
+            let count = u32(trunc(st / mask2));
+            if (extractBits(count, 0u, 1u) == 1u) { 
+                let inverted = mask2 - (abs(st) % mask2);
+                return minval + inverted;
+            } else {
+                return minval + (abs(st) % mask2);
             }
         }
-        case 2u: { // CLAMP
-            let size = maxval - minval;
-            return minval + clamp(st, 0.0, size);
-        }
-        default: { // invalid, shouldn't happen
-            return 0.0;
-        }
+    }
+}
+
+fn shift(st: f32, shift: f32) -> f32 {
+    if shift < 0.1 {  // no shift, leave texcoord alone
+        return st;
+    } else if shift <= 10.0 {
+        return st / pow(2.0, shift);
+    } else {
+        return st * pow(2.0, 5.0 - (shift - 11.0));
     }
 }
 
 fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S_SHIFT, 2u);
     let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T_SHIFT, 2u);
+    let mask_s     = f32(extractBits(in.maskshift, 24u, 8u)); // 0xMSssMTst // mask_s shift_s mask_t shift_t
+    let shift_s    = f32(extractBits(in.maskshift, 16u, 8u));
+    let mask_t     = f32(extractBits(in.maskshift,  8u, 8u));
+    let shift_t    = f32(extractBits(in.maskshift,  0u, 8u));
 
-    let tex_coords = vec2(texcoord(in.tex_coords.x, in.tex_params.x, in.tex_params.y, texmode_s),
-                          texcoord(in.tex_coords.y, in.tex_params.z, in.tex_params.w, texmode_t));
+    let tex_coords = vec2(texcoord(shift(in.tex_coords.x, shift_s), in.tex_params.x, in.tex_params.y, mask_s, texmode_s),
+                          texcoord(shift(in.tex_coords.y, shift_t), in.tex_params.z, in.tex_params.w, mask_t, texmode_t));
 
     let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords / 512.0);
     let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords / 512.0);
@@ -170,7 +195,7 @@ fn select_color(letter: u32, src: u32, rc: vec3<f32>, shade: vec3<f32>, in: Vert
         }
 
         case 2u: { // TODO TEXEL1
-            return rc; //vec3(0.0, 0.0, 1.0);
+            return rc;//vec3(1.0, 1.0, 1.0);
         }
 
         case 3u: {

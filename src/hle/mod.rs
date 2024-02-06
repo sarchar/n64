@@ -77,6 +77,7 @@ pub struct Vertex {
     pub normal    : [f32; 3],
     pub tex_coords: [f32; 2],
     pub tex_params: [f32; 4],
+    pub maskshift : u32,
     pub flags     : u32,
 }
 
@@ -88,6 +89,7 @@ impl Vertex {
             normal    : [1.0, 0.0, 0.0],
             tex_coords: [0.0, 0.0],
             tex_params: [0.0, 1.0, 0.0, 1.0],
+            maskshift : 0,
             flags     : 0,
         }
     }
@@ -1670,21 +1672,26 @@ impl Hle {
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
 
             if let Some((_, mx, my)) = rdp_tile.mapped_coordinates {
-                // leave the vertex texture coordinates alone so clamping/mirroring can be
-                // done in that space.
-                //vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
-                //vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
+                // adjust texcoords to be relative to the ul coordinate
+                vtx.tex_coords[0] = vtx.tex_coords[0] - rdp_tile.ul.0;
+                vtx.tex_coords[1] = vtx.tex_coords[1] - rdp_tile.ul.1;
 
                 // the texture parameters of the tile need to be sent to the shader
                 // mx,my correspond to 0,0 of the texture (not rdp_tile.ul!)
-                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;        // x start
-                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;  // x end
-                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;        // y start
-                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;  // y end
+                vtx.tex_params[0] = mx as f32;        // x start
+                vtx.tex_params[1] = mx as f32 + (rdp_tile.lr.0 - rdp_tile.ul.0) + 1.0;  // x end
+                vtx.tex_params[2] = my as f32;        // y start
+                vtx.tex_params[3] = my as f32 + (rdp_tile.lr.1 - rdp_tile.ul.1) + 1.0;  // y end
 
                 // all the tex coords and params stay in the unscaled form 
                 // they will be scaled in the shader
             }
+
+            // mask and shift values for this tile
+            vtx.maskshift = ((rdp_tile.mask_s as u32) << 24)
+                            | ((rdp_tile.shift_s as u32) << 16)
+                            | ((rdp_tile.mask_t as u32) << 8)
+                            | ((rdp_tile.shift_t as u32) << 0);
 
             if self.disable_textures {
                 vtx.flags &= !VertexFlags::TEXTURED;
@@ -1698,13 +1705,6 @@ impl Hle {
                 }
             }
         }   
-
-        // adjust color according to G_SHADE. If shading is not enabled, the color value is not
-        // passed to the RDP.
-        // I think this is correct but things go 
-        if (self.geometry_mode & 0x04) == 0 { // G_SHADE
-            vtx.color = [ 0.7, 0.7, 0.7, 1.0 ];
-        }
 
         let index = self.vertices.len();
         trace!(target: "HLE", "final: {:?}", vtx);
@@ -2112,7 +2112,7 @@ impl Hle {
             4096 / line_bytes
         };
 
-        let texture_height = std::cmp::min(current_tile.lr.1 as u32 + 1, max_height);
+        let texture_height = std::cmp::min((current_tile.lr.1 as u32).saturating_sub(current_tile.ul.1 as u32) + 1, max_height);
 
         // TODO tiles with upper left coordinates not at 0,0 are getting the wrong texture data
         //if current_tile.ul.0 != 0.0 || current_tile.ul.1 != 0.0 {
@@ -2307,7 +2307,8 @@ impl Hle {
 
         // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
         // all other vertices take the color of the first vertex
-        if (self.geometry_mode & 0x0020_0000) == 0 { // G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
+        let is_lit = (self.vertices[v0 as usize].flags & VertexFlags::LIT) != 0;
+        if !is_lit && (self.geometry_mode & 0x0020_0004) == 0x04 { // G_SHADE and !G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
             self.vertices[v1 as usize].color = self.vertices[v0 as usize].color;
             self.vertices[v2 as usize].color = self.vertices[v0 as usize].color;
         }
@@ -2350,7 +2351,8 @@ impl Hle {
 
         // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
         // all other vertices take the color of the first vertex
-        if (self.geometry_mode & 0x0020_0000) == 0 { // G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
+        let is_lit = (self.vertices[v00 as usize].flags & VertexFlags::LIT) != 0;
+        if !is_lit && (self.geometry_mode & 0x0020_0004) == 0x04 { // G_SHADE and !G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
             self.vertices[v01 as usize].color = self.vertices[v00 as usize].color;
             self.vertices[v02 as usize].color = self.vertices[v00 as usize].color;
             self.vertices[v11 as usize].color = self.vertices[v10 as usize].color;
@@ -3066,7 +3068,7 @@ impl Hle {
         let old_enable = self.tex.enabled;
         self.tex.enabled = true;
         let old_coord  = self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates;
-        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((2, 0, 0));
+        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((0, 0, 0));
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);
