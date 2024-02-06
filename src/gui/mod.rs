@@ -397,8 +397,13 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
                 let frame = match appwnd.surface().get_current_texture() {
                     Ok(frame) => frame,
-                    Err(e) => {
+                    Err(wgpu::SurfaceError::Timeout) => appwnd.surface().get_current_texture().expect("failed to acquire the next surface texture"),
+                    e @ Err(
+                        // Outdated and Lost means we need to reconfigure the surface
+                        wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost | wgpu::SurfaceError::OutOfMemory,
+                    ) => {
                         error!(target: "GUI", "dropped frame: {e:?}");
+                        appwnd.wgpu.surface.configure(&appwnd.wgpu.device, &appwnd.wgpu.surface_config);
                         return;
                     }
                 };
