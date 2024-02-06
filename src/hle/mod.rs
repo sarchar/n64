@@ -1675,12 +1675,12 @@ impl Hle {
                 //vtx.tex_coords[0] = mx as f32 + (vtx.tex_coords[0] - rdp_tile.ul.0);
                 //vtx.tex_coords[1] = my as f32 + (vtx.tex_coords[1] - rdp_tile.ul.1);
 
-                // the texture parameters need to be set to the bounding box of the texture
-                // mx,my correspond to the upper left coordinate (rdp_tile.ul) of the tile
-                vtx.tex_params[0] = mx as f32;        // x start
-                vtx.tex_params[1] = mx as f32 + (rdp_tile.lr.0 - rdp_tile.ul.0) + 1.0;  // x end
-                vtx.tex_params[2] = my as f32;        // y start
-                vtx.tex_params[3] = my as f32 + (rdp_tile.lr.1 - rdp_tile.ul.1) + 1.0;  // y end
+                // the texture parameters of the tile need to be sent to the shader
+                // mx,my correspond to 0,0 of the texture (not rdp_tile.ul!)
+                vtx.tex_params[0] = mx as f32 + rdp_tile.ul.0;        // x start
+                vtx.tex_params[1] = mx as f32 + rdp_tile.lr.0 + 1.0;  // x end
+                vtx.tex_params[2] = my as f32 + rdp_tile.ul.1;        // y start
+                vtx.tex_params[3] = my as f32 + rdp_tile.lr.1 + 1.0;  // y end
 
                 // all the tex coords and params stay in the unscaled form 
                 // they will be scaled in the shader
@@ -1840,7 +1840,7 @@ impl Hle {
                     let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
                     let address = (tmem_address << 3) + offset;
                     let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-                                                           //
+
                     (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
                 };
 
@@ -2087,39 +2087,58 @@ impl Hle {
 
         // calculate row stride of the source texture data, not always the same as width
         let line_bytes = (current_tile.line as u32) * 8;
-        let _padded_width = match current_tile.size {
-            0 => line_bytes << 1, // 4b
-            1 => line_bytes     , // 8b
-            2 => line_bytes >> 1, // 16b
-            3 => line_bytes >> 2, // 32b
-            5 => todo!("SIZ_DD"),
-            _ => { error!(target: "HLE", "invalid texture size"); 0 },
-        };
 
         // TODO we really shouldn't use lr coordinates if clamp or wrapping
         // isn't set. We could just use padded_width to map the width of the texture,
         // but I'm not sure where the height of the texture would come from
 
         // tile bounds are inclusive of texels, so add 1 in each dim
-        // TODO I guess when these change we end up with a different crc and so a new upload
-        let texture_width  = ((current_tile.lr.0 - current_tile.ul.0) as u32) + 1;
-        let texture_height = ((current_tile.lr.1 - current_tile.ul.1) as u32) + 1;
+        // we're going to ignore the ul coordinate of the tile and map from 0,0 to lr
+        // so we end up mapping a texture larger than required but 
+        let texture_width = match current_tile.size {
+            0 => line_bytes << 1, // 4b
+            1 => line_bytes     , // 8b
+            2 => line_bytes >> 1, // 16b
+            3 => line_bytes >> 1, // 32b have a width twice the line size due to the split
+                                  //     nature of the data
+            5 => todo!("SIZ_DD"),
+            _ => { error!(target: "HLE", "invalid texture size"); 0 },
+        };
+
+        // cap texture_height to the availble tmem memory
+        let max_height = if current_tile.format == 2 { // CI
+            2048 / line_bytes
+        } else {
+            4096 / line_bytes
+        };
+
+        let texture_height = std::cmp::min(current_tile.lr.1 as u32 + 1, max_height);
 
         // TODO tiles with upper left coordinates not at 0,0 are getting the wrong texture data
-        if current_tile.ul.0 != 0.0 || current_tile.ul.1 != 0.0 {
-            warn!(target: "HLE", "TODO: mapping tile with ul != (0,0): {:?}", current_tile.ul);
-        }
+        //if current_tile.ul.0 != 0.0 || current_tile.ul.1 != 0.0 {
+        //    warn!(target: "HLE", "TODO: mapping tile with ul != (0,0): {:?}", current_tile.ul);
+        //}
 
         // calculate CRC of texture data
         let crc: u64 = {
-            let tmem_start = (current_tile.tmem << 1) as usize;
+            let crc_start = ((current_tile.tmem as u32) << 1) as usize;
             let len = ((line_bytes * texture_height) >> 2) as usize;
-            let data = (self.tex.tmem[tmem_start..][..len]).iter().map(|v| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+            let data = (self.tex.tmem[crc_start..][..len])
+                            .iter()
+                            .map(|v| v.to_be_bytes())
+                            .flatten()
+                            .collect::<Vec<u8>>();
+
             let crc = crc64::crc64(0, &data);
+
             // 32-bit textures need to crc the high half of memory too
             if current_tile.size == 3 {
-                let tmem_start = ((current_tile.tmem << 1) ^ 0x200) as usize;
-                let data = (self.tex.tmem[tmem_start..][..len]).iter().map(|v| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+                let data = (self.tex.tmem[crc_start ^ 0x200..][..len])
+                                .iter()
+                                .map(|v| v.to_be_bytes())
+                                .flatten()
+                                .collect::<Vec<u8>>();
+
                 crc64::crc64(crc, &data)
             } else if current_tile.format == 2 { // Color-indexed textures, 
                 // Palette textures need their palette CRC'd so we can get palette animations
@@ -2138,9 +2157,8 @@ impl Hle {
             return;
         }
 
-        // we need to duplicate the top row and left column of every texture so that "clamping"
-        // works for bilinear filters.
-        let (ti, mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+1, texture_height+1);
+        // we need to duplicate the borders of every texture so that filters don't look ugly
+        let (ti, mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+2, texture_height+2);
         info!(target: "HLE", "allocated texture space at {},{} in ti={} for texture size {}x{} (crc=${:X})", mx, my, ti, texture_width, texture_height, crc);
 
         // coordinates that the polys use will be increased by 1 to accomodate the duplicate texture data
@@ -2175,6 +2193,12 @@ impl Hle {
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             } 
+            // copy color into (w, h)
+            else if x == texture_width - 1 && y == texture_height - 1 {
+                let offset = offset + 4*(mtw as usize + 1);
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            } 
 
             // copy color into (-1, y)
             if x == 0 {
@@ -2182,10 +2206,22 @@ impl Hle {
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             } 
+            // copy color into (w, y)
+            else if x == texture_width - 1 {
+                let offset = offset + 4; // sizeof(u32)
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            }
 
             // copy color into (x, -1)
             if y == 0 {
                 let offset = offset - 4*mtw as usize; // sizeof(u32)
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+            }
+            // copy color into (x, h)
+            else if y == texture_height - 1 {
+                let offset = offset + 4*mtw as usize; // sizeof(u32)
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
             }
@@ -2993,14 +3029,56 @@ impl Hle {
         let cur_pos = self.vertices.len() as u16; // save start index
 
         // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // TL
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // TR
-        self.vertices.push(Vertex { position: [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // BR
-        self.vertices.push(Vertex { position: [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], flags: VertexFlags::TEXTURED, ..Default::default() }); // BL
+        self.vertices.push(Vertex { // TL
+            position  : [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], 
+            tex_coords: [0.0, 0.0], 
+            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
+            color     : [1.0, 1.0, 1.0, 1.0], 
+            flags     : VertexFlags::TEXTURED, 
+            ..Default::default() 
+        });
+        self.vertices.push(Vertex { // TR
+            position  : [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], 
+            tex_coords: [TEXSIZE_WIDTH as f32, 0.0], 
+            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
+            color     : [1.0, 1.0, 1.0, 1.0], 
+            flags     : VertexFlags::TEXTURED, 
+            ..Default::default() 
+        });
+        self.vertices.push(Vertex { // BR
+            position  : [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], 
+            tex_coords: [TEXSIZE_WIDTH as f32, TEXSIZE_HEIGHT as f32], 
+            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
+            color     : [1.0, 1.0, 1.0, 1.0], 
+            flags     : VertexFlags::TEXTURED, 
+            ..Default::default() 
+        });
+        self.vertices.push(Vertex { // BL
+            position  : [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], 
+            tex_coords: [0.0, TEXSIZE_WIDTH as f32], 
+            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
+            color     : [1.0, 1.0, 1.0, 1.0], 
+            flags     : VertexFlags::TEXTURED, 
+        ..Default::default()
+        });
+
+        // enable texturing and select which texture to show
+        let old_enable = self.tex.enabled;
+        self.tex.enabled = true;
+        let old_coord  = self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates;
+        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((2, 0, 0));
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);
+        self.disable_depth_override = Some(());
         self.add_triangles(RenderPassType::DrawTriangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
+
+        // G_TRI* needs this
+        self.disable_depth_override = Some(());
+
+        // fix state
+        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = old_coord;
+        self.tex.enabled = old_enable;
     }
 
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
