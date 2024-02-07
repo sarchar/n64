@@ -15,6 +15,9 @@ pub struct Rdp {
     intermediate_end: u32,
     end: u32,
     status: u32,
+
+    clock: u32,
+    last_clock_update: u64,
 }
 
 impl Rdp {
@@ -28,6 +31,9 @@ impl Rdp {
             intermediate_end: 0,
             end: 0,
             status: 0,
+
+            clock: 0,
+            last_clock_update: 0,
         }
     }
 
@@ -37,6 +43,13 @@ impl Rdp {
         self.start_latch = 0;
         self.end = 0;
         self.status = 0;
+    }
+
+    pub fn update_clock(&mut self) {
+        let cur = self.comms.total_cpu_steps.get() as u64;
+        let delta = cur - self.last_clock_update;
+        self.clock = self.clock.wrapping_add(delta as u32) & 0x00FF_FFFF;
+        self.last_clock_update = cur * 2 / 3; // 62.5MHz on the cpu's 93.75MHz TODO
     }
 }
 
@@ -89,6 +102,12 @@ impl Addressable for Rdp {
                 }
 
                 Ok(ret)
+            },
+
+            // DP_CLOCK
+            0x0010_0010 => {
+                self.update_clock();
+                Ok(self.clock)
             },
 
             _ => {
