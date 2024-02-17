@@ -144,8 +144,9 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmulationFlags {
     pub disable_textures: bool,
-    pub view_texture_map: u32,
     pub disable_lighting: bool,
+    pub view_texture_map: u32,
+    pub view_texture_index: u32,
 }
 
 // Collection of thread-safe channels for the front end to communicate with the emulating system

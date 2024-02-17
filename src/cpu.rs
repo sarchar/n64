@@ -2032,7 +2032,7 @@ impl Cpu {
         let mem = if (virtual_address & 0xF000_0000) != 0xA000_0000 {
             self.read_u32_phys(address)? // this read "simulates" the cache miss and fetch and 
                                          // doesn't happen for uncached addresses
-        } else { panic!("test"); /*0*/ };
+        } else { panic!("read from ${:08X}", virtual_address); /*0*/ };
 
         // combine register and mem
         let shift = offset << 3;
