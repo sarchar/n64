@@ -822,9 +822,14 @@ impl App for Game {
             }
 
             // CTRL+U to view the texture map 
+            // CTRL+SHIFT+U to cycle the maps
             if appwnd.input().key_pressed(KeyCode::KeyU) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
-                ef.view_texture_map = (ef.view_texture_map + 1) % 5;
+                if appwnd.input().held_shift() {
+                    ef.view_texture_index += 1;
+                } else {
+                    ef.view_texture_map = (ef.view_texture_map + 1) % 5;
+                }
             }
 
             // CTLR+L to disable lighting (and view normals as if they're the model color)
