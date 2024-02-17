@@ -911,6 +911,9 @@ impl App for Game {
         // run once or sync
         while !self.render_game(appwnd) && self.args.sync_ui_to_game {}
 
+        // always check inputs
+        self.check_inputs = true;
+
         let mut encoder: wgpu::CommandEncoder =
             appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Game Texture Encoder") });
         {
@@ -1093,10 +1096,11 @@ impl Game {
         set_button_state(&mut controllers[0].r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || appwnd.input().key_held(KeyCode::Quote));
 
         // C buttons - IJKL
-        set_button_state(&mut controllers[0].c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)>0.2) || appwnd.input().key_held(KeyCode::KeyI));
-        set_button_state(&mut controllers[0].c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY)<0.2) || appwnd.input().key_held(KeyCode::KeyK));
-        set_button_state(&mut controllers[0].c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)<0.2) || appwnd.input().key_held(KeyCode::KeyJ));
-        set_button_state(&mut controllers[0].c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX)>0.2) || appwnd.input().key_held(KeyCode::KeyL));
+        const DEADZONE: f32 = 0.2;
+        set_button_state(&mut controllers[0].c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) >  DEADZONE) || appwnd.input().key_held(KeyCode::KeyI));
+        set_button_state(&mut controllers[0].c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) < -DEADZONE) || appwnd.input().key_held(KeyCode::KeyK));
+        set_button_state(&mut controllers[0].c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) < -DEADZONE) || appwnd.input().key_held(KeyCode::KeyJ));
+        set_button_state(&mut controllers[0].c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) >  DEADZONE) || appwnd.input().key_held(KeyCode::KeyL));
 
         // DPad - Arrow keys
         set_button_state(&mut controllers[0].d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || appwnd.input().key_held(KeyCode::ArrowUp));
@@ -1518,7 +1522,6 @@ impl Game {
                         self.game_last_fps_time = Instant::now();
                     }
 
-                    self.check_inputs = true;
                     self.reset_render_state();
 
                     // trigger RDP interrupt to signal render is done
