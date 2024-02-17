@@ -546,6 +546,8 @@ impl Rsp {
                     count         : count,
                     length        : length,
                     source_stride : skip,
+                    dest_mask     : 0x0000_0FFF,
+                    dest_bits     : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
                     completed     : Some(self.dma_completed_tx.clone()),
                     ..Default::default()
                 };
@@ -584,6 +586,8 @@ impl Rsp {
                     count         : count,
                     length        : length,
                     dest_stride   : skip,
+                    source_mask   : 0x0000_0FFF,
+                    source_bits   : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
                     completed     : Some(self.dma_completed_tx.clone()),
                     ..Default::default()
                 };
@@ -1615,6 +1619,8 @@ impl RspCpuCore {
                             count         : count,
                             length        : length,
                             source_stride : skip,
+                            dest_mask     : 0x0000_0FFF,
+                            dest_bits     : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
                             completed     : Some(self.dma_completed_tx.clone()),
                             ..Default::default()
                         };
@@ -1654,6 +1660,8 @@ impl RspCpuCore {
                             count         : count,
                             length        : length,
                             dest_stride   : skip,
+                            source_mask   : 0x0000_0FFF,
+                            source_bits   : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
                             completed     : Some(self.dma_completed_tx.clone()),
                             ..Default::default()
                         };

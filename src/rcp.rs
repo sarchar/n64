@@ -25,6 +25,10 @@ pub struct DmaInfo {
     pub length        : u32, // length of a line
     pub source_stride : u32, // bytes to skip on the source after copy
     pub dest_stride   : u32, // bytes to skip on the dest after a copy 
+    pub source_mask   : u32, // address mask after incrementing
+    pub dest_mask     : u32, // address mask after incrementing
+    pub source_bits   : u32, // address bits to always OR in after incrementing source
+    pub dest_bits     : u32, // address bits to always OR in after incrementing dest
 
     // callback function to let the initiator know the DMA has completed
     pub completed     : Option<mpsc::Sender<DmaInfo>>,
@@ -40,6 +44,10 @@ impl Default for DmaInfo {
             length        : 0,
             source_stride : 0,
             dest_stride   : 0,
+            source_mask   : 0xFFFF_FFFF,
+            dest_mask     : 0xFFFF_FFFF,
+            source_bits   : 0,
+            dest_bits     : 0,
             completed     : None,
         }
     }
@@ -47,8 +55,8 @@ impl Default for DmaInfo {
 
 impl fmt::Debug for DmaInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "DmaInfo {{ initiator: {:?}, source_address: ${:08X}, dest_address: ${:08X}, count: {}, length: {}, source_stride: ${:X}, dest_stride: ${:X} }}",
-                    self.initiator, self.source_address, self.dest_address, self.count, self.length, self.source_stride, self.dest_stride)
+        write!(f, "DmaInfo {{ initiator: {:?}, source_address: ${:08X}, dest_address: ${:08X}, count: {}, length: {}, source_stride: ${:X}, dest_stride: ${:X}, source_mask: ${:08X}, dest_mask: ${:08X}, source_bits: ${:X}, dest_bits: ${:X} }}",
+                    self.initiator, self.source_address, self.dest_address, self.count, self.length, self.source_stride, self.dest_stride, self.source_mask, self.dest_mask, self.source_bits, self.dest_bits)
     }
 }
 
@@ -269,12 +277,14 @@ impl Rcp {
 
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
         for _ in 0..dma_info.count {
-            //info!(target: "DMA", "reading source_address=${:08X} length=${:08X} dest_address=${:08X}", source_address, dma_info.length, dest_address);
+            info!(target: "DMA", "moving source_address=${:08X} length=${:08X} to dest_address=${:08X}", source_address, dma_info.length, dest_address);
             let block = self.read_block(source_address as usize, dma_info.length)?;
             source_address += dma_info.length + dma_info.source_stride;
+            source_address  = (source_address & dma_info.source_mask) | dma_info.source_bits;
 
             self.write_block(dest_address as usize, &block)?;
             dest_address += dma_info.length + dma_info.dest_stride;
+            dest_address  = (dest_address & dma_info.dest_mask) | dma_info.dest_bits;
         }
 
         Ok(())
