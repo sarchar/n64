@@ -414,10 +414,10 @@ impl Addressable for PifRom {
         debug!(target: "PIF", "read32 offset=${:08X}", offset);
 
         if offset < 1984 {
-            Ok(((self.boot_rom[offset+1] as u32) << 24)
-               | ((self.boot_rom[offset+0] as u32) << 16)
-               | ((self.boot_rom[offset+3] as u32) << 8)
-               | (self.boot_rom[offset+2] as u32))
+            Ok(((self.boot_rom[offset+0] as u32) << 24)
+               | ((self.boot_rom[offset+1] as u32) << 16)
+               | ((self.boot_rom[offset+2] as u32) << 8)
+               | (self.boot_rom[offset+3] as u32))
         } else if offset == 0x7FC {
             // HACK! data is always available (bit 7 set)
             if self.command_finished { 
