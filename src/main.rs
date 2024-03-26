@@ -122,7 +122,7 @@ fn main() {
 
     let program_rom = args.game_file.clone();
     let make_system = move |comms: SystemCommunication| {
-        System::new(comms, "bios/pifrom.v64", &program_rom)
+        System::new(comms, "bios/pifrom.z64", &program_rom)
     };
 
     // either run or debug

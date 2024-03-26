@@ -31,7 +31,7 @@ const Cop0_CmdStart      : usize = 8;
 const Cop0_CmdEnd        : usize = 9;
 const Cop0_CmdCurrent    : usize = 10;
 const Cop0_CmdStatus     : usize = 11;
-const _Cop0_CmdClock      : usize = 12;
+const Cop0_CmdClock      : usize = 12;
 const _Cop0_CmdBusy       : usize = 13;
 const _Cop0_CmdPipeBusy   : usize = 14;
 const _Cop0_CmdTMemBusy   : usize = 15;
@@ -1574,6 +1574,10 @@ impl RspCpuCore {
 
                     Cop0_CmdStatus => {
                         self.rdp.lock().unwrap().read_u32(0x0010_000C)?
+                    },
+
+                    Cop0_CmdClock => {
+                        self.rdp.lock().unwrap().read_u32(0x0010_0010)?
                     },
 
                     _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
