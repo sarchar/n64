@@ -400,6 +400,9 @@ impl Addressable for PeripheralInterface {
             } else {
                 Ok(self.cartridge_rom[(cartridge_rom_offset >> 2) as usize])
             }
+        } else if offset >= 0x1FFF_0000 && offset < 0x2000_0000 {
+            info!(target: "PI", "read from SC64 register ${:02X}", offset & 0xFF);
+            Ok(0)
         } else {
             debug!(target: "PI", "open bus read at ${:08X}", offset);
             // lower 16 bits repeated in both halves of the word
@@ -499,6 +502,9 @@ impl Addressable for PeripheralInterface {
                 },
                 _ => {},
             }
+            Ok(WriteReturnSignal::None)
+        } else if offset >= 0x1FFF_0000 && offset < 0x2000_0000 {
+            info!(target: "PI", "write to SC64 register ${:02X}", offset & 0xFF);
             Ok(WriteReturnSignal::None)
         } else {
             error!(target: "PI", "unhandled write32 value=${:08X} offset=${:08X}", value, offset);

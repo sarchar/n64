@@ -963,7 +963,7 @@ impl App for Game {
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
                         let height = if width == 320 { 240 } else if width == 640 { 480 } else { warn!(target: "RENDER", "unknown render size {}", width); return; } as usize;
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
-
+                        //println!("width={} height={} format={}", width, height, format);
 
                         if self.raw_render_texture.is_none() {
                             let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
@@ -973,57 +973,59 @@ impl App for Game {
 
                         // access RDRAM directly
                         // would be nice if I could copy RGB555 into a texture, but this copy seems acceptable for now
-                        if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
-                            let start = (video_buffer >> 2) as usize;
+                        if format != 0 {
+                            if let Some(rdram) = self.comms.rdram.read().as_deref().unwrap() { // rdram = &[u32]
+                                let start = (video_buffer >> 2) as usize;
 
-                            let bpp = if format == 2 { 2 } else if format == 3 { 4 } else { todo!() };
-                            let size = ((width * height * bpp) >> 2) as usize;
-                            if start + size >= rdram.len() { return; }
+                                let bpp = if format == 2 { 2 } else if format == 3 { 4 } else { todo!("unknown format {}", format) };
+                                let size = ((width * height * bpp) >> 2) as usize;
+                                if start + size >= rdram.len() { return; }
 
-                            let mut image_data = vec![0u8; width*height*4];
-                            for y in 0..height {
-                                for x in 0..width {
-                                    let i = (y * width) + x;
-                                    let iy = (y * width) + x;
+                                let mut image_data = vec![0u32; width*height];
+                                for y in 0..height {
+                                    for x in 0..width {
+                                        let i = (y * width) + x;
+                                        let iy = (y * width) + x;
 
-                                    match format {
-                                        2 => {
-                                            let shift = 16 - ((i & 1) << 4);
-                                            let pix = (rdram[start + (i >> 1)] >> shift) as u16;
-                                            let r = ((pix >> 11) & 0x1F) as u8;
-                                            let g = ((pix >>  6) & 0x1F) as u8;
-                                            let b = ((pix >>  1) & 0x1F) as u8;
-                                            let a = (pix & 0x01) as u8;
-                                            image_data[iy*4..][..4].copy_from_slice(&[r << 3, g << 3, b << 3, if a == 1 { 0 } else { 255 }]);
-                                        },
-                                        3 => { 
-                                            let pix = rdram[start+i] | 0xff;
-                                            image_data[iy*4..][..4].copy_from_slice(&pix.to_be_bytes());
-                                        },
-                                        _ => break,
+                                        match format {
+                                            2 => {
+                                                let shift = 16 - ((i & 1) << 4);
+                                                let pix = (rdram[start + (i >> 1)] >> shift) as u16;
+                                                let r = ((pix >> 11) & 0x1F) as u8;
+                                                let g = ((pix >>  6) & 0x1F) as u8;
+                                                let b = ((pix >>  1) & 0x1F) as u8;
+                                                let a = (pix & 0x01) as u8;
+                                                image_data[iy] = ((b as u32) << 27) | ((g as u32) << 19) | ((r as u32) << 11) | (if a == 1 { 0xFF } else { 0 });
+                                                image_data[iy] = u32::from_le_bytes(image_data[iy].to_be_bytes());
+                                            },
+                                            3 => { 
+                                                image_data[iy] = rdram[start+i] | 0xff;
+                                            },
+                                            _ => break,
+                                        }
                                     }
                                 }
-                            }
 
-                            appwnd.queue().write_texture(
-                                wgpu::ImageCopyTexture {
-                                    texture: self.raw_render_texture.as_ref().unwrap(),
-                                    mip_level: 0,
-                                    origin: wgpu::Origin3d::ZERO,
-                                    aspect: wgpu::TextureAspect::All,
-                                },
-                                bytemuck::cast_slice(&image_data),
-                                wgpu::ImageDataLayout {
-                                    offset: 0,
-                                    bytes_per_row: Some(1 * 4 * width as u32), // 320 pix, rgba*f32,
-                                    rows_per_image: Some(height as u32),
-                                },
-                                wgpu::Extent3d {
-                                    width: width as u32,
-                                    height: height as u32,
-                                    depth_or_array_layers: 1,
-                                },
-                            );
+                                appwnd.queue().write_texture(
+                                    wgpu::ImageCopyTexture {
+                                        texture: self.raw_render_texture.as_ref().unwrap(),
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    bytemuck::cast_slice(&image_data),
+                                    wgpu::ImageDataLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(1 * 4 * width as u32), // 320 pix, rgba*f32,
+                                        rows_per_image: Some(height as u32),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: width as u32,
+                                        height: height as u32,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
                         }
 
                         self.raw_render_texture_bind_group.as_ref().unwrap()

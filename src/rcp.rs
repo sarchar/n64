@@ -246,7 +246,7 @@ impl Rcp {
 
             // the SI external bus sits right in the middle of the PI external bus and needs further decode
             0x0500_0000..=0x7C00_0000 => {
-                if (physical_address & 0xFFC0_0000) == 0x1FC0_0000 { 
+                if (physical_address & 0xFFE0_0000) == 0x1FC0_0000 {
                     // SI external bus 0x1FC00000-0x1FCFFFFF
                     (Some(&mut self.si), physical_address & 0x7FFF_FFFF)
                 } else {

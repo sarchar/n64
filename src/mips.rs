@@ -95,7 +95,7 @@ impl MipsInterface {
                         // if interrupt is enabled and not currently set, cause interrupt to trigger
                         if (self.interrupt_mask & bit) != 0 {
                             if (self.interrupt & bit) != 0 {
-                                info!(target: "MI", "triggering interrupt ${:02X} while interrupt bit hasn't been cleared", bit);
+                                debug!(target: "MI", "triggering interrupt ${:02X} while interrupt bit hasn't been cleared", bit);
                             }
                             self.trigger_int |= bit;
                         }

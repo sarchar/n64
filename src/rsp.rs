@@ -1719,6 +1719,13 @@ impl RspCpuCore {
                             val &= !0x40;
                         }
 
+                        // SET_INTR
+                        if (val & 0x10) != 0 {
+                            self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SP, InterruptUpdateMode::SetInterrupt)).unwrap();
+                            self.comms.break_cpu();
+                            val &= !0x10;
+                        }
+
                         if (val & 0x1FF) != 0 { // TODO
                             todo!("wrote status bits ${val:08X}");
                         }

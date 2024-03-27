@@ -242,8 +242,8 @@ impl VideoInterface {
             self.resolution_changed = 0;
 
             // emit some signal?
-            let width  = ((self.h_end - self.h_start) as f32 * (self.y_scale as f32 / 1024.0)) as u32;
-            let height = ((((self.v_end - self.v_start) as f32) / 2.0) * (self.x_scale as f32 / 1024.0)) as u32;
+            let width  = ((self.h_end - self.h_start) as f32 * (self.x_scale as f32 / 1024.0)) as u32;
+            let height = ((((self.v_end - self.v_start) as f32) / 2.0) * (self.y_scale as f32 / 1024.0)) as u32;
             let depth  = if self.pixel_type == 3 { 32 } else if self.pixel_type == 2 { 16 } else { 0 };
             debug!(target: "VI", "resolution changed to {width}x{height}x{depth}");
         }
