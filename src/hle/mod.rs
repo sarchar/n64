@@ -1338,7 +1338,7 @@ impl Hle {
             let data = &vtx_data[(vtx_size * i as usize) >> 2..];
 
             // convert F3DZEX2_Vertex to Vertex
-            let vtx = if self.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // G_LIGHTING
+            let vtx = if self.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // !G_LIGHTING
                 // Lighting disabled, we have vertex colors
                 Vertex {
                     position: [
@@ -2774,13 +2774,13 @@ impl Hle {
     }
 
     fn handle_geometrymode(&mut self) { // G_GEOMETRYMODE
-        let clearbits = ((self.command >> 32) & 0x00FF_FFFF) as u32;
+        let clearbits = !(((self.command >> 32) & 0x00FF_FFFF) as u32);
         let setbits   = self.command as u32;
         if clearbits == 0 && setbits != 0 {
             trace!(target: "HLE", "{} gsSPLoadGeometryMode(0x{:08X})", self.command_prefix, setbits);
         } else if clearbits != 0 && setbits == 0 {
             trace!(target: "HLE", "{} gsSPClearGeometryMode(0x{:08X})", self.command_prefix, clearbits);
-        } else {} {
+        } else {
             trace!(target: "HLE", "{} gsSPGeometryMode(0x{:08X}, 0x{:08X})", self.command_prefix, clearbits, setbits);
         }
 
