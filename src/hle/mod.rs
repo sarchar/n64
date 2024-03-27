@@ -2140,7 +2140,17 @@ impl Hle {
                             .flatten()
                             .collect::<Vec<u8>>();
 
-            let crc = crc64::crc64(0, &data);
+            let mut crc = crc64::crc64(0, &data);
+
+            // include the texture dims, format and data size in the CRC
+            // (i.e., a blank texture in IA is not the same as a blank texture in CI)
+            let mut metadata: Vec<_> = vec![];
+            metadata.push(current_tile.format.into());
+            metadata.push(current_tile.size.into());
+            metadata.extend_from_slice(&texture_width.to_be_bytes());
+            metadata.extend_from_slice(&texture_height.to_be_bytes());
+            metadata.extend_from_slice(&data.len().to_be_bytes());
+            crc = crc64::crc64(crc, &metadata);
 
             // 32-bit textures need to crc the high half of memory too
             if current_tile.size == 3 {
@@ -2182,9 +2192,9 @@ impl Hle {
         };
 
         if let Some((ti, mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
-            //println!("saw crc=${:X} before", crc);
             let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
             current_tile.mapped_coordinates = Some((*ti, *mx, *my));
+            //println!("saw crc=${:X} before, mapped_coordinates = {:?}", crc, current_tile.mapped_coordinates);
             return;
         }
 
