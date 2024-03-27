@@ -84,7 +84,8 @@ pub trait Addressable {
         todo!("read_block not implemented for address offset ${offset:08X}");
     }
 
-    fn write_block(&mut self, offset: usize, _block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    // need a length because we may write less than a multiple of 4
+    fn write_block(&mut self, offset: usize, _block: &[u32], _length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
         todo!("write_block not implemented for address offset ${offset:08X}");
     }
 }
@@ -135,8 +136,8 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
         self.addressable.lock().unwrap().read_block(offset, length)
     }
 
-    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
-        self.addressable.lock().unwrap().write_block(offset, block)
+    fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_block(offset, block, length)
     }
 
 }

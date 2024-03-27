@@ -468,7 +468,9 @@ impl Addressable for PifRom {
         self.write_u32(value << shift, offset & !0x03)
     }
 
-    fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, address: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (block.len() * 4) as u32 != length { todo!(); }
+
         if address != 0x7C0 || block.len() != 16 { todo!(); } // non-standard DMA
 
         //println!("DMA into PIF-ROM:");

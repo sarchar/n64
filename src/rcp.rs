@@ -262,11 +262,6 @@ impl Rcp {
 
     // Slow, maybe at some point we can do more of a direct memory copy
     fn do_dma(&mut self, dma_info: &mut DmaInfo) -> Result<(), ReadWriteFault> {
-        if (dma_info.length & 7) != 0 {
-            panic!("invalid length for dma {}", dma_info.length);
-            //return Err(ReadWriteFault::Invalid);
-        } 
-
         let transfer_size = dma_info.count * dma_info.length;
         if transfer_size == 0 {
             return Ok(());
@@ -276,13 +271,13 @@ impl Rcp {
         let mut dest_address = dma_info.dest_address;
 
         // copy dma_info.length bytes dma_info.count times, from dest to source, skipping _stride bytes between
-        for _ in 0..dma_info.count {
-            //info!(target: "DMA", "moving source_address=${:08X} length=${:08X} to dest_address=${:08X}", source_address, dma_info.length, dest_address);
+        for _i in 0..dma_info.count {
+            //info!(target: "DMA", "(_i={}) moving source_address=${:08X} length=${:08X} to dest_address=${:08X}", _i, source_address, dma_info.length, dest_address);
             let block = self.read_block(source_address as usize, dma_info.length)?;
             source_address += dma_info.length + dma_info.source_stride;
             source_address  = (source_address & dma_info.source_mask) | dma_info.source_bits;
 
-            self.write_block(dest_address as usize, &block)?;
+            self.write_block(dest_address as usize, &block, dma_info.length)?;
             dest_address += dma_info.length + dma_info.dest_stride;
             dest_address  = (dest_address & dma_info.dest_mask) | dma_info.dest_bits;
         }
@@ -382,11 +377,11 @@ impl Addressable for Rcp {
         }
     }
 
-    fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, address: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
         trace!(target: "RCP", "write_block length={} address=${:08X}", block.len(), address);
 
         if let (Some(addressable), offset) = self.match_addressable(address, "write_block") {
-            addressable.write_block(offset, block)
+            addressable.write_block(offset, block, length)
         } else {
             Err(ReadWriteFault::Invalid)
         }

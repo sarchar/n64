@@ -166,7 +166,7 @@ impl PeripheralInterface {
             // PI_DRAM_ADDR
             0x0_0000 => {
                 trace!(target: "PI", "write PI_DRAM_ADDR value=${:08X}", value);
-                self.dram_addr = value;
+                self.dram_addr = value & 0x00FF_FFFF;
 
                 WriteReturnSignal::None
             },
@@ -242,7 +242,7 @@ impl PeripheralInterface {
                             source_address: self.cart_addr,
                             dest_address  : self.dram_addr,
                             count         : 1,
-                            length        : ((end - start) + 7) & !7,
+                            length        : end - start,
                             completed     : Some(self.dma_completed_tx.clone()),
                             ..Default::default()
                         };
@@ -263,7 +263,7 @@ impl PeripheralInterface {
                                 source_address: self.cart_addr,
                                 dest_address  : self.dram_addr,
                                 count         : 1,
-                                length        : ((end - start) + 7) & !7,
+                                length        : end - start,
                                 completed     : Some(self.dma_completed_tx.clone()),
                                 ..Default::default()
                             };
@@ -532,15 +532,16 @@ impl Addressable for PeripheralInterface {
             let length = if length > (256*1024) { 256 * 1024 } else { length };
             Ok(vec![0u32; (length >> 2) as usize])
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
+            let length = (length + 3) & !3; // round length up to a multiple of 4 for the read
             if (offset & 0x02) != 0 { // 16-bit aligned DMA, slow for now but I think not too common
                 let start = (offset & !0x1000_0000) as usize;
                 let mut r = vec![];
                 for i in (0..(length >> 1) as usize).step_by(2) { // loop over 16-bit reads two at a time
-                    let address = start + i;
+                    let address = start + (i << 1);
                     let shift = 16 - ((address & 0x02) << 3);
                     let h0 = (self.cartridge_rom[address >> 2] >> shift) & 0xFFFF;
                     
-                    let address = start + i + 1;
+                    let address = start + ((i + 1) << 1);
                     let shift = 16 - ((address & 0x02) << 3);
                     let h1 = (self.cartridge_rom[address >> 2] >> shift) & 0xFFFF;
 
@@ -558,7 +559,8 @@ impl Addressable for PeripheralInterface {
         }
     }
 
-    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (block.len() * 4) as u32 != length { todo!(); }
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
             info!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len(), offset);
         }

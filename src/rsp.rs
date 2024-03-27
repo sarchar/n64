@@ -862,7 +862,9 @@ impl Addressable for Rsp {
         }
     }
 
-    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (block.len() * 4) as u32 != length { todo!(); }
+
         // wrap offset into local memory
         let mut offset = offset & 0x1FF8;
 

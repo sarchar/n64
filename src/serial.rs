@@ -193,10 +193,11 @@ impl Addressable for SerialInterface {
         }
     }
 
-    fn write_block(&mut self, address: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, address: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        if (block.len() * 4) as u32 != length { todo!(); }
         match address & 0x7FE0_0000 {
             0x1FC0_0000 => {
-                self.pif.write_block(address & 0x001F_FFFF, block)
+                self.pif.write_block(address & 0x001F_FFFF, block, length)
             },
             _ => todo!(),
         }

@@ -184,15 +184,30 @@ impl Addressable for RdramInterface {
         }
     }
 
-    fn write_block(&mut self, offset: usize, block: &[u32]) -> Result<WriteReturnSignal, ReadWriteFault> {
+    fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
         if offset < 0x0080_0000 {
             let mut access = self.ram.write().unwrap();
             let ram = access.as_deref_mut().unwrap();
 
             // why doesn't std::vec have copy_into(offset, source_slice)?
+            let count = (length >> 2) as usize;
             let (_, right) = ram.split_at_mut(offset >> 2);
-            let (left, _) = right.split_at_mut(block.len());
-            left.copy_from_slice(block);
+            let (left, _) = right.split_at_mut(count);
+            left.copy_from_slice(&block[0..count]);
+
+            // if we're DMAing less than a multiple of 4..
+            match length & 3 {
+                1 => {
+                    ram[(offset >> 2) + count] = block[count] & 0xFF00_0000 | (ram[(offset >> 2) + count] & 0x00FF_FFFF);
+                }
+                2 => {
+                    ram[(offset >> 2) + count] = block[count] & 0xFFFF_0000 | (ram[(offset >> 2) + count] & 0x0000_FFFF);
+                }
+                3 => {
+                    ram[(offset >> 2) + count] = block[count] & 0xFFFF_FF00 | (ram[(offset >> 2) + count] & 0x0000_00FF);
+                }
+                _ => {},
+            }
             Ok(WriteReturnSignal::None)
         } else {
             todo!("DMA write to rdram offset ${:08X}: not likely", offset);
