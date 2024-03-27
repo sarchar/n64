@@ -231,7 +231,7 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4
         case 7u: {
             switch(letter) {
                 case 0u: { // NOISE
-                    return vec3(1.0, 1.0, 1.0);
+                    return vec3(252.0/255.0, 3.0/255.0, 198.0/255.0);//vec3(1.0, 1.0, 1.0);
                 }
 
                 case 2u: { // COMBINED_ALPHA

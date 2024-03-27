@@ -1722,7 +1722,7 @@ impl Hle {
     }
 
     fn allocate_mapped_texture_space(&mut self, width: u32, height: u32) -> (u32, u32, u32) {
-        trace!("allocating texture space for {}x{} tile", width, height);
+        trace!(target: "HLE", "allocating texture space for {}x{} tile", width, height);
         assert!(width < (TEXSIZE_WIDTH as u32) && height < (TEXSIZE_HEIGHT as u32));
 
         // TODO I guess I need some spacial tree structure to allocate rectangular regions.
@@ -2190,7 +2190,7 @@ impl Hle {
 
         // we need to duplicate the borders of every texture so that filters don't look ugly
         let (ti, mut mx, mut my) = self.allocate_mapped_texture_space(texture_width+2, texture_height+2);
-        info!(target: "HLE", "allocated texture space at {},{} in ti={} for texture size {}x{} (crc=${:X})", mx, my, ti, texture_width, texture_height, crc);
+        trace!(target: "HLE", "allocated texture space at {},{} in ti={} for texture size {}x{} (crc=${:X})", mx, my, ti, texture_width, texture_height, crc);
 
         // coordinates that the polys use will be increased by 1 to accomodate the duplicate texture data
         mx += 1;
@@ -3293,7 +3293,8 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPSetColorImage({}, {}, {}, 0x{:08X} [0x{:08X}])", self.command_prefix, fmt, bpp, width, addr, translated_addr);
 
         if fmt != 0 { // G_IM_FMT_RGBA
-            unimplemented!("color targets not of RGBA not yet supported: {}", fmt);
+            error!("color targets not of RGBA not yet supported: {}", fmt);
+            return;
         }
 
         // set before next_render_pass(), which will use this value

@@ -289,7 +289,7 @@ impl PifRom {
                         break 'cmd_loop;
                     }
 
-                    let original_res_length = res_length;
+                    let _original_res_length = res_length;
                     res_length &= 0x3F;
                     let res_addr = cmd_start + COMMAND_OFFSET + cmd_length as usize;
 
@@ -302,17 +302,11 @@ impl PifRom {
                                 break 'cmd_loop;
                             }
 
-                            // Identify a standard controller on port 1, and nothing on all the other ports
-                            if channel == 0 {
+                            // Identify a standard controller on all ports
+                            if channel < 4 {
                                 self.write_u8_correct(0x05, res_addr + 0).unwrap();
                                 self.write_u8_correct(0x00, res_addr + 1).unwrap();
                                 self.write_u8_correct(0x02, res_addr + 2).unwrap(); // 2 indicates no pak installed, 1 otherwise
-                            } else {
-                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
-                                // setting bit 7 to the res length byte indicates device isn't present
-                                self.write_u8_correct((original_res_length | 0x80) as u32, cmd_start + RESLEN_OFFSET).unwrap();
                             }
 
                             channel += 1;
@@ -325,9 +319,9 @@ impl PifRom {
                                 break 'cmd_loop;
                             }
 
-                            if channel == 0 {
+                            if channel < 4 {
                                 // copy ControllerState from comms channel
-                                let cs = self.comms.controllers.read().unwrap()[0];
+                                let cs = self.comms.controllers.read().unwrap()[channel as usize];
 
                                 // four bytes indicate buttons and two axes
                                 let b0 = ((cs.a.is_down() as u8) << 7) 
@@ -354,13 +348,6 @@ impl PifRom {
 
                                 let b3 = (if cs.y_axis < 0.0 { 128.0 * cs.y_axis } else { 127.0 * cs.y_axis }) as i8;
                                 self.write_u8_correct((b3 as u8) as u32, res_addr + 3).unwrap(); // y-axis
-                            } else {
-                                self.write_u8_correct(0x00, res_addr + 0).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 1).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 2).unwrap();
-                                self.write_u8_correct(0x00, res_addr + 3).unwrap();
-                                // setting bit 7 to the res length byte indicates device isn't present
-                                self.write_u8_correct((original_res_length | 0x80) as u32, cmd_start + RESLEN_OFFSET).unwrap();
                             }
 
                             channel += 1;
