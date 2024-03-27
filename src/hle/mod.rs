@@ -271,8 +271,9 @@ pub struct Hle {
 
     // copied emulation flags 
     disable_textures: bool,
-    view_texture_map: u32,
     disable_lighting: bool,
+    view_texture_map: u32,
+    view_texture_index: u32,
 }
 
 #[repr(C)]
@@ -483,8 +484,9 @@ impl Hle {
             command_prefix: String::new(),
 
             disable_textures: false,
-            view_texture_map: 0,
             disable_lighting: false,
+            view_texture_map: 0,
+            view_texture_index: 0,
         };
 
         ret.new_texture_cache();
@@ -568,9 +570,10 @@ impl Hle {
 
         // copy over some emulation flags so we don't constantly need to acquire a read lock
         let ef = self.comms.emulation_flags.read().unwrap();
-        self.disable_textures = ef.disable_textures;
-        self.view_texture_map = ef.view_texture_map;
-        self.disable_lighting = ef.disable_lighting;
+        self.disable_textures   = ef.disable_textures;
+        self.disable_lighting   = ef.disable_lighting;
+        self.view_texture_map   = ef.view_texture_map;
+        self.view_texture_index = ef.view_texture_index;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -717,7 +720,7 @@ impl Hle {
 
     pub fn process_display_list(&mut self, dl_start: u32, dl_length: u32, ucode_address: u32) {
         trace!(target: "HLE", "processing display list from ${:08X}, length {} bytes", dl_start, dl_length);
-
+        
         if let HleRspSoftwareVersion::Uninitialized = self.software_version {
             if !self.detect_software_version(ucode_address) { 
                 unimplemented!("unknown RSP graphics task microcode (CRC 0x{:08X})", self.software_crc);
@@ -726,7 +729,6 @@ impl Hle {
 
         self.reset_display_list();
 
-        // sometimes dl_length ends up greater than DL_FETCH_SIZE, so it would reduce the # of DMAs
         let cur_dl = DLStackEntry {
             dl: self.load_from_rdram(dl_start, dl_length).to_vec(),
             base_address: dl_start,
@@ -880,8 +882,8 @@ impl Hle {
             warn!(target: "HLE", "load_string on unaligned address ${:08X}", start);
         }
 
-        start = (start + 7) & !7;
-        let mut skip_one = (start & 0x04) == 0x04;
+        start = (start + 3) & !3;
+        let mut skip_one = false;//(start & 0x04) == 0x04;
 
         loop {
             let block = self.load_from_rdram(start, block_size);
@@ -955,7 +957,7 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            (self.segments[segment] + (addr & 0x00FF_FFFF)) & 0x007F_FFFF
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         };
 
         let push = (params & 0x01) == 0;
@@ -1036,7 +1038,7 @@ impl Hle {
 
             6 => { // G_MW_SEGMENT
                 trace!(target: "HLE", "{} gsSPSegment({}, 0x{:08X})", self.command_prefix, offset >> 2, data);
-                self.segments[(offset >> 2) as usize] = data;
+                self.segments[((offset >> 2) & 0x0F) as usize] = data;
             },
 
             10 => { // G_MW_LIGHTCOL
@@ -1080,7 +1082,7 @@ impl Hle {
             8 => { // G_VIEWPORT
                 let segment = (addr >> 24) as u8;
                 let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
-                    ((addr & 0x00FF_FFFF) + self.segments[segment as usize]) & 0x00FF_FFFF
+                    ((addr & 0x007F_FFFF) + self.segments[segment as usize]) & 0x007F_FFFF
                 };
 
                 let vp = self.load_from_rdram(translated_addr, size as u32);
@@ -1141,7 +1143,7 @@ impl Hle {
 
                 let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
                     let segment = (addr >> 24) as u8;
-                    ((addr & 0x00FF_FFFF) + self.segments[segment as usize]) & 0x00FF_FFFF
+                    ((addr & 0x007F_FFFF) + self.segments[segment as usize]) & 0x007F_FFFF
                 };
 
                 let light_data = self.load_from_rdram(translated_addr, size as u32);
@@ -1229,10 +1231,12 @@ impl Hle {
 
     fn handle_displaylist(&mut self) { // G_DL
         let is_link = (self.command & 0x00FF_0000_0000_0000) == 0;
-        let addr    = (self.command & 0x1FFF_FFFF) as u32;
-        let segment = (addr >> 24) as usize;
+        let addr    = self.command as u32;
 
-        let translated_addr = (addr & 0x00FF_FFFF) + self.segments[segment];
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+            let segment = ((addr >> 24) & 0x0F) as usize;
+            ((addr & 0x007F_FFFF) + self.segments[segment]) & 0x007F_FFFF
+        };
 
         if is_link {
             trace!(target: "HLE", "{} gsSPDisplayList(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
@@ -1277,7 +1281,7 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         };
 
         trace!(target: "HLE", "{} gsSPBranchLessZraw(0x{:08X} [0x{:08X}], {}, 0x{:08X})", self.command_prefix, addr, translated_addr, vbidx, zval);
@@ -1317,9 +1321,9 @@ impl Hle {
         let vbidx = (((self.command >> 33) & 0x7F) as u8) - numv;
         let addr  = self.command as u32;
 
-        let translated_addr = if (addr & 0x8000_0000) != 0 { addr } else {
+        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         };
 
         let vtx_size = mem::size_of::<F3DZEX2_Vertex>();
@@ -1774,8 +1778,7 @@ impl Hle {
     }
 
     // Convert CI 4b in TMEM to RGBA 32bpp
-    fn map_tmem_ci_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    fn map_tmem_ci_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -1792,9 +1795,9 @@ impl Hle {
 
                     // offset based on x,y of texture data
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset  = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
-                    let address = (tmem_address << 3) + offset; // address in bytes
-                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
+                    let offset  = (y * line_bytes) + (sx >> 1);    // sx is is texels, convert to half bytes!
+                    let address = (tmem_address << 3) + offset;    // address in half-bytes
+                    let shift   = 28 - ((sx & 0x07) << 2);         // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
 
                     (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
                 };
@@ -1823,14 +1826,17 @@ impl Hle {
                         [255, 0, 0, 255]
                     },
                 };
+
                 plot(x, y, &p);
+                //plot(x, y, &[207, 52, 235, 255]);
             }
         }
     }
 
     // Convert IA 4b in TMEM to RGBA 32bpp
-    fn map_tmem_ia_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    //
+    // Overworld minimap in OoT
+    fn map_tmem_ia_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -1859,8 +1865,7 @@ impl Hle {
     }
 
     // Convert I 4b in TMEM to RGBA 32bpp
-    fn map_tmem_i_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    fn map_tmem_i_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
@@ -1887,8 +1892,9 @@ impl Hle {
     }
 
     // Convert CI 8b in TMEM to RGBA 32bpp
-    fn map_tmem_ci_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    //
+    // Environment/Skybox in OoT
+    fn map_tmem_ci_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -1902,7 +1908,7 @@ impl Hle {
 
                     // offset based on x,y of texture data
                     // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
+                    let offset  = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
                     let address = (tmem_address << 3) + offset;
                     let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
 
@@ -1912,7 +1918,7 @@ impl Hle {
                 // select the 16-bit color from TLUT
                 let color_address = 0x200 | (src >> 1); // two colors per 32-bit word 
                 let shift = 16 - ((src & 1) << 4);
-                let color = (self.tex.tmem[color_address as usize] >> shift) & 0xFFFF;
+                let color = ((self.tex.tmem[color_address as usize] >> shift) & 0xFFFF) as u16;
                 let p = match tlut_mode {
                     TlutMode::Rgba16 => {
                         let r = (color >> 11) & 0x1F;
@@ -1935,13 +1941,15 @@ impl Hle {
                 };
 
                 plot(x, y, &p);
+                //plot(x, y, &[207, 52, 235, 255]);
             }
         }
     }
 
     // Convert IA 8b in TMEM to RGBA 32bpp
-    fn map_tmem_ia_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    //
+    // Moon in title scren OoT
+    fn map_tmem_ia_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -1969,8 +1977,9 @@ impl Hle {
     }
 
     // Convert I 8b in TMEM to RGBA 32bpp
-    fn map_tmem_i_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    //
+    // NINTENDO64 logo in OoT
+    fn map_tmem_i_8b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
@@ -1993,8 +2002,7 @@ impl Hle {
     }
 
     // Convert IA 16b in TMEM to RGBA 32bpp
-    fn map_tmem_ia_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F) 
+    fn map_tmem_ia_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -2022,8 +2030,7 @@ impl Hle {
 
 
     // Convert RGBA 16b in TMEM to RGBA 32bpp
-    fn map_tmem_rgba_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F)
+    fn map_tmem_rgba_16b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F)
         where 
             F: FnMut(u32, u32, &[u8]) {
         for y in 0..texture_height {
@@ -2047,8 +2054,7 @@ impl Hle {
         }
     }
 
-    fn map_tmem_rgba_32b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, 
-                            line_bytes: u32, mut plot: F)
+    fn map_tmem_rgba_32b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F)
         where 
             F: FnMut(u32, u32, &[u8]) {
 
@@ -2148,8 +2154,28 @@ impl Hle {
             } else if current_tile.format == 2 { // Color-indexed textures, 
                 // Palette textures need their palette CRC'd so we can get palette animations
                 // But it could be very wasteful and slow
-                debug!(target: "HLE", "need to crc TLUT to have correct textures");
-                crc
+                match current_tile.size { 
+                    0 => { // 4b CI needs to crc 16 palette entries (*2 bytes ea) indicated by current_tile.pal
+                           // only 512 bytes of high mem is used because the tlut has to be duplicated 4x
+                           // (TODO: maybe something takes advantage of this?)
+                        let palette = (current_tile.palette << 4) as usize; // half word index into memory
+                        let data = (self.tex.tmem[crc_start | (0x200 + (palette >> 1))..][..8])
+                                        .iter()
+                                        .map(|v| v.to_be_bytes())
+                                        .flatten()
+                                        .collect::<Vec<u8>>();
+                        crc64::crc64(crc, &data)
+                    },
+                    1 => { // 8b CI needs to CRC the entirety of the 256-color TLUT
+                        let data = (self.tex.tmem[crc_start | 0x200..][..128])
+                                        .iter()
+                                        .map(|v| v.to_be_bytes())
+                                        .flatten()
+                                        .collect::<Vec<u8>>();
+                        crc64::crc64(crc, &data)
+                    },
+                    _ => panic!("invalid size for CI"),
+                }
             } else {
                 crc
             }
@@ -2271,6 +2297,7 @@ impl Hle {
             
             _ => {
                 warn!(target: "HLE", "unsupported texture format ({}, {})", current_tile.format, current_tile.size);
+                todo!();
             },
         };
 
@@ -2387,7 +2414,6 @@ impl Hle {
         let ult  = (cmd1 >>  0) as i16;
         let dsdx = (cmd2 >> 16) as i16;
         let dtdy = (cmd2 >>  0) as i16;
-        trace!(target: "HLE", "{} gsSPTextureRectangle({}, {}, {}, {}, {}, {}, {}, {}, {})", self.command_prefix, ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy);
 
         let (vw, vh) = match self.current_viewport.clone() {
             Some(Viewport { w: vw, h: vh, .. }) => (vw, vh),
@@ -2407,6 +2433,7 @@ impl Hle {
         let ult  = (ult  as f32) / 32.0;
         let dsdx = (dsdx as f32) / 1024.0;
         let dtdy = (dtdy as f32) / 1024.0;
+        trace!(target: "HLE", "{} gsSPTextureRectangle(ulx={}, uly={}, lrx={}, lry={}, tile={}, uls={}, ult={}, dsdx={}, dtdy={})", self.command_prefix, ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy);
 
         let w    = lrx - ulx;
         let h    = lry - uly;
@@ -2548,6 +2575,8 @@ impl Hle {
                     // rows are 4 texels long
                     if (line_number & 0x01) == 0 {
                         if dst[dest_offset..].len() < 2 || v.len() < 2 {
+                            error!(target: "HLE", "{} gsDPLoadBlock(tile={}, uls={} [{}], ult={} [{}], texels={}, dxt={})", self.command_prefix, 
+                                                        tile, uls, to_f32(uls), ult, to_f32(ult), texels, dxt);
                             error!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
                         }
                         dst[dest_offset..][..2].copy_from_slice(&v);
@@ -2639,8 +2668,12 @@ impl Hle {
         let load_size = (tile_height - 1) * image_bytes_per_row + tile_bytes_per_row;
         let image_data = self.load_from_rdram(start_dram, load_size);
 
-        // .tmem is in 64-bit words, tmem[] is 32-bit
+        // rdp_tile.tmem is in 64-bit words, tmem[] is 32-bit
         let dst = &mut self.tex.tmem[(rdp_tile.tmem << 1) as usize..];
+
+        // TODO if this happens, a tile is being uploaded started at an odd line.  I don't know if
+        // that matters, actually, but might be worth checking into.
+        if ((rdp_tile.tmem / rdp_tile.line) & 0x01) != 0 { todo!(); }
 
         // loop over the rows and swizzle as necessary
         let mut source_offset = 0;
@@ -2779,12 +2812,12 @@ impl Hle {
         let rdp_tile = &self.tex.rdp_tiles[tile as usize];
 
         // TLUT is always 16b
-        let mut load_size = (count << 1) as u32;
+        let mut load_size = (count << 1) as u32; // in bytes
 
         // prevent overflow of tmem
-        let dest_addr = (rdp_tile.tmem as u32) << 3;
-        if (dest_addr + load_size) > 0x1000 {
-            load_size = 0x1000 - dest_addr;
+        let dest_addr = (rdp_tile.tmem as u32) << 1; // convert address to u32/word index
+        if (dest_addr + (load_size >> 2)) >= 0x400 {
+            load_size = (0x400 - dest_addr) << 2;
         }
 
         if (self.tex.address & 0x07) != 0 {
@@ -2798,9 +2831,9 @@ impl Hle {
             let src_shift = 16 - ((i & 1) << 4);
             let src_color = (tlut_data[(i >> 1) as usize] >> src_shift) & 0xFFFF;
 
-            let da = dest_addr + (i << 1);
-            let dst_shift = 16 - ((da & 1) << 4);
-            let v = &mut self.tex.tmem[(da >> 2) as usize];
+            let da = dest_addr + (i >> 1);
+            let dst_shift = 16 - ((i & 1) << 4);
+            let v = &mut self.tex.tmem[da as usize];
             *v = (*v & (0xFFFF0000 >> dst_shift)) | (src_color << dst_shift);
         }
     }
@@ -3066,14 +3099,14 @@ impl Hle {
             tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
             color     : [1.0, 1.0, 1.0, 1.0], 
             flags     : VertexFlags::TEXTURED, 
-        ..Default::default()
+            ..Default::default()
         });
 
         // enable texturing and select which texture to show
         let old_enable = self.tex.enabled;
         self.tex.enabled = true;
         let old_coord  = self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates;
-        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((0, 0, 0));
+        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((self.view_texture_index % (self.mapped_textures.len() as u32), 0, 0));
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);
@@ -3197,8 +3230,12 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr & 0x7FFF_FFFF } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         };
+
+        if (translated_addr & 0x7F80_0000) != 0 { 
+            panic!("uhm addr=${:08X} translated_addr=${:08X} segments={:X?}", addr, translated_addr, self.segments);
+        }
 
         let fmtstr = match fmt {
             0 => "G_IM_FMT_RGBA", 1 => "G_IM_FMT_YUV", 2 => "G_IM_FMT_CI", 3 => "G_IM_FMT_IA",
@@ -3222,7 +3259,7 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         } & 0x07FF_FFFF;
 
         trace!(target: "HLE", "{} gsDPSetDepthImage(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
@@ -3250,7 +3287,7 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            self.segments[segment] + (addr & 0x00FF_FFFF)
+            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
         } & 0x07FF_FFFF;
 
         trace!(target: "HLE", "{} gsDPSetColorImage({}, {}, {}, 0x{:08X} [0x{:08X}])", self.command_prefix, fmt, bpp, width, addr, translated_addr);
@@ -3298,10 +3335,6 @@ impl Hle {
         self.command         = cmd;
         self.command_words   = 2;
         self.command_table[self.command_op as usize](self);
-
-        //let mut size: u32 = 0;
-        //let op = (cmd >> 56) & 0xFF;
-        //match op {
     }
 }
 
