@@ -63,7 +63,7 @@ version = "0.10"
 [dependencies.imgui-wgpu]
 optional = true
 git = "https://github.com/sarchar/imgui-wgpu-rs"
-branch = "wgpu-0.19"
+branch = "wgpu-0.19-tmp"
 
 [dependencies.wgpu]
 version = "0.19"
@@ -75,11 +75,11 @@ optional = true
 
 [dependencies.imgui]
 optional = true
-git = "https://github.com/imgui-rs/imgui-rs"
+git = "https://github.com/sarchar/imgui-rs"
 
 [dependencies.imgui-winit-support]
 optional = true
-git = "https://github.com/imgui-rs/imgui-rs"
+git = "https://github.com/sarchar/imgui-rs"
 
 [dependencies.winit_input_helper]
 version = "0.15"
