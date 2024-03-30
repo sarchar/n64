@@ -148,6 +148,7 @@ enum ViewMode {
     Game,
     Color(usize),
     Depth(usize),
+    TextureCache(usize),
     ViOrigin,
 }
 
@@ -169,6 +170,8 @@ pub struct Game {
     display_game_color_texture_pipeline: wgpu::RenderPipeline,
     // pipeline for rendering a game depth texture to screen (for debug purposes)
     display_game_depth_texture_pipeline: wgpu::RenderPipeline,
+    // pipeline for rendering a game texture cache to screen
+    display_game_texture_pipeline: wgpu::RenderPipeline,
     // vertex and index buffers for a quad to render a game color or depth texture to screen
     display_game_texture_vertex_buffer: wgpu::Buffer,
     display_game_texture_index_buffer: wgpu::Buffer,
@@ -439,6 +442,48 @@ impl App for Game {
                 },
             ],
         });
+
+        let display_game_texture_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Display Game Texture Pipeline Layout"),
+            bind_group_layouts: &[&game_texture_bind_group_layout], // use the game texture layout with 4 bindings
+            push_constant_ranges: &[],
+        });
+
+        let display_game_texture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Display Game Texture Texture Pipeline"),
+            layout: Some(&display_game_texture_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &display_game_color_texture_shader, // can use the same shader
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &display_game_color_texture_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: appwnd.surface_config().format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
 
         // create the MVP matrix uniform buffer
         let mvp_matrix_buffer = device.create_buffer(
@@ -728,9 +773,10 @@ impl App for Game {
             depth_texture_bind_group_layout: depth_texture_bind_group_layout,
 
             // display game
-            display_game_color_texture_pipeline: display_game_color_texture_pipeline,
-            display_game_depth_texture_pipeline: display_game_depth_texture_pipeline,
-            display_game_texture_vertex_buffer: display_game_texture_vertex_buffer,
+            display_game_color_texture_pipeline: display_game_color_texture_pipeline, // render the color framebuffer
+            display_game_depth_texture_pipeline: display_game_depth_texture_pipeline, // debug view of the depth buffer
+            display_game_texture_pipeline: display_game_texture_pipeline,             // debug view of the game texture caches
+            display_game_texture_vertex_buffer: display_game_texture_vertex_buffer,   
             display_game_texture_index_buffer: display_game_texture_index_buffer,
 
             // render rdram
@@ -852,6 +898,8 @@ impl App for Game {
                             ViewMode::Color(0)
                         } else if self.game_depth_texture_bind_groups.len() > 0 {
                             ViewMode::Depth(0)
+                        } else if self.game_texture_bind_groups.len() > 0 {
+                            ViewMode::TextureCache(0)
                         } else {
                             ViewMode::ViOrigin
                         }
@@ -861,6 +909,8 @@ impl App for Game {
                             ViewMode::Color(i + 1)
                         } else if self.game_depth_texture_bind_groups.len() > 0 {
                             ViewMode::Depth(0)
+                        } else if self.game_texture_bind_groups.len() > 0 {
+                            ViewMode::TextureCache(0)
                         } else {
                             ViewMode::ViOrigin
                         }
@@ -868,6 +918,15 @@ impl App for Game {
                     ViewMode::Depth(i) => {
                         if self.game_depth_texture_bind_groups.len() > (i + 1) {
                             ViewMode::Depth(i + 1)
+                        } else if self.game_texture_bind_groups.len() > 0 {
+                            ViewMode::TextureCache(0)
+                        } else {
+                            ViewMode::ViOrigin
+                        }
+                    },
+                    ViewMode::TextureCache(i) => {
+                        if self.game_texture_bind_groups.len() > (i + 1) {
+                            ViewMode::TextureCache(i + 1)
                         } else {
                             ViewMode::ViOrigin
                         }
@@ -887,11 +946,17 @@ impl App for Game {
             // CTRL+U to view the texture map 
             // CTRL+SHIFT+U to cycle the maps
             if appwnd.input().key_pressed(KeyCode::KeyU) {
-                let mut ef = self.comms.emulation_flags.write().unwrap();
-                if appwnd.input().held_shift() {
-                    ef.view_texture_index += 1;
-                } else {
-                    ef.view_texture_map = (ef.view_texture_map + 1) % 5;
+                match self.view_mode {
+                    ViewMode::TextureCache(_) => {
+                        self.view_mode = ViewMode::Game;
+                    },
+                    _ => {
+                        if self.game_texture_bind_groups.len() > 1 {
+                            self.view_mode = ViewMode::TextureCache(1);
+                        } else {
+                            self.view_mode = ViewMode::TextureCache(0);
+                        }
+                    }
                 }
             }
 
@@ -986,10 +1051,10 @@ impl App for Game {
         self.check_inputs = true;
 
         let mut encoder: wgpu::CommandEncoder =
-            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Game Texture Encoder") });
+            appwnd.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Display Game Texture Encoder") });
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Game Texture Pass"),
+                label: Some("Display Game Texture Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -1125,8 +1190,19 @@ impl App for Game {
                     render_pass.set_pipeline(&self.display_game_depth_texture_pipeline);
                     render_pass.set_bind_group(0, buffers[depth_buffer].1, &[]);
                 },
+
+                ViewMode::TextureCache(texture_index) => {
+                    let buffers: Vec<_> = self.game_texture_bind_groups.iter().collect();
+                    if texture_index >= buffers.len() {
+                        return;
+                    }
+
+                    render_pass.set_pipeline(&self.display_game_texture_pipeline);
+                    render_pass.set_bind_group(0, buffers[texture_index], &[]);
+                }
             };
 
+            // render a quad with the selected texture
             render_pass.set_vertex_buffer(0, self.display_game_texture_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.display_game_texture_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..DISPLAY_GAME_TEXTURE_INDICES.len() as _, 0, 0..1);

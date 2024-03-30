@@ -282,8 +282,6 @@ pub struct Hle {
     // copied emulation flags 
     disable_textures: bool,
     disable_lighting: bool,
-    view_texture_map: u32,
-    view_texture_index: u32,
 }
 
 #[repr(C)]
@@ -503,8 +501,6 @@ impl Hle {
 
             disable_textures: false,
             disable_lighting: false,
-            view_texture_map: 0,
-            view_texture_index: 0,
         };
 
         ret.new_texture_cache();
@@ -591,8 +587,6 @@ impl Hle {
         let ef = self.comms.emulation_flags.read().unwrap();
         self.disable_textures   = ef.disable_textures;
         self.disable_lighting   = ef.disable_lighting;
-        self.view_texture_map   = ef.view_texture_map;
-        self.view_texture_index = ef.view_texture_index;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -677,6 +671,7 @@ impl Hle {
             HleRspSoftwareVersion::F3DEX2 => {
                 self.command_table[0x00] = Hle::handle_noop;
                 self.command_table[0x01] = Hle::handle_vtx;
+                // 0x02 - modify vtx
                 self.command_table[0x03] = Hle::handle_culldl;
                 self.command_table[0x04] = Hle::handle_branch_z;
                 self.command_table[0x05] = Hle::handle_tri1;
@@ -761,14 +756,6 @@ impl Hle {
             self.process_display_list_command(addr, cmd);
         }
 
-        // render the texture cache quad
-        if self.view_texture_map > 0 {
-            self.render_texture_map();
-        }
-
-        // find the maximum length of all the texture fetches
-        //let max_len = self.tex.data.iter().map(|x| x.data_size).fold(0, |a, b| a.max(b));
-
         // upload dirty textures
         let dirty_textures: Vec<_> = self.mapped_textures.iter().map(|mtl| {
             let mt = mtl.read().unwrap();
@@ -778,6 +765,7 @@ impl Hle {
                 None
             }
         }).collect();
+
         for dt in dirty_textures {
             if let Some(cmd) = dt {
                 self.send_hle_render_command(cmd);
@@ -941,7 +929,7 @@ impl Hle {
 
 
     fn handle_unknown(&mut self) {
-        unimplemented!("unimplemented display list command ${:02X}", self.command_op);
+        unimplemented!("unimplemented DL command ${:02X}", self.command_op);
     }
 
     fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1
@@ -2640,6 +2628,15 @@ impl Hle {
 
         let selected_tile = &self.tex.rdp_tiles[tile as usize];
 
+        // RDP is limited to 2048 texel loads
+        if texels > 2048 { 
+            warn!(target: "HLE", "{} gsDPLoadBlock(tile={}, uls={} [{}], ult={} [{}], texels={}, dxt={})", self.command_prefix, 
+                                        tile, uls, to_f32(uls), ult, to_f32(ult), texels, dxt);
+            warn!(target: "HLE", "format={} size={}", selected_tile.format, selected_tile.size);
+            warn!(target: "HLE", "too large of copy, {} bytes from ${:08X} to TMEM=${:04X} -- IGNORING", data_size, self.tex.address, selected_tile.tmem << 3);
+            return; 
+        }
+
         // load all texels from rdram in one go
         let padded_size = (data_size + 7) & !7;
         let data = if ((self.tex.address + padded_size) & 0x7FFF_FFFF) >= 0x0080_0000 {
@@ -3161,76 +3158,6 @@ impl Hle {
         // G_TRI* calls coming up will need to change to a new draw call if depth state
         // is different than being disabled, so we reuse disable_depth_override
         self.disable_depth_override = Some(());
-    }
-
-    #[allow(dead_code)]
-    fn render_texture_map(&mut self) {
-        let vw = 320.0;
-        let vh = 240.0;
-        let x0 = 0.0;
-        let y0 = 0.0;
-        let w = 80.0 * (self.view_texture_map as f32);
-        let h = 60.0 * (self.view_texture_map as f32);
-
-        // map (0,vx) -> (-1,1)
-        // so (rx/vx * 2) - 1
-        let scale = |s, maxs| (((s as f32) / maxs) * 2.0) - 1.0;
-        let cur_pos = self.vertices.len() as u16; // save start index
-
-        // color alpha of 0 means render from texture
-        self.vertices.push(Vertex { // TL
-            position  : [ scale(x0  , vw), scale(y0+h, vh), 0.0, 1.0], 
-            tex_coords: [0.0, 0.0], 
-            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
-            color     : [1.0, 1.0, 1.0, 1.0], 
-            flags     : VertexFlags::TEXTURED, 
-            ..Default::default() 
-        });
-        self.vertices.push(Vertex { // TR
-            position  : [ scale(x0+w, vw), scale(y0+h, vh), 0.0, 1.0], 
-            tex_coords: [TEXSIZE_WIDTH as f32, 0.0], 
-            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
-            color     : [1.0, 1.0, 1.0, 1.0], 
-            flags     : VertexFlags::TEXTURED, 
-            ..Default::default() 
-        });
-        self.vertices.push(Vertex { // BR
-            position  : [ scale(x0+w, vw), scale(y0  , vh), 0.0, 1.0], 
-            tex_coords: [TEXSIZE_WIDTH as f32, TEXSIZE_HEIGHT as f32], 
-            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
-            color     : [1.0, 1.0, 1.0, 1.0], 
-            flags     : VertexFlags::TEXTURED, 
-            ..Default::default() 
-        });
-        self.vertices.push(Vertex { // BL
-            position  : [ scale(x0  , vw), scale(y0  , vh), 0.0, 1.0], 
-            tex_coords: [0.0, TEXSIZE_WIDTH as f32], 
-            tex_params: [0.0, TEXSIZE_WIDTH as f32, 0.0, TEXSIZE_HEIGHT as f32],
-            color     : [1.0, 1.0, 1.0, 1.0], 
-            flags     : VertexFlags::TEXTURED, 
-            ..Default::default()
-        });
-
-        // enable texturing and select which texture to show
-        let old_enable = self.tex.enabled;
-        self.tex.enabled = true;
-        let old_coord  = self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates;
-        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((self.view_texture_index % (self.mapped_textures.len() as u32), 0, 0));
-        let old_texel1 = self.tex.rdp_tiles[self.tex.tile as usize].has_texel1;
-        self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = false;
-
-        // start or change the current draw list to use matrix 0 (our ortho projection)
-        self.matrix_index_override = Some(0);
-        self.disable_depth_override = Some(());
-        self.add_triangles(RenderPassType::DrawTriangles, &[cur_pos+0, cur_pos+1, cur_pos+2, cur_pos+0, cur_pos+2, cur_pos+3]);
-
-        // G_TRI* needs this
-        self.disable_depth_override = Some(());
-
-        // fix state
-        self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = old_coord;
-        self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = old_texel1;
-        self.tex.enabled = old_enable;
     }
 
     fn handle_setfogcolor(&mut self) { // G_SETFOGCOLOR
