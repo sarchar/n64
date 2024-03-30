@@ -6,8 +6,9 @@ const VERTEX_FLAG_TEXMODE_S1_SHIFT   : u32 = 6u;
 const VERTEX_FLAG_TEXMODE_T1_SHIFT   : u32 = 8u;
 const VERTEX_FLAG_LIT_SHIFT          : u32 = 10u;
 const VERTEX_FLAG_TWO_CYCLE_SHIFT    : u32 = 11u;
+const VERTEX_FLAG_DECAL              : u32 = 12u;
 
-const VERTEX_FLAG_TEXMODE_MASK : u32 = 0x03u;
+const VERTEX_FLAG_TEXMODE_MASK       : u32 = 0x03u;
 
 struct CameraUniform {
     projection: mat4x4<f32>,
@@ -78,8 +79,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     let mv_inverse = mat3x3(camera.mv_inverse[0].xyz, camera.mv_inverse[1].xyz, camera.mv_inverse[2].xyz);
 
+    // transform into viewspace for decals and move slightly closer to the screen
+    var clip_position: vec4<f32> = in.position * camera.modelview * camera.projection;
+    if(extractBits(in.flags, VERTEX_FLAG_DECAL, 1u) == 1u) {
+        clip_position.z -= 0.0005 * clip_position.w;
+    }
+
     // the matrices used on n64 expect the vertex to be left-multiplied: v' = v*(M*V*P)
-    out.clip_position = in.position * camera.modelview * camera.projection;
+    out.clip_position = clip_position;
     out.normal        = normalize(in.normal * transpose(mv_inverse));
     out.color         = in.color;
     out.tex_coords    = in.tex_coords;

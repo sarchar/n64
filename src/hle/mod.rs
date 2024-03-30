@@ -118,6 +118,7 @@ impl VertexFlags {
     pub const TEXMODE_T1_SHIFT: u32 = 8; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     pub const LIT             : u32 = 1u32 << 10;
     pub const TWO_CYCLE       : u32 = 1u32 << 11;
+    pub const DECAL           : u32 = 1u32 << 12;
     // next VERTEX_FLAG at "<< 8"
 }
 
@@ -1709,7 +1710,8 @@ impl Hle {
     }
 
     // return a transformed vertex along with the index into self.indices where it is placed
-    fn make_final_vertex(&mut self, vertex_index: usize) -> Option<(&Vertex, u16)> {
+    // the vertex is `final` in the sense that it's the exact data that will go to the shader
+    fn finalize_vertex(&mut self, vertex_index: usize) -> Option<(&Vertex, u16)> {
         let mut vtx = self.vertices_internal.get(vertex_index)?.clone();
         if self.tex.enabled {
             let current_tile = self.tex.tile;
@@ -1785,6 +1787,10 @@ impl Hle {
 
         if self.other_modes.get_cycle_type() == CycleType::TwoCycle {
             vtx.flags |= VertexFlags::TWO_CYCLE;
+        }
+
+        if self.other_modes.get_zmode() == ZMode::Decal {
+            vtx.flags |= VertexFlags::DECAL;
         }
 
         let index = self.vertices.len();
@@ -2418,13 +2424,13 @@ impl Hle {
 
         // transform texture coordinates
         let vi = self.vertex_stack.get(v0 as usize).unwrap();
-        let (_iv, v0) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_iv, v0) = self.finalize_vertex(*vi as usize).unwrap();
         //println!("iv0: {:?}", _iv);
         let vi = self.vertex_stack.get(v1 as usize).unwrap();
-        let (_iv, v1) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_iv, v1) = self.finalize_vertex(*vi as usize).unwrap();
         //println!("iv1: {:?}", _iv);
         let vi = self.vertex_stack.get(v2 as usize).unwrap();
-        let (_iv, v2) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_iv, v2) = self.finalize_vertex(*vi as usize).unwrap();
         //println!("iv2: {:?}", _iv);
 
         // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
@@ -2459,17 +2465,17 @@ impl Hle {
 
         // translate to global vertex stack
         let vi = self.vertex_stack.get(v00 as usize).unwrap();
-        let (_, v00) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v00) = self.finalize_vertex(*vi as usize).unwrap();
         let vi = self.vertex_stack.get(v01 as usize).unwrap();
-        let (_, v01) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v01) = self.finalize_vertex(*vi as usize).unwrap();
         let vi = self.vertex_stack.get(v02 as usize).unwrap();
-        let (_, v02) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v02) = self.finalize_vertex(*vi as usize).unwrap();
         let vi = self.vertex_stack.get(v10 as usize).unwrap();
-        let (_, v10) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v10) = self.finalize_vertex(*vi as usize).unwrap();
         let vi = self.vertex_stack.get(v11 as usize).unwrap();
-        let (_, v11) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v11) = self.finalize_vertex(*vi as usize).unwrap();
         let vi = self.vertex_stack.get(v12 as usize).unwrap();
-        let (_, v12) = self.make_final_vertex(*vi as usize).unwrap();
+        let (_, v12) = self.finalize_vertex(*vi as usize).unwrap();
 
         // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
         // all other vertices take the color of the first vertex
@@ -2569,10 +2575,10 @@ impl Hle {
             ..Default::default()
         });
 
-        let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
-        let (_, v1) = self.make_final_vertex((cur_pos+1) as usize).unwrap();
-        let (_, v2) = self.make_final_vertex((cur_pos+2) as usize).unwrap();
-        let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
+        let (_, v0) = self.finalize_vertex((cur_pos+0) as usize).unwrap();
+        let (_, v1) = self.finalize_vertex((cur_pos+1) as usize).unwrap();
+        let (_, v2) = self.finalize_vertex((cur_pos+2) as usize).unwrap();
+        let (_, v3) = self.finalize_vertex((cur_pos+3) as usize).unwrap();
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         // and disable the depth buffer
@@ -3144,10 +3150,10 @@ impl Hle {
             ..Default::default() 
         });
 
-        let (_, v0) = self.make_final_vertex((cur_pos+0) as usize).unwrap();
-        let (_, v1) = self.make_final_vertex((cur_pos+1) as usize).unwrap();
-        let (_, v2) = self.make_final_vertex((cur_pos+2) as usize).unwrap();
-        let (_, v3) = self.make_final_vertex((cur_pos+3) as usize).unwrap();
+        let (_, v0) = self.finalize_vertex((cur_pos+0) as usize).unwrap();
+        let (_, v1) = self.finalize_vertex((cur_pos+1) as usize).unwrap();
+        let (_, v2) = self.finalize_vertex((cur_pos+2) as usize).unwrap();
+        let (_, v3) = self.finalize_vertex((cur_pos+3) as usize).unwrap();
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         // and disable the depth buffer
