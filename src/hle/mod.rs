@@ -72,25 +72,31 @@ pub struct F3DZEX2_Vertex {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub position  : [f32; 4],
-    pub color     : [f32; 4],
-    pub normal    : [f32; 3],
-    pub tex_coords: [f32; 2],
-    pub tex_params: [f32; 4],
-    pub maskshift : u32,
-    pub flags     : u32,
+    pub position   : [f32; 4],
+    pub color      : [f32; 4],
+    pub normal     : [f32; 3],
+    pub tex_coords : [f32; 2],
+    pub tex_coords1: [f32; 2],
+    pub tex_params : [f32; 4],
+    pub tex_params1: [f32; 4],
+    pub maskshift  : u32,
+    pub maskshift1 : u32,
+    pub flags      : u32,
 }
 
 impl Vertex {
     pub const fn const_default() -> Self {
         Self {
-            position  : [0.0, 0.0, 0.0, 1.0],
-            color     : [0.0, 0.0, 0.0, 1.0],
-            normal    : [1.0, 0.0, 0.0],
-            tex_coords: [0.0, 0.0],
-            tex_params: [0.0, 1.0, 0.0, 1.0],
-            maskshift : 0,
-            flags     : 0,
+            position   : [0.0, 0.0, 0.0, 1.0],
+            color      : [0.0, 0.0, 0.0, 1.0],
+            normal     : [1.0, 0.0, 0.0],
+            tex_coords : [0.0, 0.0],
+            tex_coords1: [0.0, 0.0],
+            tex_params : [0.0, 1.0, 0.0, 1.0],
+            tex_params1: [0.0, 1.0, 0.0, 1.0],
+            maskshift  : 0,
+            maskshift1 : 0,
+            flags      : 0,
         }
     }
 }
@@ -104,12 +110,14 @@ impl Default for Vertex {
 
 pub struct VertexFlags;
 impl VertexFlags {
-    pub const TEXTURED       : u32 = 1u32 << 0;
-    pub const LINEAR_FILTER  : u32 = 1u32 << 1;
-    pub const TEXMODE_S_SHIFT: u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const TEXMODE_T_SHIFT: u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const LIT            : u32 = 1u32 << 6;
-    pub const TWO_CYCLE      : u32 = 1u32 << 7;
+    pub const TEXTURED        : u32 = 1u32 << 0;
+    pub const LINEAR_FILTER   : u32 = 1u32 << 1;
+    pub const TEXMODE_S_SHIFT : u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T_SHIFT : u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_S1_SHIFT: u32 = 6; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T1_SHIFT: u32 = 8; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const LIT             : u32 = 1u32 << 10;
+    pub const TWO_CYCLE       : u32 = 1u32 << 11;
     // next VERTEX_FLAG at "<< 8"
 }
 
@@ -182,8 +190,9 @@ pub struct TriangleList {
     pub depth_compare_enable: bool,
     pub depth_write: bool,
 
-    // texture map for this draw call
+    // textures for this draw call
     pub mapped_texture_index: Option<u32>,
+    pub mapped_texture_index1: Option<u32>,
 
     // uniform buffer indices to use for this draw list
     // only valid when num_indices > 0 (i.e., when the first triangle is added) but defaults to 0
@@ -248,6 +257,7 @@ pub struct Hle {
 
     current_color_combiner_state: ColorCombinerState,
     color_combiner_states: Vec<ColorCombinerState>,
+    color_combiner_uses_texel1: bool,
 
     // texture state
     tex: TextureState,
@@ -350,6 +360,9 @@ struct RdpTileState {
 
     // texture_index, texture_x, texture_y
     mapped_coordinates: Option<(u32, u32, u32)>,
+    // true if the CC uses TEXEL1 in any input and we need to set a second texture
+    // if so, the tile to use is always the next tile.
+    has_texel1: bool,
 }
 
 impl TextureState {
@@ -388,9 +401,11 @@ pub struct ColorCombinerState {
     pub alpha2_source: u32, //[u8; 4],
     pub prim_color   : [f32; 4],
     pub env_color    : [f32; 4],
+    pub lodfrac      : f32,
+    pub _unused      : f32, // only present for alignment, this space can be used in the future
 
     // alignment to 256 bytes
-    pub _alignment   : [u64; 26],
+    pub _alignment   : [u64; 25],
 }
 
 impl ColorCombinerState {
@@ -402,7 +417,9 @@ impl ColorCombinerState {
             alpha2_source: 0, //[0, 0, 0, 0],
             prim_color   : [0.0, 0.0, 0.0, 0.0],
             env_color    : [0.0, 0.0, 0.0, 0.0],
-            _alignment   : [0; 26],
+            lodfrac      : 0.0,
+            _unused      : 0.0,
+            _alignment   : [0; 25],
         }
     }
 }
@@ -466,6 +483,7 @@ impl Hle {
 
             current_color_combiner_state: ColorCombinerState::new(),
             color_combiner_states: vec![],
+            color_combiner_uses_texel1: false,
 
             tex: TextureState::new(),
 
@@ -539,6 +557,7 @@ impl Hle {
         self.total_texture_data = 0;
         self.fill_color = 0;
         self.color_combiner_states.clear();
+        self.color_combiner_uses_texel1 = false;
         self.tex.reset(); // TODO this probably shouldn't be done, as it looks like
                           // RDP state isn't reset from frame to frame
 
@@ -742,9 +761,9 @@ impl Hle {
             self.process_display_list_command(addr, cmd);
         }
 
-        // render the tmem quad
+        // render the texture cache quad
         if self.view_texture_map > 0 {
-            self.render_tmem();
+            self.render_texture_map();
         }
 
         // find the maximum length of all the texture fetches
@@ -922,7 +941,7 @@ impl Hle {
 
 
     fn handle_unknown(&mut self) {
-        unimplemented!("unimplemented DL command ${:02X}", self.command_op);
+        unimplemented!("unimplemented display list command ${:02X}", self.command_op);
     }
 
     fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1
@@ -1520,7 +1539,7 @@ impl Hle {
                 }
             }
 
-            // if the mapped texture index has changed, switch to a new draw call
+            // if the mapped TEXEL0 index has changed, switch to a new draw call
             if !self.tex.enabled && self.current_triangle_list().mapped_texture_index.is_some() { 
                 // textures have been disabled
                 self.next_triangle_list();
@@ -1530,10 +1549,28 @@ impl Hle {
                     self.next_triangle_list();
                 } else {
                     let ti = self.current_triangle_list().mapped_texture_index.unwrap();
-                    // tile.mapped_coordinates must be set (you have to call map_current_texture()
+                    // tile.mapped_coordinates must be set (you have to call map_current_textures()
                     // before adding textured triangles)
                     if ti != self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates.unwrap().0 {
                         self.next_triangle_list();
+                    }
+                }
+            }
+
+            // if the mapped TEXEL1 index has changed, switch to a new draw call
+            if !self.tex.enabled && self.current_triangle_list().mapped_texture_index1.is_some() { 
+                // textures have been disabled
+                self.next_triangle_list();
+            } else if self.tex.enabled {
+                if let Some(ti) = self.current_triangle_list().mapped_texture_index1 {
+                    if !self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 {
+                        // TEXEL1 texture set up but not in use
+                        self.next_triangle_list();
+                    } else {
+                        // tile.mapped_coordinates must be set (you have to call map_current_textures() before adding textured triangles)
+                        if ti != self.tex.rdp_tiles[self.tex.tile as usize + 1].mapped_coordinates.unwrap().0 {
+                            self.next_triangle_list();
+                        }
                     }
                 }
             }
@@ -1580,12 +1617,25 @@ impl Hle {
             trace!(target: "HLE", "new draw call uses proj matrix: {:?}", self.current_projection_matrix);
             //println!("new draw call uses proj matrix: {:?}", self.current_projection_matrix);
 
-            // set the mapped texture index for this draw call
+            // set the mapped texture index for this draw call (TEXEL0)
             let mapped_texture_index = {
                 let rdp_tile = &self.tex.rdp_tiles[self.tex.tile as usize];
                 match rdp_tile.mapped_coordinates {
                     Some((ti, _, _)) => Some(ti),
                     _ => None,
+                }
+            };
+
+            // setup TEXEL1 input
+            let mapped_texture_index1 = {
+                if mapped_texture_index.is_some() && self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 {
+                    let rdp_tile1 = &self.tex.rdp_tiles[self.tex.tile as usize + 1];
+                    match rdp_tile1.mapped_coordinates {
+                        Some((ti, _, _)) => Some(ti),
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
             };
 
@@ -1629,6 +1679,7 @@ impl Hle {
             tl.depth_write = depth_write;
             tl.matrix_index = matrix_index; // set the matrix index
             tl.mapped_texture_index = mapped_texture_index;
+            tl.mapped_texture_index1 = mapped_texture_index1;
             tl.color_combiner_state_index = cc_index;
             tl.light_state_index = ls_index;
         }
@@ -1698,12 +1749,45 @@ impl Hle {
                             | ((rdp_tile.mask_t as u32) << 8)
                             | ((rdp_tile.shift_t as u32) << 0);
 
+            // set flags on the vertex for this tile shifting
+            vtx.flags |= ((rdp_tile.clamp_s as u32) << VertexFlags::TEXMODE_S_SHIFT)
+                        | ((rdp_tile.clamp_t as u32) << VertexFlags::TEXMODE_T_SHIFT);
+
+            // if there's a second texture to sample, pass along those coordinates
+            if rdp_tile.has_texel1 && current_tile < 7 {
+                let rdp_tile1 = &self.tex.rdp_tiles[current_tile as usize + 1];
+
+                if let Some((_, mx, my)) = rdp_tile1.mapped_coordinates {
+                    // adjust texcoords to be relative to the ul coordinate
+                    vtx.tex_coords1[0] = vtx.tex_coords[0] - rdp_tile1.ul.0;
+                    vtx.tex_coords1[1] = vtx.tex_coords[1] - rdp_tile1.ul.1;
+
+                    // the texture parameters of the tile need to be sent to the shader
+                    // mx,my correspond to 0,0 of the texture (not rdp_tile.ul!)
+                    vtx.tex_params1[0] = mx as f32;        // x start
+                    vtx.tex_params1[1] = mx as f32 + (rdp_tile1.lr.0 - rdp_tile1.ul.0) + 1.0;  // x end
+                    vtx.tex_params1[2] = my as f32;        // y start
+                    vtx.tex_params1[3] = my as f32 + (rdp_tile1.lr.1 - rdp_tile1.ul.1) + 1.0;  // y end
+
+                    // all the tex coords and params stay in the unscaled form 
+                    // they will be scaled in the shader
+                }
+
+                // mask and shift values for this tile
+                vtx.maskshift1 = ((rdp_tile1.mask_s as u32) << 24)
+                                | ((rdp_tile1.shift_s as u32) << 16)
+                                | ((rdp_tile1.mask_t as u32) << 8)
+                                | ((rdp_tile1.shift_t as u32) << 0);
+
+                // set flags on the vertex for this tile shifting
+                vtx.flags |= ((rdp_tile1.clamp_s as u32) << VertexFlags::TEXMODE_S1_SHIFT)
+                            | ((rdp_tile1.clamp_t as u32) << VertexFlags::TEXMODE_T1_SHIFT);
+            }
+
             if self.disable_textures {
                 vtx.flags &= !VertexFlags::TEXTURED;
             } else {
-                vtx.flags |= VertexFlags::TEXTURED 
-                                | ((rdp_tile.clamp_s as u32) << VertexFlags::TEXMODE_S_SHIFT)
-                                | ((rdp_tile.clamp_t as u32) << VertexFlags::TEXMODE_T_SHIFT);
+                vtx.flags |= VertexFlags::TEXTURED;
 
                 if self.other_modes.get_texture_filter() == TextureFilter::Bilinear {
                     vtx.flags |= VertexFlags::LINEAR_FILTER;
@@ -1777,6 +1861,48 @@ impl Hle {
         }
     }
 
+    #[inline]
+    fn tmem_offset_4b(x: u32, y: u32, tmem_address: u32, line_bytes: u32) -> (usize, u32, u32) {
+        // on odd lines, flip to read 8 texels (32-bits) ahead/back
+        let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
+        
+        // offset based on x,y of texture data
+        // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+        let offset  = (y * line_bytes) + (sx >> 1);    // sx is is texels, convert to half bytes!
+        let address = (tmem_address << 3) + offset;    // address in bytes
+        let rshift  = 28 - ((sx & 0x07) << 2);         // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
+
+        (address as usize, rshift, 0x0F)
+    }
+
+    #[inline]
+    fn tmem_offset_8b(x: u32, y: u32, tmem_address: u32, line_bytes: u32) -> (usize, u32, u32) {
+        // on odd lines, flip to read 4 texels (32-bits) ahead/back
+        let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
+
+        // offset based on x,y of texture data
+        // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+        let offset  = (y * line_bytes) + sx;           // sx is is texels (8bpp), convert to bytes!
+        let address = (tmem_address << 3) + offset;    // address in bytes
+        let rshift  = 24 - ((sx & 0x03) << 3);         // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
+
+        (address as usize, rshift, 0xFF)
+    }
+
+    #[inline]
+    fn tmem_offset_16b(x: u32, y: u32, tmem_address: u32, line_bytes: u32) -> (usize, u32, u32) {
+        // on odd lines, flip to read 2 texels (32-bits) ahead/back
+        let sx = if (y & 0x01) == 0x01 { x ^ 0x02 } else { x };
+
+        // offset based on x,y of texture data
+        // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
+        let offset  = (y * line_bytes) + (sx * 2);      // sx is is texels (16bpp), convert to bytes!
+        let address = (tmem_address << 3) + offset;     // address in bytes
+        let rshift  = 16 - ((address & 0x02) << 3);     // multiply by 16 to select bits 31..16, 15..0
+
+        (address as usize, rshift, 0xFFFF)
+    }
+
     // Convert CI 4b in TMEM to RGBA 32bpp
     fn map_tmem_ci_4b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F) 
         where 
@@ -1790,16 +1916,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset  = (y * line_bytes) + (sx >> 1);    // sx is is texels, convert to half bytes!
-                    let address = (tmem_address << 3) + offset;    // address in half-bytes
-                    let shift   = 28 - ((sx & 0x07) << 2);         // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                    let (address, rshift, mask) = Self::tmem_offset_4b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 let index = palette | src;
@@ -1822,7 +1940,7 @@ impl Hle {
                         [i as u8, i as u8, i as u8, a as u8]
                     },
                     TlutMode::None => {
-                        warn!(target: "HLE", "map_tmem_ci_8b with TlutMode::None");
+                        warn!(target: "HLE", "map_tmem_ci_4b with TlutMode::None");
                         [255, 0, 0, 255]
                     },
                 };
@@ -1843,16 +1961,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 8 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                    let (address, rshift, mask) = Self::tmem_offset_4b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 // duplicate the nibble in both halves to give a more gradual flow and maximum
@@ -1871,22 +1981,15 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 4 texels (16-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x08 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset  = (y * line_bytes) + (sx >> 1); // sx is is texels, convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 28 - ((sx & 0x07) << 2); // multiply by 4 to select bits 31..28, 27..24, 23..20, etc
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0x0F
+                    let (address, rshift, mask) = Self::tmem_offset_4b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 // duplicate the nibble in both halves to give a more gradual flow and maximum
                 // range (0b0000 maps to 0b0000_0000 and 0b1111 maps to 0b1111_1111)
                 let v = (src << 4) | src;
                 plot(x, y, &[v as u8, v as u8, v as u8, v as u8]);
+                //plot(x, y, &[207, 52, 235, 255]);
             }
         }
     }
@@ -1903,16 +2006,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset  = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                    let (address, rshift, mask) = Self::tmem_offset_8b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 // select the 16-bit color from TLUT
@@ -1956,16 +2051,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                    let (address, rshift, mask) = Self::tmem_offset_8b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 let c = src >> 4;
@@ -1985,18 +2072,11 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 4 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x04 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + sx; // sx is is texels (8bpp), convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 24 - ((sx & 0x03) << 3); // multiply by 8 to select bits 31..24, 23..16, 15..8, 7..0
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFF
+                    let (address, rshift, mask) = Self::tmem_offset_8b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
                 plot(x, y, &[src as u8, src as u8, src as u8, src as u8]);
+                //plot(x, y, &[52, 207, 235, 255]);
             }
         }
     }
@@ -2009,16 +2089,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // on odd lines, flip to read 2 texels (32-bits) ahead/back
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x02 } else { x };
-
-                    // offset based on x,y of texture data
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let offset = (y * line_bytes) + (sx * 2); // sx is is texels (16bpp), convert to bytes!
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 16 - ((address & 0x02) << 3); // multiply to select bits 31..16, 15..0
-
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFFFF
+                    let (address, rshift, mask) = Self::tmem_offset_16b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
 
                 let c = src >> 8;
@@ -2036,14 +2108,8 @@ impl Hle {
         for y in 0..texture_height {
             for x in 0..texture_width {
                 let src = {
-                    // swap shorts on odd lines
-                    let sx = if (y & 0x01) == 0x01 { x ^ 0x02 } else { x };
-                    // offset based on x,y of texture data
-                    let offset = (y * line_bytes) + (sx * 2);
-                    // tmem_address is in 64-bit words, self.tex.tmem is 32-bit
-                    let address = (tmem_address << 3) + offset;
-                    let shift   = 16 - ((address & 0x02) << 3);
-                    (self.tex.tmem[(address >> 2) as usize] >> shift) & 0xFFFF
+                    let (address, rshift, mask) = Self::tmem_offset_16b(x, y, tmem_address, line_bytes);
+                    (self.tex.tmem[address >> 2] >> rshift) & mask
                 };
                 let r = ((src >> 11) & 0x1F) as u8;
                 let g = ((src >>  6) & 0x1F) as u8;
@@ -2084,13 +2150,30 @@ impl Hle {
         }
     }
 
-    fn map_current_texture(&mut self) {
+    // Need to map both TEXEL0 (if textures are enabled) and TEXEL1 (if the color combiner has it set)
+    // TODO: mipmaps
+    fn map_current_textures(&mut self) {
         // if texturing isn't enabled, then the current tile index isn't valid and it doesn't
         // make sense to map it into a texture
         if !self.tex.enabled { return; }
 
         // when rendering, tile should be set to mipmap level 0
         let current_tile_index = self.tex.tile;
+        self.map_texture(current_tile_index);
+
+        // if any of the color combiner states use parameter 2 (G_CCMUX_TEXEL1 or G_ACMUX_TEXEL1) 
+        // or if `C` uses parameter 9 (G_CCMUX_TEXEL1_ALPHA), we need to include the second texture
+        self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = false;
+        if current_tile_index < 7 && self.color_combiner_uses_texel1 { // last tile can't be used here
+            let valid_tile1 = self.tex.rdp_tiles[self.tex.tile as usize + 1].line != 0;
+            if valid_tile1 {
+                self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = true;
+                self.map_texture(current_tile_index + 1);
+            }
+        }
+    }
+
+    fn map_texture(&mut self, current_tile_index: u8) {
         let current_tile = self.tex.rdp_tiles[current_tile_index as usize];
 
         // if current tile has coordinates, we don't need to do anything
@@ -2194,7 +2277,7 @@ impl Hle {
         if let Some((ti, mx, my)) = self.tex.mapped_texture_cache.get(&crc) {
             let current_tile = &mut self.tex.rdp_tiles[current_tile_index as usize];
             current_tile.mapped_coordinates = Some((*ti, *mx, *my));
-            //println!("saw crc=${:X} before, mapped_coordinates = {:?}", crc, current_tile.mapped_coordinates);
+            //println!("{}. saw crc=${:X} before, mapped_coordinates = {:?}, ul.0={}", current_tile_index, crc, current_tile.mapped_coordinates, current_tile.ul.0);
             return;
         }
 
@@ -2228,17 +2311,22 @@ impl Hle {
                 mapped_texture_dest.copy_from_slice(&color);
             }
 
+            #[allow(dead_code)]
+            const BORDER_COLOR: [u8; 4] = [255, 0, 0, 255];
+
             // copy color into (-1,-1)
             if x == 0 && y == 0 {
                 let offset = offset - 4*(mtw as usize + 1);
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             } 
             // copy color into (w, h)
             else if x == texture_width - 1 && y == texture_height - 1 {
                 let offset = offset + 4*(mtw as usize + 1);
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             } 
 
             // copy color into (-1, y)
@@ -2246,12 +2334,14 @@ impl Hle {
                 let offset = offset - 4; // sizeof(u32)
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             } 
             // copy color into (w, y)
             else if x == texture_width - 1 {
                 let offset = offset + 4; // sizeof(u32)
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             }
 
             // copy color into (x, -1)
@@ -2259,12 +2349,14 @@ impl Hle {
                 let offset = offset - 4*mtw as usize; // sizeof(u32)
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             }
             // copy color into (x, h)
             else if y == texture_height - 1 {
                 let offset = offset + 4*mtw as usize; // sizeof(u32)
                 let mapped_texture_dest = &mut texdata[offset as usize..][..4];
                 mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             }
         };
 
@@ -2333,8 +2425,8 @@ impl Hle {
             self.check_othermode_state_change();
         }
 
-        // make sure texture is mapped
-        self.map_current_texture();
+        // make sure textures are mapped
+        self.map_current_textures();
 
         // transform texture coordinates
         let vi = self.vertex_stack.get(v0 as usize).unwrap();
@@ -2374,8 +2466,8 @@ impl Hle {
             self.check_othermode_state_change();
         }
 
-        // make sure texture is mapped
-        self.map_current_texture();
+        // make sure texture are mapped
+        self.map_current_textures();
 
         // translate to global vertex stack
         let vi = self.vertex_stack.get(v00 as usize).unwrap();
@@ -2456,7 +2548,7 @@ impl Hle {
         let old_tile = self.tex.tile;
         self.tex.tile = tile;
 
-        self.map_current_texture();
+        self.map_current_textures();
 
         // map screen coordinate to -1..1
         // invert y
@@ -2566,7 +2658,8 @@ impl Hle {
         // blocks with dxt=0 transfer preswizzled data. I could mark address selected_tile.tmem as
         // swizzed or not, but a program could use a tmem address that's inside the data that's
         // loaded here.
-        let dst = &mut self.tex.tmem[(selected_tile.tmem >> 1) as usize..]; // destination in tmem
+        let dst = &mut self.tex.tmem[(selected_tile.tmem << 1) as usize..]; // destination in tmem -- (tmem * sizeof(u64)) / sizeof(u32)
+        trace!(target: "HLE", "LOADBLOCK to ${:04X}", selected_tile.tmem << 3);
         let mut dest_offset   = 0 as usize;
         let mut source_offset = 0 as usize;
 
@@ -2576,22 +2669,26 @@ impl Hle {
         let mut line_number   = 0u32;
 
         trace!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
-        for _ in 0..(data_size / 8) { // number of 64-bit words to copy
-            let v = &data[(source_offset & 0x3FF)..][..2];
+        for _ in 0..(data_size / 8) { // number of 64-bit dwords to copy
+            let src_ptr = &data[source_offset..source_offset+2]; // grab two 32-bit words
             source_offset += 2;
 
             match selected_tile.size {
                 2 => { // 16b
+                    trace!(target: "HLE", "writing {:?} to offset {} index=${:04X}", src_ptr, dest_offset, (selected_tile.tmem >> 1) + dest_offset as u16);
                     // rows are 4 texels long
                     if (line_number & 0x01) == 0 {
-                        if dst[dest_offset..].len() < 2 || v.len() < 2 {
+                        if dst[dest_offset..].len() < 2 || src_ptr.len() < 2 {
                             error!(target: "HLE", "{} gsDPLoadBlock(tile={}, uls={} [{}], ult={} [{}], texels={}, dxt={})", self.command_prefix, 
                                                         tile, uls, to_f32(uls), ult, to_f32(ult), texels, dxt);
                             error!(target: "HLE", "copy {} bytes from ${:08X} to TMEM=${:04X}", data_size, self.tex.address, selected_tile.tmem << 3);
+                            error!(target: "HLE", "format={} size={}", selected_tile.format, selected_tile.size);
                         }
-                        dst[dest_offset..][..2].copy_from_slice(&v);
+                        dst[dest_offset+0] = src_ptr[0];
+                        dst[dest_offset+1] = src_ptr[1];
                     } else {
-                        dst[dest_offset..][..2].copy_from_slice(&[v[1], v[0]]);
+                        dst[dest_offset+0] = src_ptr[1];
+                        dst[dest_offset+1] = src_ptr[0];
                     }
                     dest_offset += 2;
                 },
@@ -2600,13 +2697,13 @@ impl Hle {
                     // incoming data is already padded appropriately but not split in RG/BA
                     if (line_number & 0x01) == 0 {
                         // red and green from the two texels into the low half
-                        dst[dest_offset | 0x000] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16);
+                        dst[dest_offset | 0x000] = (src_ptr[0] & 0xFFFF0000) | ((src_ptr[1] & 0xFFFF0000) >> 16);
                         // blue and alpha from the two texels into the high half
-                        dst[dest_offset | 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF);
+                        dst[dest_offset | 0x200] = ((src_ptr[0] & 0x0000FFFF) << 16) | (src_ptr[1] & 0x0000FFFF);
                     } else {
                         // swizzled
-                        dst[(dest_offset^1) | 0x000] = (v[0] & 0xFFFF0000) | ((v[1] & 0xFFFF0000) >> 16); // RG
-                        dst[(dest_offset^1) | 0x200] = ((v[0] & 0x0000FFFF) << 16) | (v[1] & 0x0000FFFF); // BA
+                        dst[(dest_offset^1) | 0x000] = (src_ptr[0] & 0xFFFF0000) | ((src_ptr[1] & 0xFFFF0000) >> 16); // RG
+                        dst[(dest_offset^1) | 0x200] = ((src_ptr[0] & 0x0000FFFF) << 16) | (src_ptr[1] & 0x0000FFFF); // BA
                     }
 
                     dest_offset += 1;
@@ -2628,6 +2725,7 @@ impl Hle {
         // have to clear all mapped coordinates since textures are changing
         for rdp_tile in &mut self.tex.rdp_tiles {
             rdp_tile.mapped_coordinates = None;
+            rdp_tile.has_texel1 = false;
         }
     }
 
@@ -2740,6 +2838,7 @@ impl Hle {
         // have to clear all mapped coordinates since textures are changing
         for rdp_tile in &mut self.tex.rdp_tiles {
             rdp_tile.mapped_coordinates = None;
+            rdp_tile.has_texel1 = false;
         }
     }
 
@@ -3065,7 +3164,7 @@ impl Hle {
     }
 
     #[allow(dead_code)]
-    fn render_tmem(&mut self) {
+    fn render_texture_map(&mut self) {
         let vw = 320.0;
         let vh = 240.0;
         let x0 = 0.0;
@@ -3117,6 +3216,8 @@ impl Hle {
         self.tex.enabled = true;
         let old_coord  = self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates;
         self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = Some((self.view_texture_index % (self.mapped_textures.len() as u32), 0, 0));
+        let old_texel1 = self.tex.rdp_tiles[self.tex.tile as usize].has_texel1;
+        self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = false;
 
         // start or change the current draw list to use matrix 0 (our ortho projection)
         self.matrix_index_override = Some(0);
@@ -3128,6 +3229,7 @@ impl Hle {
 
         // fix state
         self.tex.rdp_tiles[self.tex.tile as usize].mapped_coordinates = old_coord;
+        self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 = old_texel1;
         self.tex.enabled = old_enable;
     }
 
@@ -3169,6 +3271,8 @@ impl Hle {
             (b as f32) / 255.0,
             (a as f32) / 255.0
         ];
+
+        self.current_color_combiner_state.lodfrac = (lodfrac as f32) / 256.0;
 
         self.color_combiner_state_changed();
     }
@@ -3229,6 +3333,32 @@ impl Hle {
         if (self.current_triangle_list().num_indices > 0)
             && (self.color_combiner_states[cc_index] != self.current_color_combiner_state) {
             self.next_triangle_list();
+        }
+
+        // set uses_texel1 if any color source makes use of TEXEL1
+        let cc = &self.current_color_combiner_state;
+        if   ((cc.color1_source & 0xFF00_0000) == 0x0200_0000) // G_CCMUX_TEXEL1
+          || ((cc.color1_source & 0x00FF_0000) == 0x0002_0000) // G_CCMUX_TEXEL1
+          || ((cc.color1_source & 0x0000_FF00) == 0x0000_0200) // G_CCMUX_TEXEL1
+          || ((cc.color1_source & 0x0000_00FF) == 0x0000_0002) // G_CCMUX_TEXEL1
+          || ((cc.color1_source & 0x0000_FF00) == 0x0000_0900) // G_CCMUX_TEXEL1_ALPHA 
+          || ((cc.alpha1_source & 0xFF00_0000) == 0x0200_0000) // G_ACMUX_TEXEL1
+          || ((cc.alpha1_source & 0x00FF_0000) == 0x0002_0000) // G_ACMUX_TEXEL1
+          || ((cc.alpha1_source & 0x0000_FF00) == 0x0000_0200) // G_ACMUX_TEXEL1
+          || ((cc.alpha1_source & 0x0000_00FF) == 0x0000_0002) // G_ACMUX_TEXEL1
+          || ((cc.color2_source & 0xFF00_0000) == 0x0200_0000) // G_CCMUX_TEXEL1
+          || ((cc.color2_source & 0x00FF_0000) == 0x0002_0000) // G_CCMUX_TEXEL1
+          || ((cc.color2_source & 0x0000_FF00) == 0x0000_0200) // G_CCMUX_TEXEL1
+          || ((cc.color2_source & 0x0000_00FF) == 0x0000_0002) // G_CCMUX_TEXEL1
+          || ((cc.color2_source & 0x0000_FF00) == 0x0000_0900) // G_CCMUX_TEXEL1_ALPHA 
+          || ((cc.alpha2_source & 0xFF00_0000) == 0x0200_0000) // G_ACMUX_TEXEL1
+          || ((cc.alpha2_source & 0x00FF_0000) == 0x0002_0000) // G_ACMUX_TEXEL1
+          || ((cc.alpha2_source & 0x0000_FF00) == 0x0000_0200) // G_ACMUX_TEXEL1
+          || ((cc.alpha2_source & 0x0000_00FF) == 0x0000_0002) // G_ACMUX_TEXEL1
+                                                               {
+            self.color_combiner_uses_texel1 = true;
+        } else {
+            self.color_combiner_uses_texel1 = false;
         }
     }
 

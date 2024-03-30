@@ -2,8 +2,10 @@ const VERTEX_FLAG_TEXTURED_SHIFT     : u32 = 0u;
 const VERTEX_FLAG_LINEAR_FILTER_SHIFT: u32 = 1u;
 const VERTEX_FLAG_TEXMODE_S_SHIFT    : u32 = 2u;
 const VERTEX_FLAG_TEXMODE_T_SHIFT    : u32 = 4u;
-const VERTEX_FLAG_LIT_SHIFT          : u32 = 6u;
-const VERTEX_FLAG_TWO_CYCLE_SHIFT    : u32 = 7u;
+const VERTEX_FLAG_TEXMODE_S1_SHIFT   : u32 = 6u;
+const VERTEX_FLAG_TEXMODE_T1_SHIFT   : u32 = 8u;
+const VERTEX_FLAG_LIT_SHIFT          : u32 = 10u;
+const VERTEX_FLAG_TWO_CYCLE_SHIFT    : u32 = 11u;
 
 const VERTEX_FLAG_TEXMODE_MASK : u32 = 0x03u;
 
@@ -13,7 +15,7 @@ struct CameraUniform {
     mv_inverse: mat4x4<f32>,
 };
 
-@group(1) @binding(0)
+@group(2) @binding(0)
 var<uniform> camera: CameraUniform;
 
 struct ColorCombinerState {
@@ -23,9 +25,10 @@ struct ColorCombinerState {
     alpha2_source: u32,
     prim_color   : vec4<f32>,
     env_color    : vec4<f32>,
+    lodfrac      : f32,
 };
 
-@group(1) @binding(1)
+@group(2) @binding(1)
 var<uniform> color_combiner_state: ColorCombinerState;
 
 struct LightState {
@@ -33,30 +36,36 @@ struct LightState {
     colors: array<vec3<f32>, 7>,
 }
 
-@group(1) @binding(2)
+@group(2) @binding(2)
 var<uniform> light_state: LightState;
 
 struct VertexInput {
-    @location(0) position  : vec4<f32>,
-    @location(1) color     : vec4<f32>,
-    @location(2) normal    : vec3<f32>,
-    @location(3) tex_coords: vec2<f32>,
-    @location(4) tex_params: vec4<f32>,
-    @location(5) maskshift : u32,
-    @location(6) flags     : u32,
+    @location(0) position   : vec4<f32>,
+    @location(1) color      : vec4<f32>,
+    @location(2) normal     : vec3<f32>,
+    @location(3) tex_coords : vec2<f32>,
+    @location(4) tex_coords1: vec2<f32>,
+    @location(5) tex_params : vec4<f32>,
+    @location(6) tex_params1: vec4<f32>,
+    @location(7) maskshift  : u32,
+    @location(8) maskshift1 : u32,
+    @location(9) flags      : u32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 
     // color and tex_coords are interpolated across the poly
-    @location(0) color     : vec4<f32>,
-    @location(1) normal    : vec3<f32>,
-    @location(2) tex_coords: vec2<f32>,
+    @location(0) color      : vec4<f32>,
+    @location(1) normal     : vec3<f32>,
+    @location(2) tex_coords : vec2<f32>,
+    @location(3) tex_coords1: vec2<f32>,
     // flags and tex_params are the same at each vertex, so look as if they're constant
-    @location(3) tex_params: vec4<f32>,
-    @location(4) maskshift : u32,
-    @location(5) flags     : u32,
+    @location(4) tex_params : vec4<f32>,
+    @location(5) tex_params1: vec4<f32>,
+    @location(6) maskshift  : u32,
+    @location(7) maskshift1 : u32,
+    @location(8) flags      : u32,
 };
 
 struct FragmentOutput {
@@ -74,8 +83,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.normal        = normalize(in.normal * transpose(mv_inverse));
     out.color         = in.color;
     out.tex_coords    = in.tex_coords;
+    out.tex_coords1   = in.tex_coords1;
     out.tex_params    = in.tex_params;
+    out.tex_params1   = in.tex_params1;
     out.maskshift     = in.maskshift;
+    out.maskshift1    = in.maskshift1;
     out.flags         = in.flags;
 
     return out;
@@ -91,12 +103,23 @@ var t_diffuse_nearest: texture_2d<f32>;
 @group(0) @binding(3)
 var s_diffuse_nearest: sampler;
 
+@group(1) @binding(0)
+var t_diffuse_linear1: texture_2d<f32>;
+@group(1) @binding(1)
+var s_diffuse_linear1: sampler;
+
+@group(1) @binding(2)
+var t_diffuse_nearest1: texture_2d<f32>;
+@group(1) @binding(3)
+var s_diffuse_nearest1: sampler;
+
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
     var out: FragmentOutput;
 
-    let rc = rasterizer_color(in);
-    let cc = color_combine(rc, in);
+    let rc  = rasterizer_color(in);
+    let rc1 = texel1_color(in);
+    let cc  = color_combine(rc, rc1, in);
 
     out.color = cc;
     return out;
@@ -173,6 +196,28 @@ fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     }
 }
 
+fn texel1_color(in: VertexOutput) -> vec4<f32> {
+    let texmode_s  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_S1_SHIFT, 2u);
+    let texmode_t  = extractBits(in.flags, VERTEX_FLAG_TEXMODE_T1_SHIFT, 2u);
+    let mask_s     = f32(extractBits(in.maskshift1, 24u, 8u)); // 0xMSssMTst // mask_s shift_s mask_t shift_t
+    let shift_s    = f32(extractBits(in.maskshift1, 16u, 8u));
+    let mask_t     = f32(extractBits(in.maskshift1,  8u, 8u));
+    let shift_t    = f32(extractBits(in.maskshift1,  0u, 8u));
+
+    let tex_coords = vec2(texcoord(shift(in.tex_coords1.x, shift_s), in.tex_params1.x, in.tex_params1.y, mask_s, texmode_s),
+                          texcoord(shift(in.tex_coords1.y, shift_t), in.tex_params1.z, in.tex_params1.w, mask_t, texmode_t));
+
+    let tex_linear  = textureSample(t_diffuse_linear1, s_diffuse_linear1, tex_coords / 512.0);
+    let tex_nearest = textureSample(t_diffuse_nearest1, s_diffuse_nearest1, tex_coords / 512.0);
+
+    if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER_SHIFT, 1u) == 1u) {
+        return tex_linear;
+    } else {
+        return tex_nearest;
+    }
+}
+
+
 fn shade(in: VertexOutput) -> vec4<f32> {
     if (extractBits(in.flags, VERTEX_FLAG_LIT_SHIFT, 1u) == 0u) {
         return in.color;
@@ -189,7 +234,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     }
 }
 
-fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4<f32>, in: VertexOutput) -> vec3<f32> {
+fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, rc1: vec4<f32>, shade: vec4<f32>, in: VertexOutput) -> vec3<f32> {
     switch(src) {
         case 0u: {
             return cc.rgb;
@@ -199,8 +244,8 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4
             return rc.rgb;
         }
 
-        case 2u: { // TODO TEXEL1
-            return rc.rgb;//vec3(1.0, 1.0, 1.0);
+        case 2u: {
+            return rc1.rgb;
         }
 
         case 3u: {
@@ -249,10 +294,17 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4
             }
         }
 
-        case 8u, 9u: {
+        case 8u: {
             switch(letter) {
-                case 2u: { return rc.aaa; } // TEXELn_ALPHA
-                default: { return vec3(0.0, 0.0, 0.0); }
+                case 2u: { return rc.aaa; } // TEXEL0_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); } // ZERO
+            }
+        }
+
+        case 9u: {
+            switch(letter) {
+                case 2u: { return rc1.aaa; } // TEXEL1_ALPHA
+                default: { return vec3(0.0, 0.0, 0.0); } // ZERO
             }
         }
 
@@ -286,7 +338,7 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4
 
         case 14u: {
             switch(letter) {
-                case 2u: { return vec3(0.0, 0.0, 0.0); } // PRIM_LOD_FRACTION (TODO might need to be 1.0?)
+                case 2u: { return vec3(color_combiner_state.lodfrac, color_combiner_state.lodfrac, color_combiner_state.lodfrac); } // PRIM_LOD_FRACTION
                 default: { return vec3(0.0, 0.0, 0.0); }
             }
         }
@@ -297,7 +349,7 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, shade: vec4
     }
 }
 
-fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, shade: f32, in: VertexOutput) -> f32 {
+fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, rc1: f32, shade: f32, in: VertexOutput) -> f32 {
     // cases 0 and 6 will use `letter`
 
     switch(src) {
@@ -316,8 +368,8 @@ fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, shade: f32, in: VertexO
             return rc;
         }
         
-        case 2u: { // TODO TEXEL1
-            return rc;
+        case 2u: {
+            return rc1;
         }
 
         case 3u: {
@@ -339,7 +391,7 @@ fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, shade: f32, in: VertexO
                 }
                 // TODO PRIM_LOD_FRAC
                 default: {
-                    return 0.0;
+                    return color_combiner_state.lodfrac;
                 }
             }
         }
@@ -351,7 +403,7 @@ fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, shade: f32, in: VertexO
 }
 
 // (A-B)*C+D
-fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
+fn color_combine(rc: vec4<f32>, rc1: vec4<f32>, in: VertexOutput) -> vec4<f32> {
     let shade_color = shade(in);
 
     let a0c_source = extractBits(color_combiner_state.color1_source, 24u, 8u);
@@ -365,10 +417,10 @@ fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
     let d0a_source = extractBits(color_combiner_state.alpha1_source,  0u, 8u);
 
     let cc_in = vec4(0.5, 0.5, 1.0, 1.0);
-    let a = vec4(select_color(0u, a0c_source, cc_in, rc, shade_color, in), select_alpha(0u, a0a_source, cc_in.a, rc.a, shade_color.a, in));
-    let b = vec4(select_color(1u, b0c_source, cc_in, rc, shade_color, in), select_alpha(1u, b0a_source, cc_in.a, rc.a, shade_color.a, in));
-    let c = vec4(select_color(2u, c0c_source, cc_in, rc, shade_color, in), select_alpha(2u, c0a_source, cc_in.a, rc.a, shade_color.a, in));
-    let d = vec4(select_color(3u, d0c_source, cc_in, rc, shade_color, in), select_alpha(3u, d0a_source, cc_in.a, rc.a, shade_color.a, in));
+    let a = vec4(select_color(0u, a0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(0u, a0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
+    let b = vec4(select_color(1u, b0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(1u, b0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
+    let c = vec4(select_color(2u, c0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(2u, c0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
+    let d = vec4(select_color(3u, d0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(3u, d0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
 
     let cc_out = (a - b) * c + d;
 
@@ -385,10 +437,10 @@ fn color_combine(rc: vec4<f32>, in: VertexOutput) -> vec4<f32> {
         let c1a_source = extractBits(color_combiner_state.alpha2_source,  8u, 8u);
         let d1a_source = extractBits(color_combiner_state.alpha2_source,  0u, 8u);
 
-        let a2 = vec4(select_color(0u, a1c_source, cc_out, rc, shade_color, in), select_alpha(0u, a1a_source, cc_out.a, rc.a, shade_color.a, in));
-        let b2 = vec4(select_color(1u, b1c_source, cc_out, rc, shade_color, in), select_alpha(1u, b1a_source, cc_out.a, rc.a, shade_color.a, in));
-        let c2 = vec4(select_color(2u, c1c_source, cc_out, rc, shade_color, in), select_alpha(2u, c1a_source, cc_out.a, rc.a, shade_color.a, in));
-        let d2 = vec4(select_color(3u, d1c_source, cc_out, rc, shade_color, in), select_alpha(3u, d1a_source, cc_out.a, rc.a, shade_color.a, in));
+        let a2 = vec4(select_color(0u, a1c_source, cc_out, rc, rc1, shade_color, in), select_alpha(0u, a1a_source, cc_out.a, rc.a, rc1.a, shade_color.a, in));
+        let b2 = vec4(select_color(1u, b1c_source, cc_out, rc, rc1, shade_color, in), select_alpha(1u, b1a_source, cc_out.a, rc.a, rc1.a, shade_color.a, in));
+        let c2 = vec4(select_color(2u, c1c_source, cc_out, rc, rc1, shade_color, in), select_alpha(2u, c1a_source, cc_out.a, rc.a, rc1.a, shade_color.a, in));
+        let d2 = vec4(select_color(3u, d1c_source, cc_out, rc, rc1, shade_color, in), select_alpha(3u, d1a_source, cc_out.a, rc.a, rc1.a, shade_color.a, in));
 
         return (a2 - b2) * c2 + d2;
     }

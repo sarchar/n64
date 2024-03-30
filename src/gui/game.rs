@@ -69,7 +69,7 @@ impl ShaderData for Vertex {
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // normal
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x3,
                 },
@@ -78,19 +78,34 @@ impl ShaderData for Vertex {
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32x2,
                 },
-                wgpu::VertexAttribute { // tex_params
+                wgpu::VertexAttribute { // tex_coords1
                     offset: std::mem::size_of::<[f32; 13]>() as wgpu::BufferAddress,
                     shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute { // tex_params
+                    offset: std::mem::size_of::<[f32; 15]>() as wgpu::BufferAddress,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute { // tex_params1
+                    offset: std::mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
+                    shader_location: 6,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute { // maskshift
-                    offset: std::mem::size_of::<[f32; 17]>() as wgpu::BufferAddress,
-                    shader_location: 5,
+                    offset: std::mem::size_of::<[f32; 23]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute { // maskshift1
+                    offset: (std::mem::size_of::<[f32; 23]>() + std::mem::size_of::<u32>() * 1) as wgpu::BufferAddress,
+                    shader_location: 8,
                     format: wgpu::VertexFormat::Uint32,
                 },
                 wgpu::VertexAttribute { // flags
-                    offset: (std::mem::size_of::<[f32; 17]>() + std::mem::size_of::<u32>()) as wgpu::BufferAddress,
-                    shader_location: 6,
+                    offset: (std::mem::size_of::<[f32; 23]>() + std::mem::size_of::<u32>() * 2) as wgpu::BufferAddress,
+                    shader_location: 9,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ]
@@ -98,15 +113,14 @@ impl ShaderData for Vertex {
     }
 
     fn size() -> usize {
-        (std::mem::size_of::<[f32; 17]>() 
-         + std::mem::size_of::<u32>()) as usize
+        (std::mem::size_of::<[f32; 23]>() + std::mem::size_of::<u32>() * 2) as usize
     }
 }
 
 // The implementation here needs to match the layout in hle
 impl ShaderData for ColorCombinerState {
     fn size() -> usize {
-        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 8]>() + std::mem::size_of::<[u64; 26]>()) as usize
+        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 10]>() + std::mem::size_of::<[u64; 25]>()) as usize
     }
 }
 
@@ -430,7 +444,7 @@ impl App for Game {
         let mvp_matrix_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("MVP Matrix Buffer"),
-                size : (MatrixState::size() * 1024) as u64,
+                size : (MatrixState::size() * 2048) as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }
@@ -537,6 +551,7 @@ impl App for Game {
         let game_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Game Pipeline Layout"),
             bind_group_layouts: &[
+                &game_texture_bind_group_layout,
                 &game_texture_bind_group_layout,
                 &game_uniforms_bind_group_layout,
             ],
@@ -1561,8 +1576,20 @@ impl Game {
                                 render_pass.set_bind_group(0, &self.game_texture_bind_groups.get(0).unwrap(), &[]);
                             }
 
+                            // set the selected texture index for TEXEL1, which even if not textured should be set to some value
+                            // texture 0 is the null texture
+                            if let Some(mti) = dl.mapped_texture_index1 {
+                                if let Some(ti) = self.game_texture_map.get(&mti) {
+                                    render_pass.set_bind_group(1, &self.game_texture_bind_groups.get(*ti).unwrap(), &[]);
+                                } else {
+                                    render_pass.set_bind_group(1, &self.game_texture_bind_groups.get(0).unwrap(), &[]);
+                                }
+                            } else {
+                                render_pass.set_bind_group(1, &self.game_texture_bind_groups.get(0).unwrap(), &[]);
+                            }
+
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix and CC state is used for the triangle list
-                            render_pass.set_bind_group(1, &self.game_uniforms_bind_group, &[MatrixState::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
+                            render_pass.set_bind_group(2, &self.game_uniforms_bind_group, &[MatrixState::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
                                                                                             ColorCombinerState::offset_of(dl.color_combiner_state_index as usize) as wgpu::DynamicOffset,
                                                                                             LightState::offset_of(dl.light_state_index.or(Some(0)).unwrap() as usize) as wgpu::DynamicOffset]);
 
