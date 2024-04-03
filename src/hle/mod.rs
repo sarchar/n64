@@ -1271,10 +1271,10 @@ impl Hle {
         let vfirst = ((self.command >> 32) as u16) >> 1;
         let vlast  = (self.command as u16) >> 1;
 
-        trace!(target: "HLE", "{} gsSPCullDisplayLast({}, {})", self.command_prefix, vfirst, vlast);
+        trace!(target: "HLE", "{} gsSPCullDisplayList({}, {})", self.command_prefix, vfirst, vlast);
 
         // TODO 
-        // loop over all vertices and find min and max of each component, call them vmin and vmax
+        // loop over the vertices and find min and max of each component, call them vmin and vmax
         // transform vmin and vmax using the current mvp matrix
         // persp correct vmin and vmax
         // check if the entire bounding volumn is outside of viewspace (-1..1, -1..1, 0..1)
@@ -1534,7 +1534,7 @@ impl Hle {
                 self.next_triangle_list();
             } else if self.tex.enabled {
                 if self.current_triangle_list().mapped_texture_index.is_none() {
-                    // textures have been enabled
+                    // textures have been enabled but no mapped texture set yet
                     self.next_triangle_list();
                 } else {
                     let ti = self.current_triangle_list().mapped_texture_index.unwrap();
@@ -1551,12 +1551,17 @@ impl Hle {
                 // textures have been disabled
                 self.next_triangle_list();
             } else if self.tex.enabled {
-                if let Some(ti) = self.current_triangle_list().mapped_texture_index1 {
-                    if !self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 {
-                        // TEXEL1 texture set up but not in use
+                // if this draw doesn't use TEXEL1, don't care what is currently set
+                if self.tex.rdp_tiles[self.tex.tile as usize].has_texel1 {
+                    if self.current_triangle_list().mapped_texture_index1.is_none() {
+                        // texture has TEXEL1 but no mapped_texture_index1 set on this draw call, start a new one
                         self.next_triangle_list();
                     } else {
+                        // if the TEXEL1 texture index changes, need a new draw call
+                        let ti = self.current_triangle_list().mapped_texture_index1.unwrap();
+
                         // tile.mapped_coordinates must be set (you have to call map_current_textures() before adding textured triangles)
+                        // and we know that tex.tile+1 is valid
                         if ti != self.tex.rdp_tiles[self.tex.tile as usize + 1].mapped_coordinates.unwrap().0 {
                             self.next_triangle_list();
                         }
@@ -1717,10 +1722,13 @@ impl Hle {
             let current_tile = self.tex.tile;
             let rdp_tile = &self.tex.rdp_tiles[current_tile as usize];
 
+            // copy because we're modifying vtx.tex_coords;
+            let tex_coords = vtx.tex_coords;
+
             if let Some((_, mx, my)) = rdp_tile.mapped_coordinates {
                 // adjust texcoords to be relative to the ul coordinate
-                vtx.tex_coords[0] = vtx.tex_coords[0] - rdp_tile.ul.0;
-                vtx.tex_coords[1] = vtx.tex_coords[1] - rdp_tile.ul.1;
+                vtx.tex_coords[0] = tex_coords[0] - rdp_tile.ul.0;
+                vtx.tex_coords[1] = tex_coords[1] - rdp_tile.ul.1;
 
                 // the texture parameters of the tile need to be sent to the shader
                 // mx,my correspond to 0,0 of the texture (not rdp_tile.ul!)
@@ -1749,8 +1757,8 @@ impl Hle {
 
                 if let Some((_, mx, my)) = rdp_tile1.mapped_coordinates {
                     // adjust texcoords to be relative to the ul coordinate
-                    vtx.tex_coords1[0] = vtx.tex_coords[0] - rdp_tile1.ul.0;
-                    vtx.tex_coords1[1] = vtx.tex_coords[1] - rdp_tile1.ul.1;
+                    vtx.tex_coords1[0] = tex_coords[0] - rdp_tile1.ul.0;
+                    vtx.tex_coords1[1] = tex_coords[1] - rdp_tile1.ul.1;
 
                     // the texture parameters of the tile need to be sent to the shader
                     // mx,my correspond to 0,0 of the texture (not rdp_tile.ul!)
@@ -2322,6 +2330,20 @@ impl Hle {
                 mapped_texture_dest.copy_from_slice(&color);
                 //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
             } 
+            // copy color into (-1, h)
+            else if x == 0 && y == texture_height - 1 {
+                let offset = offset + 4*(mtw as usize - 1);
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
+            }
+            // copy color into (x, -1)
+            else if x == texture_width - 1 && y == 0 {
+                let offset = offset - 4*(mtw as usize - 1);
+                let mapped_texture_dest = &mut texdata[offset as usize..][..4];
+                mapped_texture_dest.copy_from_slice(&color);
+                //mapped_texture_dest.copy_from_slice(&BORDER_COLOR);
+            }
 
             // copy color into (-1, y)
             if x == 0 {
@@ -2662,7 +2684,6 @@ impl Hle {
         // swizzed or not, but a program could use a tmem address that's inside the data that's
         // loaded here.
         let dst = &mut self.tex.tmem[(selected_tile.tmem << 1) as usize..]; // destination in tmem -- (tmem * sizeof(u64)) / sizeof(u32)
-        trace!(target: "HLE", "LOADBLOCK to ${:04X}", selected_tile.tmem << 3);
         let mut dest_offset   = 0 as usize;
         let mut source_offset = 0 as usize;
 
@@ -2678,7 +2699,6 @@ impl Hle {
 
             match selected_tile.size {
                 2 => { // 16b
-                    trace!(target: "HLE", "writing {:?} to offset {} index=${:04X}", src_ptr, dest_offset, (selected_tile.tmem >> 1) + dest_offset as u16);
                     // rows are 4 texels long
                     if (line_number & 0x01) == 0 {
                         if dst[dest_offset..].len() < 2 || src_ptr.len() < 2 {
@@ -2782,7 +2802,7 @@ impl Hle {
         // rdp_tile.tmem is in 64-bit words, tmem[] is 32-bit
         let dst = &mut self.tex.tmem[(rdp_tile.tmem << 1) as usize..];
 
-        // TODO if this happens, a tile is being uploaded started at an odd line.  I don't know if
+        // TODO if this happens, a tile is being uploaded starting at an odd line.  I don't know if
         // that matters, actually, but might be worth checking into.
         if ((rdp_tile.tmem / rdp_tile.line) & 0x01) != 0 { todo!(); }
 

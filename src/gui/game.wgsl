@@ -81,11 +81,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     // transform into viewspace for decals and move slightly closer to the screen
     var clip_position: vec4<f32> = in.position * camera.modelview * camera.projection;
+    
+    // for decals, move z closer to camera (left-handed, Y up)
     if(extractBits(in.flags, VERTEX_FLAG_DECAL, 1u) == 1u) {
-        clip_position.z -= 0.0005 * clip_position.w;
+        clip_position.z -= 0.001 * clip_position.w;
     }
 
-    // the matrices used on n64 expect the vertex to be left-multiplied: v' = v*(M*V*P)
+    // OoT beating heart has Z value -0.00085
+    // TODO: clamping here, but not sure if that's the right thing to do or if there's a reason why the value is <0.
+    if (clip_position.z / clip_position.w) < 0 {
+        clip_position.z = 0.0;
+    }
+
     out.clip_position = clip_position;
     out.normal        = normalize(in.normal * transpose(mv_inverse));
     out.color         = in.color;
@@ -189,14 +196,11 @@ fn rasterizer_color(in: VertexOutput) -> vec4<f32> {
     let tex_coords = vec2(texcoord(shift(in.tex_coords.x, shift_s), in.tex_params.x, in.tex_params.y, mask_s, texmode_s),
                           texcoord(shift(in.tex_coords.y, shift_t), in.tex_params.z, in.tex_params.w, mask_t, texmode_t));
 
-    let tex_linear  = textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords / 512.0);
-    let tex_nearest = textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords / 512.0);
-
     if (extractBits(in.flags, VERTEX_FLAG_TEXTURED_SHIFT, 1u) == 1u) {
         if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER_SHIFT, 1u) == 1u) {
-            return tex_linear;
+            return textureSample(t_diffuse_linear, s_diffuse_linear, tex_coords / 512.0);
         } else {
-            return tex_nearest;
+            return textureSample(t_diffuse_nearest, s_diffuse_nearest, tex_coords / 512.0);
         }
     } else {
         return in.color;
@@ -214,13 +218,10 @@ fn texel1_color(in: VertexOutput) -> vec4<f32> {
     let tex_coords = vec2(texcoord(shift(in.tex_coords1.x, shift_s), in.tex_params1.x, in.tex_params1.y, mask_s, texmode_s),
                           texcoord(shift(in.tex_coords1.y, shift_t), in.tex_params1.z, in.tex_params1.w, mask_t, texmode_t));
 
-    let tex_linear  = textureSample(t_diffuse_linear1, s_diffuse_linear1, tex_coords / 512.0);
-    let tex_nearest = textureSample(t_diffuse_nearest1, s_diffuse_nearest1, tex_coords / 512.0);
-
     if (extractBits(in.flags, VERTEX_FLAG_LINEAR_FILTER_SHIFT, 1u) == 1u) {
-        return tex_linear;
+        return textureSample(t_diffuse_linear1, s_diffuse_linear1, tex_coords / 512.0);
     } else {
-        return tex_nearest;
+        return textureSample(t_diffuse_nearest1, s_diffuse_nearest1, tex_coords / 512.0);
     }
 }
 
