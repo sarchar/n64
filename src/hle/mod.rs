@@ -5,7 +5,7 @@ use std::mem;
 use tracing::{trace, debug, error, info, warn};
 
 use cgmath::prelude::*;
-use cgmath::{Matrix4, Vector4};
+use cgmath::{Matrix4, Matrix3, Vector4, Vector3};
 
 use crate::*;
 
@@ -72,31 +72,33 @@ pub struct F3DZEX2_Vertex {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub position   : [f32; 4],
-    pub color      : [f32; 4],
-    pub normal     : [f32; 3],
-    pub tex_coords : [f32; 2],
-    pub tex_coords1: [f32; 2],
-    pub tex_params : [f32; 4],
-    pub tex_params1: [f32; 4],
-    pub maskshift  : u32,
-    pub maskshift1 : u32,
-    pub flags      : u32,
+    pub view_position: [f32; 4],
+    pub color        : [f32; 4],
+    pub normal       : [f32; 3],
+    //pub view_normal  : [f32; 3],
+    pub tex_coords   : [f32; 2],
+    pub tex_coords1  : [f32; 2],
+    pub tex_params   : [f32; 4],
+    pub tex_params1  : [f32; 4],
+    pub maskshift    : u32,
+    pub maskshift1   : u32,
+    pub flags        : u32,
 }
 
 impl Vertex {
     pub const fn const_default() -> Self {
         Self {
-            position   : [0.0, 0.0, 0.0, 1.0],
-            color      : [0.0, 0.0, 0.0, 1.0],
-            normal     : [1.0, 0.0, 0.0],
-            tex_coords : [0.0, 0.0],
-            tex_coords1: [0.0, 0.0],
-            tex_params : [0.0, 1.0, 0.0, 1.0],
-            tex_params1: [0.0, 1.0, 0.0, 1.0],
-            maskshift  : 0,
-            maskshift1 : 0,
-            flags      : 0,
+            view_position: [0.0, 0.0, 0.0, 1.0],
+            color        : [0.0, 0.0, 0.0, 1.0],
+            normal       : [1.0, 0.0, 0.0],
+            //view_normal: [1.0, 0.0, 0.0],
+            tex_coords   : [0.0, 0.0],
+            tex_coords1  : [0.0, 0.0],
+            tex_params   : [0.0, 1.0, 0.0, 1.0],
+            tex_params1  : [0.0, 1.0, 0.0, 1.0],
+            maskshift    : 0,
+            maskshift1   : 0,
+            flags        : 0,
         }
     }
 }
@@ -118,9 +120,9 @@ impl VertexFlags {
     pub const TEXMODE_T1_SHIFT         : u32 = 8; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
     pub const LIT                      : u32 = 1u32 << 10;
     pub const TWO_CYCLE                : u32 = 1u32 << 11;
-    pub const DECAL                    : u32 = 1u32 << 12;
-    pub const ALPHA_COMPARE_MODE_SHIFT : u32 = 13; // 00 = None, 01 = Threshold, 11 = Dither
-    pub const TEX_EDGE                 : u32 = 15;
+    pub const ZMODE_SHIFT              : u32 = 12; // 00 = Opaque, 01 = Interpenetrating, 10 = Translucent, 11 = Decal
+    pub const ALPHA_COMPARE_MODE_SHIFT : u32 = 14; // 00 = None, 01 = Threshold, 11 = Dither
+    pub const TEX_EDGE                 : u32 = 16;
     // next VERTEX_FLAG at "<< 16"
 }
 
@@ -233,6 +235,8 @@ pub struct Hle {
     matrices: Vec<MatrixState>,              // all the unique matrices in the DL
     matrix_stack: Vec<Matrix4<f32>>,         // modelview only, not multiplied by proj
     current_projection_matrix: Matrix4<f32>, // current projection matrix
+    current_modelview_matrix: Matrix4<f32>,  // current modelview matrix (equal to the top of the matrix stack or identity)
+    current_mv_inverse_matrix: Option<Matrix3<f32>>, // inverse of modelview, only Some() when actually needed
 
     matrix_index_override: Option<u32>,      // set to force a specific matrix index rather than use current_matrix
     disable_depth_override: Option<()>,      // set to force no depth on the next draw call
@@ -291,19 +295,15 @@ pub struct Hle {
 #[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MatrixState {
     pub projection: [[f32; 4]; 4],
-    pub modelview : [[f32; 4]; 4],
-    pub mv_inverse: [[f32; 4]; 4],
     // need some alignment
-    pub _alignment: [u64; 8],
+    pub _alignment: [u64; 24],
 }
 
 impl Default for MatrixState {
     fn default() -> Self {
         Self {
             projection: Matrix4::identity().into(),
-            modelview : Matrix4::identity().into(),
-            mv_inverse: Matrix4::identity().into(),
-            _alignment: [0; 8],
+            _alignment: [0; 24],
         }
     }
 }
@@ -461,6 +461,8 @@ impl Hle {
             matrices: vec![],
             matrix_stack: vec![],
             current_projection_matrix: Matrix4::identity(),
+            current_modelview_matrix: Matrix4::identity(),
+            current_mv_inverse_matrix: None,
             matrix_index_override: None,
             disable_depth_override: None,
 
@@ -548,6 +550,8 @@ impl Hle {
         self.matrix_index_override = None;
         self.disable_depth_override = None;
         self.current_projection_matrix = Matrix4::identity();
+        self.current_modelview_matrix = Matrix4::identity();
+        self.current_mv_inverse_matrix = None;
         self.color_images.clear();
         self.depth_images.clear();
         self.clear_images.clear();
@@ -1024,10 +1028,14 @@ impl Hle {
                 self.matrix_stack[count - 1] = cgmat;
             }
 
-            // when current_matrix changes we need to start a new draw call
-            // (if there were no triangles yet, this call this does nothing)
-            self.next_triangle_list();
+            self.current_modelview_matrix = cgmat.transpose();
+            self.current_mv_inverse_matrix = None; // only compute this when necessary
         }
+    }
+
+    fn make_mv_inverse(&mut self) {
+        let inv = self.current_modelview_matrix.invert().unwrap_or(Matrix4::identity()).transpose();
+        self.current_mv_inverse_matrix = Some(Matrix3::from_cols(inv.x.truncate(), inv.y.truncate(), inv.z.truncate()));
     }
 
     fn handle_popmtx(&mut self) { // G_POPMTX
@@ -1037,8 +1045,8 @@ impl Hle {
         let new_size = self.matrix_stack.len().saturating_sub(num as usize);
         self.matrix_stack.truncate(new_size);
 
-        // PopMatrix doesn't change the current matrix state
-        // don't: self.next_triangle_list(None)
+        self.current_modelview_matrix = (*self.matrix_stack.last().unwrap_or(&Matrix4::identity())).transpose();
+        self.current_mv_inverse_matrix = None;
     }
 
     fn handle_moveword(&mut self, index: u8, offset: u16, data: u32) {
@@ -1349,16 +1357,16 @@ impl Hle {
         for i in 0..numv {
             let data = &vtx_data[(vtx_size * i as usize) >> 2..];
 
+            // view position is calculated the same for both
+            // MV matrix is transposed, since cgmath doesn't support left multiply??
+            let pos = Vector4::new(((data[0] >> 16) as i16) as f32, ( data[0] as i16) as f32, ((data[1] >> 16) as i16) as f32, 1.0);
+            let view_pos: Vector4<f32> = self.current_modelview_matrix * pos;
+
             // convert F3DZEX2_Vertex to Vertex
             let vtx = if self.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // !G_LIGHTING
                 // Lighting disabled, we have vertex colors
                 Vertex {
-                    position: [
-                        ((data[0] >> 16) as i16) as f32, 
-                        ( data[0]        as i16) as f32, 
-                        ((data[1] >> 16) as i16) as f32,
-                        1.0,
-                    ],
+                    view_position: view_pos.into(),
                     color: [
                         ((data[3] >> 24) as u8) as f32 / 255.0, 
                         ((data[3] >> 16) as u8) as f32 / 255.0, 
@@ -1377,15 +1385,15 @@ impl Hle {
             } else {
                 let norm_scale = |i: i8| if i < 0 { (i as f32) / 128.0 } else { (i as f32) / 127.0 };
 
-                // Lighting enabled, so we have a normal and lights
-                // the normal vector must be normalized by the game
+                // Lighting enabled, so we have a normal and lights the normal vector must be normalized by the game
+                // and to calculate proper world space lighting, we need the modelview inverse matrix
+                self.make_mv_inverse();
+
+                let normal = Vector3::new(norm_scale((data[3] >> 24) as i8), norm_scale((data[3] >> 16) as i8), norm_scale((data[3] >>  8) as i8));
+                let view_normal = self.current_mv_inverse_matrix.unwrap() * normal;
+
                 Vertex {
-                    position: [
-                        ((data[0] >> 16) as i16) as f32, 
-                        ( data[0]        as i16) as f32, 
-                        ((data[1] >> 16) as i16) as f32,
-                        1.0,
-                    ],
+                    view_position: view_pos.into(),
                     color: [
                         self.ambient_light_color[0],
                         self.ambient_light_color[1],
@@ -1393,11 +1401,7 @@ impl Hle {
                         // Alpha is still present
                         (data[3] as u8) as f32 / 255.0,
                     ],
-                    normal: [
-                        norm_scale((data[3] >> 24) as i8), 
-                        norm_scale((data[3] >> 16) as i8), 
-                        norm_scale((data[3] >>  8) as i8), 
-                    ],
+                    normal: view_normal.normalize().into(),
                     tex_coords: [
                         self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
                         self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
@@ -1600,12 +1604,8 @@ impl Hle {
                 },
                 None => {
                     let matrix_index = self.matrices.len() as u32;
-                    // top of self.matrix_index is the current modelview matrix
-                    let modelview = *self.matrix_stack.last().or(Some(&Matrix4::identity())).unwrap();
                     self.matrices.push(MatrixState {
                         projection: self.current_projection_matrix.into(),
-                        modelview : modelview.into(),
-                        mv_inverse: modelview.invert().unwrap_or(Matrix4::identity()).into(),
                         ..Default::default()
                     });
                     matrix_index
@@ -1802,9 +1802,10 @@ impl Hle {
             vtx.flags |= VertexFlags::TWO_CYCLE;
         }
 
-        if self.other_modes.get_zmode() == ZMode::Decal {
-            vtx.flags |= VertexFlags::DECAL;
-        }
+        // pass ZMode through
+        let mut zmode = self.other_modes.get_zmode();
+        if zmode == ZMode::Opaque && self.other_modes.get_force_blend() { zmode = ZMode::Translucent; }
+        vtx.flags |= (zmode as u32) << VertexFlags::ZMODE_SHIFT;
 
         // alpha compare mode
         if self.other_modes.get_alpha_compare() == AlphaCompare::Threshold {
@@ -2588,27 +2589,27 @@ impl Hle {
 
         let cur_pos = self.vertices_internal.len() as u16; // save start index
         self.vertices_internal.push(Vertex { // TL
-            position  : [scale_x(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
-            color     : [1.0, 0.0, 0.0, 1.0], 
-            tex_coords: [uls, ult], 
+            view_position  : [scale_x(ulx, vw), scale_y(uly, vh), 0.0, 1.0], 
+            color          : [1.0, 0.0, 0.0, 1.0], 
+            tex_coords     : [uls, ult], 
             ..Default::default()
         });
         self.vertices_internal.push(Vertex { // TR
-            position  : [scale_x(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
-            color     : [0.0, 1.0, 0.0, 1.0], 
-            tex_coords: [uls+sw, ult], 
+            view_position  : [scale_x(ulx+w, vw), scale_y(uly, vh), 0.0, 1.0], 
+            color          : [0.0, 1.0, 0.0, 1.0], 
+            tex_coords     : [uls+sw, ult], 
             ..Default::default()
         });
         self.vertices_internal.push(Vertex { // BL
-            position  : [scale_x(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
-            color     : [0.0, 0.0, 1.0, 1.0], 
-            tex_coords: [uls, ult+th], 
+            view_position  : [scale_x(ulx, vw), scale_y(uly+h, vh), 0.0, 1.0], 
+            color          : [0.0, 0.0, 1.0, 1.0], 
+            tex_coords     : [uls, ult+th], 
             ..Default::default()
         });
         self.vertices_internal.push(Vertex { // BR
-            position  : [scale_x(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
-            color     : [1.0, 0.0, 1.0, 1.0], 
-            tex_coords: [uls+sw, ult+th], 
+            view_position  : [scale_x(ulx+w, vw), scale_y(uly+h, vh), 0.0, 1.0], 
+            color          : [1.0, 0.0, 1.0, 1.0], 
+            tex_coords     : [uls+sw, ult+th], 
             ..Default::default()
         });
 
@@ -3162,22 +3163,22 @@ impl Hle {
         let scale_y = |s, maxs| ((((s as f32) / maxs) * 2.0) - 1.0) * -1.0;
         let cur_pos = self.vertices_internal.len() as u16; // save start index
         self.vertices_internal.push(Vertex {  // TL
-            position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], 
+            view_position: [ scale_x(x0  , vw), scale_y(y0+h, vh), 0.0, 1.0], 
             color: color, 
             ..Default::default() 
         });
         self.vertices_internal.push(Vertex {  // TR
-            position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], 
+            view_position: [ scale_x(x0+w, vw), scale_y(y0+h, vh), 0.0, 1.0], 
             color: color, 
             ..Default::default() 
         });
         self.vertices_internal.push(Vertex {  // BL
-            position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], 
+            view_position: [ scale_x(x0  , vw), scale_y(y0  , vh), 0.0, 1.0], 
             color: color, 
             ..Default::default() 
         }); 
         self.vertices_internal.push(Vertex {  // BR
-            position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], 
+            view_position: [ scale_x(x0+w, vw), scale_y(y0  , vh), 0.0, 1.0], 
             color: color, 
             ..Default::default() 
         });
@@ -3488,13 +3489,12 @@ enum ZSourceSelect {
     Primitive
 }
 
-#[allow(dead_code)]
 #[derive(Debug,PartialEq)]
 enum ZMode {
-    Opaque,
-    Interpenetrating,
-    Translucent,
-    Decal
+    Opaque = 0,
+    Interpenetrating = 1,
+    Translucent = 2,
+    Decal = 3
 }
 
 #[allow(dead_code)]
@@ -3637,6 +3637,10 @@ impl OtherModes {
             3 => ZMode::Decal,
             _ => panic!("invalid"),
         }
+    }
+
+    fn get_force_blend(&self) -> bool {
+        (self.get_render_mode() & (1 << OtherModes::FORCE_BL_SHIFT)) != 0
     }
 
     // determine if a TEX_EDGE mode is in use.  TEX_EDGE doesn't actually set any bits...well,

@@ -6,17 +6,16 @@ const VERTEX_FLAG_TEXMODE_S1_SHIFT         : u32 = 6u;
 const VERTEX_FLAG_TEXMODE_T1_SHIFT         : u32 = 8u;
 const VERTEX_FLAG_LIT_SHIFT                : u32 = 10u;
 const VERTEX_FLAG_TWO_CYCLE_SHIFT          : u32 = 11u;
-const VERTEX_FLAG_DECAL                    : u32 = 12u;
-const VERTEX_FLAG_ALPHA_COMPARE_MODE_SHIFT : u32 = 13;
-const VERTEX_FLAG_TEX_EDGE                 : u32 = 15;
+const VERTEX_FLAG_ZMODE_SHIFT              : u32 = 12;
+const VERTEX_FLAG_ALPHA_COMPARE_MODE_SHIFT : u32 = 14;
+const VERTEX_FLAG_TEX_EDGE                 : u32 = 16;
 
+const VERTEX_FLAG_ZMODE_MASK               : u32 = 0x03u;
 const VERTEX_FLAG_TEXMODE_MASK             : u32 = 0x03u;
 const VERTEX_FLAG_ALPHA_COMPARE_MODE_MASK  : u32 = 0x03u;
 
 struct CameraUniform {
     projection: mat4x4<f32>,
-    modelview : mat4x4<f32>,
-    mv_inverse: mat4x4<f32>,
 };
 
 @group(2) @binding(0)
@@ -45,33 +44,33 @@ struct LightState {
 var<uniform> light_state: LightState;
 
 struct VertexInput {
-    @location(0) position   : vec4<f32>,
-    @location(1) color      : vec4<f32>,
-    @location(2) normal     : vec3<f32>,
-    @location(3) tex_coords : vec2<f32>,
-    @location(4) tex_coords1: vec2<f32>,
-    @location(5) tex_params : vec4<f32>,
-    @location(6) tex_params1: vec4<f32>,
-    @location(7) maskshift  : u32,
-    @location(8) maskshift1 : u32,
-    @location(9) flags      : u32,
+    @location(0) view_position: vec4<f32>,
+    @location(1) color        : vec4<f32>,
+    @location(2) view_normal  : vec3<f32>,
+    @location(3) tex_coords   : vec2<f32>,
+    @location(4) tex_coords1  : vec2<f32>,
+    @location(5) tex_params   : vec4<f32>,
+    @location(6) tex_params1  : vec4<f32>,
+    @location(7) maskshift    : u32,
+    @location(8) maskshift1   : u32,
+    @location(9) flags        : u32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 
     // position, color and tex_coords are interpolated across the poly
-    @location(0) position   : vec4<f32>,
-    @location(1) color      : vec4<f32>,
-    @location(2) normal     : vec3<f32>,
-    @location(3) tex_coords : vec2<f32>,
-    @location(4) tex_coords1: vec2<f32>,
+    @location(0) view_position: vec4<f32>,
+    @location(1) color        : vec4<f32>,
+    @location(2) view_normal  : vec3<f32>,
+    @location(3) tex_coords   : vec2<f32>,
+    @location(4) tex_coords1  : vec2<f32>,
     // flags and tex_params are the same at each vertex, so look as if they're constant
-    @location(5) tex_params : vec4<f32>,
-    @location(6) tex_params1: vec4<f32>,
-    @location(7) maskshift  : u32,
-    @location(8) maskshift1 : u32,
-    @location(9) flags      : u32,
+    @location(5) tex_params   : vec4<f32>,
+    @location(6) tex_params1  : vec4<f32>,
+    @location(7) maskshift    : u32,
+    @location(8) maskshift1   : u32,
+    @location(9) flags        : u32,
 };
 
 struct FragmentOutput {
@@ -82,16 +81,14 @@ struct FragmentOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let mv_inverse = mat3x3(camera.mv_inverse[0].xyz, camera.mv_inverse[1].xyz, camera.mv_inverse[2].xyz);
-
     // need a worldspace position for per-pixel lighting
-    out.position = in.position * camera.modelview;
+    out.view_position = in.view_position;
     
     // transform into viewspace for decals and move slightly closer to the screen
-    var clip_position: vec4<f32> = out.position * camera.projection;
+    var clip_position: vec4<f32> = out.view_position * camera.projection;
     
     // for decals, move z closer to camera (left-handed, Y up)
-    if(extractBits(in.flags, VERTEX_FLAG_DECAL, 1u) == 1u) {
+    if(extractBits(in.flags, VERTEX_FLAG_ZMODE_SHIFT, 2u) == 3u) {
         clip_position.z -= 0.001 * clip_position.w;
     }
 
@@ -102,7 +99,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     }
 
     out.clip_position = clip_position;
-    out.normal        = normalize(in.normal * transpose(mv_inverse));
+    out.view_normal   = in.view_normal;
     out.color         = in.color;
     out.tex_coords    = in.tex_coords;
     out.tex_coords1   = in.tex_coords1;
@@ -154,6 +151,11 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
             discard;
             //cc = vec4<f32>(207.0/255.0, 52.0/255.0, 235.0/255.0, 1.0);
         }
+    }
+
+    // for opaque mode, kill alpha
+    if(extractBits(in.flags, VERTEX_FLAG_ZMODE_SHIFT, 2u) == 0u) {
+        cc.a = 1.0;
     }
 
     out.color = cc;
@@ -253,11 +255,11 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     } else {
         // perform lighting with the ambient from in.color
         var color = in.color.rgb;
-        let position = in.position.xyz / in.position.w;
+        let position = in.view_position.xyz / in.view_position.w;
         for (var i: i32 = 0; i < 7; i++) {
             if (light_state.lights[i].w != 0.0) {
                 let neg_light_direction = normalize(light_state.lights[i].xyz - position);
-                let contrib = max(dot(in.normal, neg_light_direction), 0.0);
+                let contrib = max(dot(in.view_normal, neg_light_direction), 0.0);
                 color += light_state.colors[i].rgb * contrib;
             }
         }

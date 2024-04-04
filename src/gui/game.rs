@@ -45,9 +45,7 @@ trait ShaderData: Sized {
 impl ShaderData for MatrixState {
     fn size() -> usize {
         (std::mem::size_of::<[f32; 16]>()    // projection
-          + std::mem::size_of::<[f32; 16]>() // modelview
-          + std::mem::size_of::<[f32; 16]>() // mv_inverse
-          + std::mem::size_of::<[u64; 8]>() // alignment
+          + std::mem::size_of::<[u64; 24]>() // alignment
         ) as usize
     }
 }
@@ -58,7 +56,7 @@ impl ShaderData for Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { // position
+                wgpu::VertexAttribute { // view_position
                     offset: 0,
                     shader_location: 0,
                     format: wgpu::VertexFormat::Float32x4,
@@ -135,10 +133,10 @@ impl ShaderData for LightState {
 // Y texture coordinate is inverted to flip the resulting image
 // default sampler is Nearest, so we just need the textured flag 
 const DISPLAY_GAME_TEXTURE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0,  1.0, 0.0, 1.0], tex_coords: [0.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TL
-    Vertex { position: [ 1.0,  1.0, 0.0, 1.0], tex_coords: [1.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TR
-    Vertex { position: [-1.0, -1.0, 0.0, 1.0], tex_coords: [0.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BL
-    Vertex { position: [ 1.0, -1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BR
+    Vertex { view_position: [-1.0,  1.0, 0.0, 1.0], tex_coords: [0.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TL
+    Vertex { view_position: [ 1.0,  1.0, 0.0, 1.0], tex_coords: [1.0, 0.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // TR
+    Vertex { view_position: [-1.0, -1.0, 0.0, 1.0], tex_coords: [0.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BL
+    Vertex { view_position: [ 1.0, -1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], flags: VertexFlags::TEXTURED, ..Vertex::const_default() }, // BR
 ];
 
 const DISPLAY_GAME_TEXTURE_INDICES: &[u16] = &[2, 1, 0, 1, 3, 2];
