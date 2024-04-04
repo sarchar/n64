@@ -56,17 +56,18 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 
-    // color and tex_coords are interpolated across the poly
-    @location(0) color      : vec4<f32>,
-    @location(1) normal     : vec3<f32>,
-    @location(2) tex_coords : vec2<f32>,
-    @location(3) tex_coords1: vec2<f32>,
+    // position, color and tex_coords are interpolated across the poly
+    @location(0) position   : vec4<f32>,
+    @location(1) color      : vec4<f32>,
+    @location(2) normal     : vec3<f32>,
+    @location(3) tex_coords : vec2<f32>,
+    @location(4) tex_coords1: vec2<f32>,
     // flags and tex_params are the same at each vertex, so look as if they're constant
-    @location(4) tex_params : vec4<f32>,
-    @location(5) tex_params1: vec4<f32>,
-    @location(6) maskshift  : u32,
-    @location(7) maskshift1 : u32,
-    @location(8) flags      : u32,
+    @location(5) tex_params : vec4<f32>,
+    @location(6) tex_params1: vec4<f32>,
+    @location(7) maskshift  : u32,
+    @location(8) maskshift1 : u32,
+    @location(9) flags      : u32,
 };
 
 struct FragmentOutput {
@@ -79,8 +80,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     let mv_inverse = mat3x3(camera.mv_inverse[0].xyz, camera.mv_inverse[1].xyz, camera.mv_inverse[2].xyz);
 
+    // need a worldspace position for per-pixel lighting
+    out.position = in.position * camera.modelview;
+    
     // transform into viewspace for decals and move slightly closer to the screen
-    var clip_position: vec4<f32> = in.position * camera.modelview * camera.projection;
+    var clip_position: vec4<f32> = out.position * camera.projection;
     
     // for decals, move z closer to camera (left-handed, Y up)
     if(extractBits(in.flags, VERTEX_FLAG_DECAL, 1u) == 1u) {
@@ -156,7 +160,7 @@ fn texcoord(st_in: f32, minval: f32, maxval: f32, mask: f32, mode: u32) -> f32 {
 
         // -8, -7, .. -2, -1, 0, 1, 2, 3, 4, .. 8, 9, 10, ..
         //  0   1      6   7  0, 1, 2, 3, 4, .. 0, 1, 2, ..   <-- WRAP
-        //      7      2   1  0, 1, 2, 3, 4, .. 7, 7, 5, ..   <-- MIRROR
+        //      7      2   1  0, 1, 2, 3, 4, .. 7, 6, 5, ..   <-- MIRROR
         if(extractBits(mode, 0u, 1u) == 0u) { // WRAP (performed by masking)
             if st < 0.0 {
                 return minval + (mask2 + (st % mask2));
@@ -232,9 +236,11 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     } else {
         // perform lighting with the ambient from in.color
         var color = in.color.rgb;
+        let position = in.position.xyz / in.position.w;
         for (var i: i32 = 0; i < 7; i++) {
             if (light_state.lights[i].w != 0.0) {
-                let contrib = max(dot(in.normal, normalize(-light_state.lights[i].xyz)), 0.0);
+                let neg_light_direction = normalize(light_state.lights[i].xyz - position);
+                let contrib = max(dot(in.normal, -neg_light_direction), 0.0);
                 color += light_state.colors[i].rgb * contrib;
             }
         }
@@ -244,33 +250,33 @@ fn shade(in: VertexOutput) -> vec4<f32> {
 
 fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, rc1: vec4<f32>, shade: vec4<f32>, in: VertexOutput) -> vec3<f32> {
     switch(src) {
-        case 0u: {
+        case 0u: { // CC first cycle output, unknown behaviour in first cycle
             return cc.rgb;
         }
 
-        case 1u: {
+        case 1u: { // TEXEL0 color
             return rc.rgb;
         }
 
-        case 2u: {
+        case 2u: { // TEXEL1 color
             return rc1.rgb;
         }
 
-        case 3u: {
+        case 3u: { // PRIM color
             return color_combiner_state.prim_color.rgb;
         }
 
-        case 4u: {
+        case 4u: { // Vertex color
             return shade.rgb;
         }
 
-        case 5u: {
+        case 5u: { // ENV color
             return color_combiner_state.env_color.rgb;
         }
         
         case 6u: {
             switch(letter) {
-                case 0u, 3u: {
+                case 0u, 3u: { // ONE
                     return vec3(1.0, 1.0, 1.0);
                 }
                 // TODO CCMUX_CENTER
@@ -358,43 +364,42 @@ fn select_color(letter: u32, src: u32, cc: vec4<f32>, rc: vec4<f32>, rc1: vec4<f
 }
 
 fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, rc1: f32, shade: f32, in: VertexOutput) -> f32 {
-    // cases 0 and 6 will use `letter`
-
     switch(src) {
-        case 0u: {
+        case 0u: { 
             switch(letter) {
-                case 0u, 1u, 3u: {
+                case 0u, 1u, 3u: { // CC alpha from previous cycle
                     return cc;
                 }
+                // TODO LOD_FRAC
                 default: {
                     return 0.0;
                 }
             }
         }
 
-        case 1u: {
+        case 1u: { // TEXEL0 alpha
             return rc;
         }
         
-        case 2u: {
+        case 2u: { // TEXEL1 alpha
             return rc1;
         }
 
-        case 3u: {
+        case 3u: { // PRIM alpha
             return color_combiner_state.prim_color.a;
         }
 
-        case 4u: {
+        case 4u: { // Vertex alpha
             return shade;
         }
 
-        case 5u: {
+        case 5u: { // ENV alpha
             return color_combiner_state.env_color.a;
         }
 
         case 6u: {
             switch(letter) {
-                case 0u, 1u, 3u: {
+                case 0u, 1u, 3u: { // ONE
                     return 1.0;
                 }
                 // TODO PRIM_LOD_FRAC
@@ -404,7 +409,7 @@ fn select_alpha(letter: u32, src: u32, cc: f32, rc: f32, rc1: f32, shade: f32, i
             }
         }
 
-        default: {
+        default: { // ZERO (case 7u)
             return 0.0;
         }
     }
@@ -424,6 +429,7 @@ fn color_combine(rc: vec4<f32>, rc1: vec4<f32>, in: VertexOutput) -> vec4<f32> {
     let c0a_source = extractBits(color_combiner_state.alpha1_source,  8u, 8u);
     let d0a_source = extractBits(color_combiner_state.alpha1_source,  0u, 8u);
 
+    // If combined color is used in the first cycle, you'll get a light slate blue color. Might be useful for debugging.
     let cc_in = vec4(0.5, 0.5, 1.0, 1.0);
     let a = vec4(select_color(0u, a0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(0u, a0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
     let b = vec4(select_color(1u, b0c_source, cc_in, rc, rc1, shade_color, in), select_alpha(1u, b0a_source, cc_in.a, rc.a, rc1.a, shade_color.a, in));
