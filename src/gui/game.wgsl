@@ -1,14 +1,17 @@
-const VERTEX_FLAG_TEXTURED_SHIFT     : u32 = 0u;
-const VERTEX_FLAG_LINEAR_FILTER_SHIFT: u32 = 1u;
-const VERTEX_FLAG_TEXMODE_S_SHIFT    : u32 = 2u;
-const VERTEX_FLAG_TEXMODE_T_SHIFT    : u32 = 4u;
-const VERTEX_FLAG_TEXMODE_S1_SHIFT   : u32 = 6u;
-const VERTEX_FLAG_TEXMODE_T1_SHIFT   : u32 = 8u;
-const VERTEX_FLAG_LIT_SHIFT          : u32 = 10u;
-const VERTEX_FLAG_TWO_CYCLE_SHIFT    : u32 = 11u;
-const VERTEX_FLAG_DECAL              : u32 = 12u;
+const VERTEX_FLAG_TEXTURED_SHIFT           : u32 = 0u;
+const VERTEX_FLAG_LINEAR_FILTER_SHIFT      : u32 = 1u;
+const VERTEX_FLAG_TEXMODE_S_SHIFT          : u32 = 2u;
+const VERTEX_FLAG_TEXMODE_T_SHIFT          : u32 = 4u;
+const VERTEX_FLAG_TEXMODE_S1_SHIFT         : u32 = 6u;
+const VERTEX_FLAG_TEXMODE_T1_SHIFT         : u32 = 8u;
+const VERTEX_FLAG_LIT_SHIFT                : u32 = 10u;
+const VERTEX_FLAG_TWO_CYCLE_SHIFT          : u32 = 11u;
+const VERTEX_FLAG_DECAL                    : u32 = 12u;
+const VERTEX_FLAG_ALPHA_COMPARE_MODE_SHIFT : u32 = 13;
+const VERTEX_FLAG_TEX_EDGE                 : u32 = 15;
 
-const VERTEX_FLAG_TEXMODE_MASK       : u32 = 0x03u;
+const VERTEX_FLAG_TEXMODE_MASK             : u32 = 0x03u;
+const VERTEX_FLAG_ALPHA_COMPARE_MODE_MASK  : u32 = 0x03u;
 
 struct CameraUniform {
     projection: mat4x4<f32>,
@@ -26,6 +29,7 @@ struct ColorCombinerState {
     alpha2_source: u32,
     prim_color   : vec4<f32>,
     env_color    : vec4<f32>,
+    blend_color  : vec4<f32>,
     lodfrac      : f32,
 };
 
@@ -137,7 +141,20 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
     let rc  = rasterizer_color(in);
     let rc1 = texel1_color(in);
-    let cc  = color_combine(rc, rc1, in);
+    var cc  = color_combine(rc, rc1, in);
+
+    // Threshold alpha -- throw away if alpha is LTE the blend color register
+    if(extractBits(in.flags, VERTEX_FLAG_ALPHA_COMPARE_MODE_SHIFT, 2u) == 1u) {
+        if(cc.a <= color_combiner_state.blend_color.a) { 
+            discard; 
+            //cc = vec4<f32>(color_combiner_state.blend_color.aaa, 1.0);
+        }
+    } else if(extractBits(in.flags, VERTEX_FLAG_TEX_EDGE, 1u) == 1u) {
+        if(cc.a == 0.0) {
+            discard;
+            //cc = vec4<f32>(207.0/255.0, 52.0/255.0, 235.0/255.0, 1.0);
+        }
+    }
 
     out.color = cc;
     return out;

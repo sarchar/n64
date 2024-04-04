@@ -110,16 +110,18 @@ impl Default for Vertex {
 
 pub struct VertexFlags;
 impl VertexFlags {
-    pub const TEXTURED        : u32 = 1u32 << 0;
-    pub const LINEAR_FILTER   : u32 = 1u32 << 1;
-    pub const TEXMODE_S_SHIFT : u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const TEXMODE_T_SHIFT : u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const TEXMODE_S1_SHIFT: u32 = 6; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const TEXMODE_T1_SHIFT: u32 = 8; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
-    pub const LIT             : u32 = 1u32 << 10;
-    pub const TWO_CYCLE       : u32 = 1u32 << 11;
-    pub const DECAL           : u32 = 1u32 << 12;
-    // next VERTEX_FLAG at "<< 8"
+    pub const TEXTURED                 : u32 = 1u32 << 0;
+    pub const LINEAR_FILTER            : u32 = 1u32 << 1;
+    pub const TEXMODE_S_SHIFT          : u32 = 2; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T_SHIFT          : u32 = 4; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_S1_SHIFT         : u32 = 6; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const TEXMODE_T1_SHIFT         : u32 = 8; // 00 = nomirror+wrap, 01 = mirror, 10 = clamp, 11 = n/a
+    pub const LIT                      : u32 = 1u32 << 10;
+    pub const TWO_CYCLE                : u32 = 1u32 << 11;
+    pub const DECAL                    : u32 = 1u32 << 12;
+    pub const ALPHA_COMPARE_MODE_SHIFT : u32 = 13; // 00 = None, 01 = Threshold, 11 = Dither
+    pub const TEX_EDGE                 : u32 = 15;
+    // next VERTEX_FLAG at "<< 16"
 }
 
 // TODO at some point other ucode might support different types of lighting?
@@ -400,11 +402,12 @@ pub struct ColorCombinerState {
     pub alpha2_source: u32, //[u8; 4],
     pub prim_color   : [f32; 4],
     pub env_color    : [f32; 4],
+    pub blend_color  : [f32; 4],
     pub lodfrac      : f32,
     pub _unused      : f32, // only present for alignment, this space can be used in the future
 
     // alignment to 256 bytes
-    pub _alignment   : [u64; 25],
+    pub _alignment   : [u64; 23],
 }
 
 impl ColorCombinerState {
@@ -416,9 +419,10 @@ impl ColorCombinerState {
             alpha2_source: 0, //[0, 0, 0, 0],
             prim_color   : [0.0, 0.0, 0.0, 0.0],
             env_color    : [0.0, 0.0, 0.0, 0.0],
+            blend_color  : [0.0, 0.0, 0.0, 0.0],
             lodfrac      : 0.0,
             _unused      : 0.0,
-            _alignment   : [0; 25],
+            _alignment   : [0; 23],
         }
     }
 }
@@ -776,7 +780,7 @@ impl Hle {
         // finalize current render pass
         self.finalize_render_pass(Some(format!("end of display list")));
 
-        debug!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls, \
+        trace!(target: "HLE", "found {} matrices, {} vertices, {} indices, {} render passes, {} draw calls, \
                                {} total tris, {} texels read ({} bytes), {} cc states, {} light states", 
                self.matrices.len(), self.vertices.len(), self.indices.len(), self.render_passes.len(), self.num_draws, 
                self.num_tris, self.num_texels, self.total_texture_data, self.color_combiner_states.len(),
@@ -1791,6 +1795,7 @@ impl Hle {
                     vtx.flags |= VertexFlags::LINEAR_FILTER;
                 }
             }
+
         }   
 
         if self.other_modes.get_cycle_type() == CycleType::TwoCycle {
@@ -1799,6 +1804,16 @@ impl Hle {
 
         if self.other_modes.get_zmode() == ZMode::Decal {
             vtx.flags |= VertexFlags::DECAL;
+        }
+
+        // alpha compare mode
+        if self.other_modes.get_alpha_compare() == AlphaCompare::Threshold {
+            vtx.flags |= 1 << VertexFlags::ALPHA_COMPARE_MODE_SHIFT; //(self.other_modes.get_alpha_compare() as u32) << VertexFlags::ALPHA_COMPARE_MODE_SHIFT;
+        }
+
+        // tex edge mode
+        if self.other_modes.guess_tex_edge() {
+            vtx.flags |= 1 << VertexFlags::TEX_EDGE;
         }
 
         let index = self.vertices.len();
@@ -2994,32 +3009,29 @@ impl Hle {
     }
 
     fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
-        let shift = (self.command >> 40) & 0xFF;
         let length = ((self.command >> 32) & 0xFF) + 1;
+        let shift = 32 - length - ((self.command >> 40) & 0xFF);
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeH(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
 
-        let shift = 32 - length - shift;
-        let mask = (1 << length) - 1;
-        self.other_modes.hi &= !(mask << shift);
-        self.other_modes.hi |= data;
+        let mask = ((1 << length) - 1) << shift;
+        self.other_modes.hi &= !mask;
+        self.other_modes.hi |= data & mask;
 
         self.check_othermode_state_change();
     }
 
     fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
-        let shift = (self.command >> 40) & 0xFF;
         let length = ((self.command >> 32) & 0xFF) + 1;
+        let shift = 32 - length - ((self.command >> 40) & 0xFF);
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeL(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
 
-        let shift = 32 - length - shift;
-        let mask = (1 << length) - 1;
-
-        self.other_modes.lo &= !(mask << shift);
-        self.other_modes.lo |= data;
+        let mask = ((1 << length) - 1) << shift;
+        self.other_modes.lo &= !mask;
+        self.other_modes.lo |= data & mask;
 
         self.check_othermode_state_change();
 
@@ -3206,6 +3218,12 @@ impl Hle {
         let b = (self.command >>  8) as u8;
         let a = (self.command >>  0) as u8;
         trace!(target: "HLE", "{} gsDPBlendColor({}, {}, {}, {})", self.command_prefix, r, g, b, a);
+
+        // TODO This actually changes the blender, not the color combiner.  But who knows if the
+        // performance matters here?
+        self.current_color_combiner_state.blend_color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0];
+
+        self.color_combiner_state_changed();
     }
 
     fn handle_setprimcolor(&mut self) { // G_SETPRIMCOLOR
@@ -3448,12 +3466,11 @@ enum TextureFilter {
     Bilinear,
 }
 
-#[allow(dead_code)]
-#[derive(Debug,PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum AlphaCompare {
-    None,
-    Threshold,
-    Dither
+    None = 0,
+    Threshold = 1,
+    Dither = 3
 }
 
 #[allow(dead_code)]
@@ -3528,10 +3545,13 @@ impl OtherModes {
     // AA_EN starts the render mode flags and it is set to 0x0008
     // because RENDER_MODE_SHIFT is 3.  So subtract 3 from the actual bit flag to get the shift
     // amount
-    const Z_DEPTH_COMPARE_SHIFT: u32 = 1;
-    const Z_DEPTH_UPDATE_SHIFT : u32 = 2;
+    const Z_CMP_SHIFT          : u32 = 1;
+    const Z_UPD_SHIFT          : u32 = 2;
     const ZMODE_SHIFT          : u32 = 7;
     const ZMODE_MASK           : u32 = 0x03;
+    const CVG_X_ALPHA_SHIFT    : u32 = 9;
+    const ALPHA_CVG_SEL_SHIFT  : u32 = 10;
+    const FORCE_BL_SHIFT       : u32 = 11;
 
     fn get_render_mode(&self) -> u32 {
         (self.lo >> Self::RENDER_MODE_SHIFT) & Self::RENDER_MODE_MASK
@@ -3592,11 +3612,11 @@ impl OtherModes {
     }
 
     fn get_depth_compare_enable(&self) -> bool {
-        ((self.get_render_mode() >> Self::Z_DEPTH_COMPARE_SHIFT) & 0x01) != 0
+        ((self.get_render_mode() >> Self::Z_CMP_SHIFT) & 0x01) != 0
     }
 
     fn get_depth_update_enable(&self) -> bool {
-        ((self.get_render_mode() >> Self::Z_DEPTH_UPDATE_SHIFT) & 0x01) != 0
+        ((self.get_render_mode() >> Self::Z_UPD_SHIFT) & 0x01) != 0
     }
 
     fn get_cycle_type(&self) -> CycleType {
@@ -3617,5 +3637,27 @@ impl OtherModes {
             3 => ZMode::Decal,
             _ => panic!("invalid"),
         }
+    }
+
+    // determine if a TEX_EDGE mode is in use.  TEX_EDGE doesn't actually set any bits...well,
+    // apparently it used to, so that is checked first. otherwise, it's a guessing game?
+    // TODO is there a better way?
+    fn guess_tex_edge(&self) -> bool {
+        // first check old bits
+        if (self.lo & 0x8000) != 0 { return true; }
+
+        // otherwise, mask out and test the following:
+        // !FORCE_BL && ZMODE_OPA && CVG_X_ALPHA && ALPHA_CVG_SEL && Z_CMP
+        const MASK: u32 = (1 << OtherModes::FORCE_BL_SHIFT)
+                          | (OtherModes::ZMODE_MASK << OtherModes::ZMODE_SHIFT)
+                          | (1 << OtherModes::CVG_X_ALPHA_SHIFT)
+                          | (1 << OtherModes::ALPHA_CVG_SEL_SHIFT)
+                          | (1 << OtherModes::Z_CMP_SHIFT);
+        const VAL: u32 = (1 << OtherModes::CVG_X_ALPHA_SHIFT)
+                          | (1 << OtherModes::ALPHA_CVG_SEL_SHIFT)
+                          | (1 << OtherModes::Z_CMP_SHIFT);
+
+        let rm = self.get_render_mode();
+        (rm & MASK) == VAL
     }
 }

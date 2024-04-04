@@ -26,10 +26,10 @@ use n64::hle::{
 
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
 
-trait ShaderData {
+trait ShaderData: Sized {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ColorCombinerState>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[],
         }
@@ -120,7 +120,7 @@ impl ShaderData for Vertex {
 // The implementation here needs to match the layout in hle
 impl ShaderData for ColorCombinerState {
     fn size() -> usize {
-        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 10]>() + std::mem::size_of::<[u64; 25]>()) as usize
+        (std::mem::size_of::<[u8; 16]>() + std::mem::size_of::<[f32; 14]>() + std::mem::size_of::<[u64; 23]>()) as usize
     }
 }
 
@@ -297,7 +297,7 @@ impl App for Game {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -1356,8 +1356,8 @@ impl Game {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter    : wgpu::FilterMode::Linear,
-            min_filter    : wgpu::FilterMode::Linear,
+            mag_filter    : wgpu::FilterMode::Nearest,
+            min_filter    : wgpu::FilterMode::Nearest,
             mipmap_filter : wgpu::FilterMode::Nearest,
             //compare: Some(wgpu::CompareFunction::LessEqual),
             lod_min_clamp: 0.0,
