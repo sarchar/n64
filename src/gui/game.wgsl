@@ -169,30 +169,41 @@ fn texcoord(st_in: f32, minval: f32, maxval: f32, mask: f32, mode: u32) -> f32 {
         var st: f32;
         let mask2 = pow(2.0, mask);
 
-        // optionally clamp input coordinate before mirror/wrap
-        if(extractBits(mode, 2u, 1u) == 1u) {
-            let range = maxval - minval;
-            st = clamp(st_in / range, 0.0, 1.0) * range;
-        } else {
-            st = st_in;
-        }
-
         // -8, -7, .. -2, -1, 0, 1, 2, 3, 4, .. 8, 9, 10, ..
         //  0   1      6   7  0, 1, 2, 3, 4, .. 0, 1, 2, ..   <-- WRAP
         //      7      2   1  0, 1, 2, 3, 4, .. 7, 6, 5, ..   <-- MIRROR
-        if(extractBits(mode, 0u, 1u) == 0u) { // WRAP (performed by masking)
-            if st < 0.0 {
-                return minval + (mask2 + (st % mask2));
+
+        // Clamp and Wrap are mutually exclusive
+        if(extractBits(mode, 1u, 1u) == 1u) { // CLAMP
+            let range = maxval - minval;
+            // guess you are allowed to have mirror on clamp, if only once on the negative side?
+            if(extractBits(mode, 0u, 1u) == 1u) { // MIRROR
+                var count = u32(trunc(st_in / mask2)); // negative st_in should have proper count
+                if (extractBits(count, 0u, 1u) == 1u) { 
+                    let inverted = mask2 - (abs(st_in) % mask2);
+                    st = clamp(inverted / range, 0.0, 1.0) * range;
+                } else {
+                    st = clamp(st_in / range, 0.0, 1.0) * range;
+                }
             } else {
-                return minval + (st % mask2);
+                st = clamp(st_in / range, 0.0, 1.0) * range;
             }
-        } else { // MIRROR
-            let count = u32(trunc(st / mask2));
-            if (extractBits(count, 0u, 1u) == 1u) { 
-                let inverted = mask2 - (abs(st) % mask2);
-                return minval + inverted;
+            return minval + st;
+        } else { // WRAP
+            if(extractBits(mode, 0u, 1u) == 1u) { // MIRROR
+                var count = u32(trunc(st_in / mask2)); // negative st_in should have proper count
+                if (extractBits(count, 0u, 1u) == 1u) { 
+                    let inverted = mask2 - (abs(st_in) % mask2);
+                    return minval + inverted;
+                } else {
+                    return minval + (abs(st_in) % mask2);
+                }
             } else {
-                return minval + (abs(st) % mask2);
+                if st_in < 0.0 {
+                    return minval + (mask2 + (st_in % mask2));
+                } else {
+                    return minval + (st_in % mask2);
+                }
             }
         }
     }
