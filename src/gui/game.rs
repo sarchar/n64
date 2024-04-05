@@ -1085,9 +1085,9 @@ impl App for Game {
                     // The video buffer pointer is either exact or off by 640, or it doesn't exist at all
                     let bind_group = if self.game_color_texture_bind_groups.contains_key(&video_buffer) {
                         self.game_color_texture_bind_groups.get(&video_buffer).unwrap()
-                    } else if self.game_color_texture_bind_groups.contains_key(&(video_buffer - 640)) { // video_buffer is + 640 on NTSC?
+                    } else if self.game_color_texture_bind_groups.contains_key(&(video_buffer.wrapping_sub(640))) { // video_buffer is + 640 on NTSC?
                         self.game_color_texture_bind_groups.get(&(video_buffer - 640)).unwrap()
-                    } else if self.game_color_texture_bind_groups.contains_key(&(video_buffer - 1280)) { // hmmm?
+                    } else if self.game_color_texture_bind_groups.contains_key(&(video_buffer.wrapping_sub(1280))) { // hmmm?
                         self.game_color_texture_bind_groups.get(&(video_buffer - 1280)).unwrap()
                     } else {
                         // restore video_buffer address for render
@@ -1095,7 +1095,7 @@ impl App for Game {
 
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
-                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { warn!(target: "RENDER", "unknown render size {}", width); return; } as usize;
+                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { /*warn!(target: "RENDER", "unknown render size {}", width);*/ return; } as usize;
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
                         //println!("width={} height={} format={}", width, height, format);
 
@@ -1625,7 +1625,9 @@ impl Game {
                             let scale = self.args.window_scale as f32;
                             match dl.viewport {
                                 Some(vp) => {
-                                    render_pass.set_viewport(scale*vp.x, scale*vp.y, scale*vp.w, scale*vp.h, 0.0, 1.0);
+                                    render_pass.set_viewport(0.0f32.max(scale*vp.x), 0.0f32.max(scale*vp.y), 
+                                                             (320.0*scale).min(scale*vp.w), (240.0*scale).min(scale*vp.h), 
+                                                             0.0, 1.0);
                                 },
                                 None => {
                                     render_pass.set_viewport(0.0, 0.0, 320.0*scale, 240.0*scale, 0.0, 1.0);

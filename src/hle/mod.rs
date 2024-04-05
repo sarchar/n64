@@ -620,6 +620,8 @@ impl Hle {
             0xC901CE73 => HleRspSoftwareVersion::F3DEX2, // More demos?
             0x21F91834 => HleRspSoftwareVersion::F3DEX2, // Paper Mario, (NuSys?), 
             0xBC45382E => HleRspSoftwareVersion::F3DEX2, // Kirby 64
+            0x65201989 => HleRspSoftwareVersion::F3DEX2, // Gauntlet Legends
+
 
             _ => HleRspSoftwareVersion::Unknown,
         };
@@ -960,7 +962,12 @@ impl Hle {
     fn handle_noop(&mut self) { // G_NOOP
         let addr = (self.command & 0xFFFF_FFFF) as u32;
         if addr != 0 {
-            let s = self.load_string(addr, 64);
+            let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
+                let segment = ((addr >> 24) & 0x0F) as usize;
+                self.segments[segment] + (addr & 0x007F_FFFF)
+            } & 0x007F_FFFF);
+
+            let s = self.load_string(translated_addr, 64);
             trace!(target: "HLE", "{} gsDPNoOpString([0x{:08X}] \"{}\")", self.command_prefix, addr, s);
         } else {
             trace!(target: "HLE", "{} gsDPNoOp()", self.command_prefix);
@@ -971,10 +978,10 @@ impl Hle {
         let params = (self.command >> 32) as u8;
         let addr   = self.command as u32;
 
-        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+        let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
-        };
+            self.segments[segment] + (addr & 0x007F_FFFF)
+        } & 0x007F_FFFF);
 
         let push = (params & 0x01) == 0;
         let mul  = (params & 0x02) == 0;
@@ -1062,7 +1069,7 @@ impl Hle {
             },
 
             10 => { // G_MW_LIGHTCOL
-                todo!();
+                info!(target: "HLE", "G_MW_LIGHTCOL not implemented yet");
             },
 
             14 => { // G_MW_PERSPNORM
@@ -1101,9 +1108,9 @@ impl Hle {
             6 => todo!("G_MV_PMTX"),
             8 => { // G_VIEWPORT
                 let segment = (addr >> 24) as u8;
-                let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
-                    ((addr & 0x007F_FFFF) + self.segments[segment as usize]) & 0x007F_FFFF
-                };
+                let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else { 
+                    (addr & 0x007F_FFFF) + self.segments[segment as usize]
+                } & 0x007F_FFFF);
 
                 let vp = self.load_from_rdram(translated_addr, size as u32);
 
@@ -1161,10 +1168,10 @@ impl Hle {
                     return;
                 }
 
-                let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else { 
+                let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else { 
                     let segment = (addr >> 24) as u8;
-                    ((addr & 0x007F_FFFF) + self.segments[segment as usize]) & 0x007F_FFFF
-                };
+                    (addr & 0x007F_FFFF) + self.segments[segment as usize]
+                } & 0x007F_FFFF);
 
                 let light_data = self.load_from_rdram(translated_addr, size as u32);
 
@@ -1255,8 +1262,8 @@ impl Hle {
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            ((addr & 0x007F_FFFF) + self.segments[segment]) & 0x007F_FFFF
-        };
+            (addr & 0x007F_FFFF) + self.segments[segment]
+        } & 0x007F_FFFF;
 
         if is_link {
             trace!(target: "HLE", "{} gsSPDisplayList(0x{:08X} [0x{:08X}])", self.command_prefix, addr, translated_addr);
@@ -1341,10 +1348,10 @@ impl Hle {
         let vbidx = (((self.command >> 33) & 0x7F) as u8) - numv;
         let addr  = self.command as u32;
 
-        let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
+        let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
-        };
+            self.segments[segment] + (addr & 0x007F_FFFF)
+        } & 0x007F_FFFF);
 
         let vtx_size = mem::size_of::<F3DZEX2_Vertex>();
         let data_size = numv as usize * vtx_size;
@@ -3340,14 +3347,10 @@ impl Hle {
         let width = (self.command >> 32) & 0x0FFF;
         let addr  = self.command as u32;
 
-        let translated_addr = if (addr & 0xE000_0000) != 0 { addr & 0x7FFF_FFFF } else {
+        let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
             let segment = ((addr >> 24) & 0x0F) as usize;
-            (self.segments[segment] + (addr & 0x007F_FFFF)) & 0x007F_FFFF
-        };
-
-        if (translated_addr & 0x7F80_0000) != 0 { 
-            panic!("uhm addr=${:08X} translated_addr=${:08X} segments={:X?}", addr, translated_addr, self.segments);
-        }
+            self.segments[segment] + (addr & 0x007F_FFFF)
+        } & 0x007F_FFFF);
 
         let fmtstr = match fmt {
             0 => "G_IM_FMT_RGBA", 1 => "G_IM_FMT_YUV", 2 => "G_IM_FMT_CI", 3 => "G_IM_FMT_IA",
