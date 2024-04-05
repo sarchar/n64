@@ -9,17 +9,30 @@ use cgmath::{Matrix4, Matrix3, Vector4, Vector3};
 
 use crate::*;
 
-// Z values in OpenGL ranges from -1..1 but DirectX (what WGPU uses) 
-// uses a Z range of 0..1. This matrix converts from OpenGL to DirectX.
+// Z values in on N64 range from 0..0xFFFC but DirectX/Vulkan (what WGPU uses) 
+// uses a Z range of 0..1. This matrix converts from N64 to DirectX.
 // Note that the matrix is actually transposed from how it looks written out
 // (col 2 row 3 is 0.5)
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
     Vector4::new(1.0, 0.0, 0.0, 0.0),
     Vector4::new(0.0, 1.0, 0.0, 0.0),
-    Vector4::new(0.0, 0.0, 0.5, 0.5),
+    //Vector4::new(0.0, 0.0, 0.5, 0.5),
+    //Vector4::new(0.0, 0.0, 1.0/65532.0, 0.0),
+    //Vector4::new(0.0, 0.0, 1.0/256.0, 0.0),
+    //Vector4::new(0.0, 0.0, 1.0/1.25, 0.0),
+    Vector4::new(0.0, 0.0, 1.0, 1.0),
     Vector4::new(0.0, 0.0, 0.0, 1.0),
 );
+
+//           [A0 B0 C0 D0
+// [x y z 1]  A1 B1 C1 D1
+//            A2 B2 C2 D2
+//            A3 B3 C3 D3]
+//
+//x' = x*A0 + y*A1 + z*A2 +   A3
+//y' = x*B0 + y*B1 + z*B2 +   B3
+//z' =               z*C2 +   C3
 
 
 #[derive(Debug, Clone)]
@@ -32,6 +45,7 @@ pub enum HleRenderCommand {
     MatrixData(Vec<MatrixState>),
     ColorCombinerStateData(Vec<ColorCombinerState>),
     LightStateData(Vec<LightState>),
+    FogStateData(Vec<FogState>),
     UpdateTexture(Arc<RwLock<MappedTexture>>),
     RenderPass(RenderPassState),
     Sync,
@@ -151,6 +165,27 @@ impl Default for LightState {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FogState {
+    pub color : [f32; 4],
+    pub multiplier  : f32,  // multiplier == 0.0 && offset == 0.0 => fog is disabled
+    pub offset      : f32,
+    // need to align to 256 bytes, uhg
+    pub _alignment  : [u64; 29],
+}
+
+impl Default for FogState {
+    fn default() -> Self {
+        FogState {
+            color     : [0.0; 4],
+            multiplier: 0.0,
+            offset    : 0.0,
+            _alignment: [0; 29],
+        }
+    }
+}
+
 #[derive(Default)]
 struct DLStackEntry {
     dl: Vec<u32>,
@@ -204,6 +239,7 @@ pub struct TriangleList {
     pub matrix_index: u32,
     pub color_combiner_state_index: u32,
     pub light_state_index: Option<u32>,
+    pub fog_state_index: u32,
 
     // start index and number of indices
     pub start_index: u32,
@@ -279,6 +315,10 @@ pub struct Hle {
     current_light_state: LightState,
     light_states: Vec<LightState>,
 
+    // fog
+    current_fog_state: FogState,
+    fog_states: Vec<FogState>,
+
     command_table: [DLCommand; 256],
     command_address: u32,
     command: u64,
@@ -289,6 +329,7 @@ pub struct Hle {
     // copied emulation flags 
     disable_textures: bool,
     disable_lighting: bool,
+    //z_scale         : f32,
 }
 
 #[repr(C)]
@@ -499,6 +540,9 @@ impl Hle {
             current_light_state: LightState::default(),
             light_states: vec![],
 
+            current_fog_state: FogState::default(),
+            fog_states: vec![FogState::default()],
+
             command_table: [Hle::handle_unknown; 256],
             command_address: 0,
             command: 0,
@@ -508,6 +552,7 @@ impl Hle {
 
             disable_textures: false,
             disable_lighting: false,
+            //z_scale         : 1.0,
         };
 
         ret.new_texture_cache();
@@ -576,6 +621,9 @@ impl Hle {
         self.current_light_state = LightState::default();
         self.light_states.clear();
 
+        self.current_fog_state = FogState::default();
+        self.fog_states.truncate(1);
+
         self.current_viewport = None;
 
         // keep color and depth images from pass to pass
@@ -596,6 +644,7 @@ impl Hle {
         let ef = self.comms.emulation_flags.read().unwrap();
         self.disable_textures   = ef.disable_textures;
         self.disable_lighting   = ef.disable_lighting;
+        //self.z_scale            = ef.z_scale;
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -835,6 +884,10 @@ impl Hle {
         let light_states = std::mem::replace(&mut self.light_states, vec![]);
         self.send_hle_render_command(HleRenderCommand::LightStateData(light_states));
 
+        // upload fog states
+        let fog_states = std::mem::replace(&mut self.fog_states, vec![FogState::default()]);
+        self.send_hle_render_command(HleRenderCommand::FogStateData(fog_states));
+
         // run each render pass
         for i in 0..self.render_passes.len() {
             let rp = std::mem::replace(&mut self.render_passes[i], RenderPassState::default());
@@ -1020,7 +1073,13 @@ impl Hle {
             if mul {
                 self.current_projection_matrix = cgmat * self.current_projection_matrix;
             } else {
-                self.current_projection_matrix = cgmat * OPENGL_TO_WGPU_MATRIX;
+                //let scale_matrix = Matrix4::from_cols(
+                //    Vector4::new(1.0, 0.0, 0.0, 0.0),
+                //    Vector4::new(0.0, 1.0, 0.0, 0.0),
+                //    Vector4::new(0.0, 0.0, 1.0/self.z_scale, 0.0),
+                //    Vector4::new(0.0, 0.0, 0.0, 1.0)
+                //);
+                self.current_projection_matrix = cgmat;// * scale_matrix;
             }
         } else {
             let count = self.matrix_stack.len();
@@ -1066,6 +1125,14 @@ impl Hle {
             6 => { // G_MW_SEGMENT
                 trace!(target: "HLE", "{} gsSPSegment({}, 0x{:08X})", self.command_prefix, offset >> 2, data);
                 self.segments[((offset >> 2) & 0x0F) as usize] = data;
+            },
+
+            8 => { // G_MW_FOG
+                let multiplier = (((self.command & 0xFFFF_0000) >> 16) as i16) as f32 / 256.0;
+                let offset     = (((self.command & 0x0000_FFFF)      ) as i16) as f32 / 256.0;
+                trace!(target: "HLE", "{} gpSPFog(multiplier=${:04X} [{}], offset=${:04X} [{}])", self.command_prefix, (self.command & 0xFFFF_0000) >> 16, multiplier, self.command as u16, offset);
+                self.current_fog_state.multiplier = multiplier;
+                self.current_fog_state.offset = offset;
             },
 
             10 => { // G_MW_LIGHTCOL
@@ -1366,7 +1433,7 @@ impl Hle {
 
             // view position is calculated the same for both
             // MV matrix is transposed, since cgmath doesn't support left multiply??
-            let pos = Vector4::new(((data[0] >> 16) as i16) as f32, ( data[0] as i16) as f32, ((data[1] >> 16) as i16) as f32, 1.0);
+            let pos = Vector4::new(((data[0] >> 16) as i16) as f32, (data[0] as i16) as f32, ((data[1] >> 16) as i16) as f32, 1.0);
             let view_pos: Vector4<f32> = self.current_modelview_matrix * pos;
 
             // convert F3DZEX2_Vertex to Vertex
@@ -1583,6 +1650,12 @@ impl Hle {
                     }
                 }
             }
+
+            // if fog state changed, need a new draw call
+            let fs_index = self.current_triangle_list().fog_state_index;
+            if *self.fog_states.get(fs_index as usize).unwrap() != self.current_fog_state {
+                self.next_triangle_list();
+            }
         }
 
         // upon the first addition of a triangle, we need to note what the current uniform buffers are
@@ -1676,6 +1749,28 @@ impl Hle {
                 }
             };
 
+            // transfer current fog state to uniform buffers
+            let fs_index = {
+                let rsp_fog = (self.geometry_mode & 0x0001_0000) != 0;
+                let rdp_fog = self.other_modes.get_fog_enabled();
+                // G_BL_A_SHADE 
+                let vertex_fog = self.other_modes.get_cycle1_a_shade();
+                let _prim_fog = self.other_modes.get_cycle1_a_fog();
+
+                if rsp_fog && rdp_fog && vertex_fog {
+                    let need_new = self.current_fog_state != *self.fog_states.last().unwrap();
+                    if need_new {
+                        let index = self.fog_states.len();
+                        self.fog_states.push(self.current_fog_state);
+                        index as u32
+                    } else {
+                        (self.fog_states.len() - 1) as u32
+                    }
+                } else {
+                    0
+                }
+            };
+
             // set all the state values
             // now with num_indices > 0, they can't change. a new draw call is needed
             let tl = self.current_triangle_list();
@@ -1687,6 +1782,7 @@ impl Hle {
             tl.mapped_texture_index1 = mapped_texture_index1;
             tl.color_combiner_state_index = cc_index;
             tl.light_state_index = ls_index;
+            tl.fog_state_index = fs_index;
         }
 
         // clear overrides even if they weren't used
@@ -3212,6 +3308,8 @@ impl Hle {
         let b = (self.command >>  8) as u8;
         let a = (self.command >>  0) as u8;
         trace!(target: "HLE", "{} gsDPSetFogColor({}, {}, {}, {})", self.command_prefix, r, g, b, a);
+
+        self.current_fog_state.color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0];
     }
 
     fn handle_setfillcolor(&mut self) { // G_SETFILLCOLOR
@@ -3666,5 +3764,22 @@ impl OtherModes {
 
         let rm = self.get_render_mode();
         (rm & MASK) == VAL
+    }
+
+    fn get_fog_enabled(&self) -> bool {
+        // Fogging is enabled by the blender in Cycle 1 (for both 1CYC and 2CYC modes)
+        // 0xC000 selects "P" in Cycle 1
+        // value 0b11 is G_BL_CLR_FOG
+        ((self.lo >> 16) & 0xC000) == 0xC000
+    }
+
+    // returns true if "A" in the blender of cycle 1 mode is G_BL_A_FOG (0b01)
+    fn get_cycle1_a_fog(&self) -> bool {
+        ((self.lo >> 16) & 0x0C00) == 0x0400
+    }
+
+    // returns true if "A" in the blender of cycle 1 mode is G_BL_A_SHADE (0b10)
+    fn get_cycle1_a_shade(&self) -> bool {
+        ((self.lo >> 16) & 0x0C00) == 0x0800
     }
 }

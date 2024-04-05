@@ -21,7 +21,7 @@ use n64::hle::{
     HleRenderCommand, 
     HleCommandBuffer, 
     MatrixState, Vertex, VertexFlags,
-    ColorCombinerState, LightState,
+    ColorCombinerState, LightState, FogState
 };
 
 use n64::mips::{InterruptUpdate, InterruptUpdateMode, IMask_DP};
@@ -130,6 +130,15 @@ impl ShaderData for LightState {
     }
 }
 
+impl ShaderData for FogState {
+    fn size() -> usize {
+        std::mem::size_of::<[f32; 4]>()  // color
+            + std::mem::size_of::<f32>() // multiplier
+            + std::mem::size_of::<f32>() // offset
+            + std::mem::size_of::<[u64; 29]>()  // _alignment
+    }
+}
+
 // Y texture coordinate is inverted to flip the resulting image
 // default sampler is Nearest, so we just need the textured flag 
 const DISPLAY_GAME_TEXTURE_VERTICES: &[Vertex] = &[
@@ -211,6 +220,8 @@ pub struct Game {
     color_combiner_state_buffer: wgpu::Buffer,
     // light state uniform buffer used by the tris this frame
     light_state_buffer: wgpu::Buffer,
+    // fog state uniform buffer used by the tris this frame
+    fog_state_buffer: wgpu::Buffer,
 
     // bind group describing the above buffers
     game_uniforms_bind_group: wgpu::BindGroup,
@@ -224,6 +235,8 @@ pub struct Game {
     ui_frame_count: u64,
     ui_last_fps_time: Instant,
     ui_fps: f64,
+
+    //z_scale: f32,
 
     game_frame_count: u64,
     game_last_fps_time: Instant,
@@ -513,6 +526,16 @@ impl App for Game {
             }
         );
 
+        // create fog state uniform buffer
+        let fog_state_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Fog State Buffer"),
+                size : (FogState::size() * 128) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
+
         // create the game uniforms bind group layout
         let game_uniforms_bind_group_layout = device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
@@ -540,6 +563,16 @@ impl App for Game {
                     },
                     wgpu::BindGroupLayoutEntry { // light state
                         binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry { // fog state
+                        binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -584,6 +617,16 @@ impl App for Game {
                             buffer: &light_state_buffer,
                             offset: 0,
                             size  : core::num::NonZeroU64::new(LightState::size() as u64),
+                        }
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(
+                        wgpu::BufferBinding {
+                            buffer: &fog_state_buffer,
+                            offset: 0,
+                            size  : core::num::NonZeroU64::new(FogState::size() as u64),
                         }
                     ),
                 },
@@ -805,6 +848,7 @@ impl App for Game {
             mvp_matrix_buffer: mvp_matrix_buffer,
             color_combiner_state_buffer: color_combiner_state_buffer,
             light_state_buffer: light_state_buffer,
+            fog_state_buffer: fog_state_buffer,
             game_uniforms_bind_group: game_uniforms_bind_group,
 
             //speed: 0.2,
@@ -816,6 +860,8 @@ impl App for Game {
             ui_frame_count: 0,
             ui_last_fps_time: Instant::now(),
             ui_fps: 0.0,
+            //z_scale: 1.0,
+
             game_frame_count: 0,
             game_last_fps_time: Instant::now(),
             game_fps: 0.0,
@@ -962,6 +1008,10 @@ impl App for Game {
             if appwnd.input().key_pressed(KeyCode::KeyL) {
                 let mut ef = self.comms.emulation_flags.write().unwrap();
                 ef.disable_lighting = !ef.disable_lighting;
+            }
+
+            // CTLR+F to disable fog
+            if appwnd.input().key_pressed(KeyCode::KeyF) {
             }
 
             // CTRL+P to print one frame of displaylists
@@ -1209,6 +1259,9 @@ impl App for Game {
     }
 
     fn render_ui(&mut self, _appwnd: &AppWindow, ui: &imgui::Ui) {
+        //let mut ef = self.comms.emulation_flags.write().unwrap();
+        //ef.disable_lighting = !ef.disable_lighting;
+
         let window = ui.window("Stats");
         window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
               .position([0.0, 0.0], imgui::Condition::FirstUseEver)
@@ -1216,6 +1269,20 @@ impl App for Game {
                   ui.text(format!("UI   FPS: {}", self.ui_fps));
                   ui.text(format!("GAME FPS: {}", self.game_fps));
                   ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
+
+                  ////let mut z_scale = self.z_scale;
+                  //if ui.slider(format!("z_scale"), 1.0, 16384.0, &mut self.z_scale) {
+                  //    //if z_scale < -0.001 || z_scale > 0.001 {
+                  //    //    self.z_scale = z_scale;
+                  //        let mut ef = self.comms.emulation_flags.write().unwrap();
+                  //        ef.z_scale = self.z_scale;
+                  //    //}
+                  //}
+                  //if ui.button("Reset z_scale") {
+                  //    self.z_scale = 1024.0;
+                  //    let mut ef = self.comms.emulation_flags.write().unwrap();
+                  //    ef.z_scale = self.z_scale;
+                  //}
               });
     }
 }
@@ -1509,6 +1576,9 @@ impl Game {
                     appwnd.queue().write_buffer(&self.light_state_buffer, 0, bytemuck::cast_slice(&v));
                 },
 
+                HleRenderCommand::FogStateData(v) => {
+                    appwnd.queue().write_buffer(&self.fog_state_buffer, 0, bytemuck::cast_slice(&v));
+                },
 
                 HleRenderCommand::UpdateTexture(mapped_texture_lock) => {
                     let mapped_texture = mapped_texture_lock.read().unwrap();
@@ -1667,7 +1737,8 @@ impl Game {
                             // using the dynamic offset into the mvp uniform buffer, we can select which matrix and CC state is used for the triangle list
                             render_pass.set_bind_group(2, &self.game_uniforms_bind_group, &[MatrixState::offset_of(dl.matrix_index as usize) as wgpu::DynamicOffset,
                                                                                             ColorCombinerState::offset_of(dl.color_combiner_state_index as usize) as wgpu::DynamicOffset,
-                                                                                            LightState::offset_of(dl.light_state_index.or(Some(0)).unwrap() as usize) as wgpu::DynamicOffset]);
+                                                                                            LightState::offset_of(dl.light_state_index.or(Some(0)).unwrap() as usize) as wgpu::DynamicOffset,
+                                                                                            FogState::offset_of(dl.fog_state_index as usize) as wgpu::DynamicOffset]);
 
                             let last_index = dl.start_index + dl.num_indices;
                             render_pass.draw_indexed(dl.start_index..last_index as _, 0, 0..1);

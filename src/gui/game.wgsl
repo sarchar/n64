@@ -43,6 +43,15 @@ struct LightState {
 @group(2) @binding(2)
 var<uniform> light_state: LightState;
 
+struct FogState {
+    color     : vec4<f32>,
+    multiplier: f32,
+    offset    : f32,
+};
+
+@group(2) @binding(3)
+var<uniform> fog_state: FogState;
+
 struct VertexInput {
     @location(0) view_position: vec4<f32>,
     @location(1) color        : vec4<f32>,
@@ -71,6 +80,7 @@ struct VertexOutput {
     @location(7) maskshift    : u32,
     @location(8) maskshift1   : u32,
     @location(9) flags        : u32,
+    @location(10) clip_z      : f32,
 };
 
 struct FragmentOutput {
@@ -81,22 +91,33 @@ struct FragmentOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // need a worldspace position for per-pixel lighting
+    // need a view space position for per-pixel lighting
     out.view_position = in.view_position;
     
-    // transform into viewspace for decals and move slightly closer to the screen
+    // transform with projection matrix
     var clip_position: vec4<f32> = out.view_position * camera.projection;
     
-    // for decals, move z closer to camera (left-handed, Y up)
+    // apply N64 z viewport (z' = z*scale+trans) after perspective correction
+    // preserve the sign of z, as it indicates the direction from the near clip plane
+    var nz = clip_position.z / abs(clip_position.w);
+    nz = (nz * 127.75) + 127.75; // Z should have been -1..1, => 0..256
+    nz /= 256.0; // renormalize to N64 max Z
+
+    // for decals, move z closer to camera
     if(extractBits(in.flags, VERTEX_FLAG_ZMODE_SHIFT, 2u) == 3u) {
-        clip_position.z -= 0.001 * clip_position.w;
+        clip_position.z -= 0.001 * abs(clip_position.w);
     }
 
     // OoT beating heart has Z value -0.00085
-    // TODO: clamping here, but not sure if that's the right thing to do or if there's a reason why the value is <0.
+    // TODO: clamps everything here, but not sure if that's the right thing to do or if there's a reason why the value is <0.
+    // TODO: after working on fog, I think OoT uses a z viewport of -1..1 (with almost everything Z>0.8). More investigation needed.
+    // Perhaps the viewport scaling above can be inserted into the projection matrix and then this check isn't necessary
     if (clip_position.z / clip_position.w) < 0 {
         clip_position.z = 0.0;
     }
+
+    // pass normalized clip z to fragment shader for fog
+    out.clip_z = nz;
 
     out.clip_position = clip_position;
     out.view_normal   = in.view_normal;
@@ -158,6 +179,18 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         cc.a = 1.0;
     }
 
+    // apply fog
+    let usable_z = in.clip_z;
+    if(usable_z < 1.0 && fog_state.multiplier != 0.0 && fog_state.offset != 0.0) {
+        // compute alpha for fog
+        let fog_alpha = clamp((usable_z * 2.0 - 1.0) * fog_state.multiplier + fog_state.offset, 0.0, 1.0);
+
+        // apply to color
+        let new_color = fog_state.color.rgb * fog_alpha + cc.rgb * (1.0 - fog_alpha);
+        cc = vec4<f32>(new_color.rgb, cc.a);
+    }
+
+    //out.color = vec4<f32>(usable_z, usable_z, usable_z, 1.0); // show Z clip space value
     out.color = cc;
     return out;
 }
