@@ -27,16 +27,18 @@ $ cargo run --release -- n64-systemtest.z64 -D
 # Screenshots
 
 * Current test rate (failed 4 out of 3555 tests):
-
 ![image](https://github.com/sarchar/n64/assets/4928176/568e5671-af3b-4144-b7b9-6386299ac27b)
 
+* Super Mario 64:
+![image](https://github.com/sarchar/n64/assets/4928176/a0be3e4c-0321-4854-ba26-d001741f44e5)
 
 * Ocarina of Time:
 
 Latest:
-![image](https://github.com/sarchar/n64/assets/4928176/bd3a537f-187b-4b5a-a2c7-e6b43ede9cc7)
+![image](https://github.com/sarchar/n64/assets/4928176/e40b5fde-ed41-4fd2-8f7e-e2e7e12eeb8b)
 
 Old:
+![image](https://github.com/sarchar/n64/assets/4928176/bd3a537f-187b-4b5a-a2c7-e6b43ede9cc7)
 ![image](https://github.com/sarchar/n64/assets/4928176/bf109d74-6892-4980-b4ec-1b30cd87b059)
 
 
