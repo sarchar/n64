@@ -7,7 +7,6 @@ use winit::{
     dpi::{LogicalSize, PhysicalSize},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    keyboard::KeyCode,
     window::{Window, WindowBuilder},
 };
 
@@ -379,12 +378,7 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
     let mut renderer = Renderer::new(&mut imgui, appwnd.device(), appwnd.queue(), renderer_config);
     let mut last_frame = Instant::now();
-    let mut demo_open = false;
     AppWindow::run(appwnd, move |appwnd: &mut AppWindow, event| {
-        if appwnd.input().key_pressed(KeyCode::F12) {
-            demo_open = true;
-        }
-
         match event {
             Event::WindowEvent {
                 event:
@@ -422,9 +416,6 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
                 // render ui
                 app.render_ui(appwnd, &ui);
-                if demo_open {
-                    ui.show_demo_window(&mut demo_open);
-                }
 
                 // render imgui to wgpu
                 {

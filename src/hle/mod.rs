@@ -9,32 +9,6 @@ use cgmath::{Matrix4, Matrix3, Vector4, Vector3};
 
 use crate::*;
 
-// Z values in on N64 range from 0..0xFFFC but DirectX/Vulkan (what WGPU uses) 
-// uses a Z range of 0..1. This matrix converts from N64 to DirectX.
-// Note that the matrix is actually transposed from how it looks written out
-// (col 2 row 3 is 0.5)
-#[rustfmt::skip]
-pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
-    Vector4::new(1.0, 0.0, 0.0, 0.0),
-    Vector4::new(0.0, 1.0, 0.0, 0.0),
-    //Vector4::new(0.0, 0.0, 0.5, 0.5),
-    //Vector4::new(0.0, 0.0, 1.0/65532.0, 0.0),
-    //Vector4::new(0.0, 0.0, 1.0/256.0, 0.0),
-    //Vector4::new(0.0, 0.0, 1.0/1.25, 0.0),
-    Vector4::new(0.0, 0.0, 1.0, 1.0),
-    Vector4::new(0.0, 0.0, 0.0, 1.0),
-);
-
-//           [A0 B0 C0 D0
-// [x y z 1]  A1 B1 C1 D1
-//            A2 B2 C2 D2
-//            A3 B3 C3 D3]
-//
-//x' = x*A0 + y*A1 + z*A2 +   A3
-//y' = x*B0 + y*B1 + z*B2 +   B3
-//z' =               z*C2 +   C3
-
-
 #[derive(Debug, Clone)]
 pub enum HleRenderCommand {
     Noop,
@@ -60,8 +34,7 @@ pub enum RenderPassType {
     FillRectangles,
 }
 
-// There are actually a lot of variations within the RSP ucodes that share
-// a common GBI. 
+// There are actually a lot of variations within the RSP ucodes that share a common GBI. 
 #[derive(PartialEq, Debug)]
 enum HleRspSoftwareVersion {
     Uninitialized,
@@ -88,8 +61,7 @@ pub struct F3DZEX2_Vertex {
 pub struct Vertex {
     pub view_position: [f32; 4],
     pub color        : [f32; 4],
-    pub normal       : [f32; 3],
-    //pub view_normal  : [f32; 3],
+    pub view_normal  : [f32; 3],
     pub tex_coords   : [f32; 2],
     pub tex_coords1  : [f32; 2],
     pub tex_params   : [f32; 4],
@@ -104,8 +76,7 @@ impl Vertex {
         Self {
             view_position: [0.0, 0.0, 0.0, 1.0],
             color        : [0.0, 0.0, 0.0, 1.0],
-            normal       : [1.0, 0.0, 0.0],
-            //view_normal: [1.0, 0.0, 0.0],
+            view_normal  : [1.0, 0.0, 0.0],
             tex_coords   : [0.0, 0.0],
             tex_coords1  : [0.0, 0.0],
             tex_params   : [0.0, 1.0, 0.0, 1.0],
@@ -326,10 +297,8 @@ pub struct Hle {
     command_words: u32,
     command_prefix: String,
 
-    // copied emulation flags 
-    disable_textures: bool,
-    disable_lighting: bool,
-    //z_scale         : f32,
+    // copied tweakables
+    tweakables: Tweakables,
 }
 
 #[repr(C)]
@@ -550,9 +519,7 @@ impl Hle {
             command_words: 0,
             command_prefix: String::new(),
 
-            disable_textures: false,
-            disable_lighting: false,
-            //z_scale         : 1.0,
+            tweakables: Tweakables::default(),
         };
 
         ret.new_texture_cache();
@@ -640,11 +607,8 @@ impl Hle {
         // always have a render pass and draw list started
         self.next_render_pass(None);
 
-        // copy over some emulation flags so we don't constantly need to acquire a read lock
-        let ef = self.comms.emulation_flags.read().unwrap();
-        self.disable_textures   = ef.disable_textures;
-        self.disable_lighting   = ef.disable_lighting;
-        //self.z_scale            = ef.z_scale;
+        // copy over tweakables once per frame
+        self.tweakables = *self.comms.tweakables.read().unwrap();
     }
 
     fn detect_software_version(&mut self, ucode_address: u32) -> bool {
@@ -675,28 +639,30 @@ impl Hle {
             _ => HleRspSoftwareVersion::Unknown,
         };
 
+        info!(target: "HLE", "{:?} detected", self.software_version);
+
         match self.software_version {
             HleRspSoftwareVersion::S3DEX2 => {
                 // basically none of these are tested
-                self.command_table[0x00] = Hle::handle_spnoop;
-                //self.command_table[0x01] = Hle::handle_mtx;
-                //self.command_table[0x03] = Hle::handle_movemem;
-                //self.command_table[0x04] = Hle::handle_vtx;
-                //self.command_table[0x06] = Hle::handle_displaylist;
+                //self.command_table[0x00] = Hle::handle_spnoop;
+                self.command_table[0x01] = Hle::handle_mtx;
+                self.command_table[0x03] = Hle::handle_movemem00;
+                self.command_table[0x04] = Hle::handle_vtx;
+                self.command_table[0x06] = Hle::handle_displaylist;
                 //self.command_table[0xC0] = Hle::handle_noop;
 
                 let base = (-0x41i8 as u8) as usize;
-                //self.command_table[base-0] = Hle::handle_tri1;
-                //self.command_table[base-2] = Hle::handle_popmtx;
+                self.command_table[base-0] = Hle::handle_tri1;
+                self.command_table[base-2] = Hle::handle_popmtx;
                 self.command_table[base-3] = Hle::handle_moveword00;
-                //self.command_table[base-4] = Hle::handle_texture;
-                //self.command_table[base-5] = Hle::handle_setothermode_h;
-                //self.command_table[base-6] = Hle::handle_setothermode_l;
-                //self.command_table[base-7] = Hle::handle_enddl;
-                //self.command_table[base-8] = Hle::handle_geometrymode;
-                //self.command_table[base-9] = Hle::handle_geometrymode;
-                //self.command_table[base-11] = Hle::handle_noop; // TODO rdphalf_1
-                //self.command_table[base-12] = Hle::handle_noop; // TODO rdphalf_2
+                self.command_table[base-4] = Hle::handle_texture;
+                self.command_table[base-5] = Hle::handle_setothermode_h;
+                self.command_table[base-6] = Hle::handle_setothermode_l;
+                self.command_table[base-7] = Hle::handle_enddl;
+                self.command_table[base-8] = Hle::handle_cleargeometrymode;
+                self.command_table[base-9] = Hle::handle_setgeometrymode;
+                self.command_table[base-11] = Hle::handle_rdphalf_1;
+                self.command_table[base-12] = Hle::handle_rdphalf_2;
                 //self.command_table[base-14] = Hle::handle_tri2;
 
                 // RDP commands
@@ -705,27 +671,27 @@ impl Hle {
                 self.command_table[0xFD] = Hle::handle_settimg;
                 self.command_table[0xFC] = Hle::handle_setcombine;
                 self.command_table[0xFB] = Hle::handle_setenvcolor;
-                self.command_table[0xFA] = Hle::handle_setprimcolor;
-                self.command_table[0xF9] = Hle::handle_setblendcolor;
-                self.command_table[0xF8] = Hle::handle_setfogcolor;
+                //self.command_table[0xFA] = Hle::handle_setprimcolor;
+                //self.command_table[0xF9] = Hle::handle_setblendcolor;
+                //self.command_table[0xF8] = Hle::handle_setfogcolor;
                 self.command_table[0xF7] = Hle::handle_setfillcolor;
                 self.command_table[0xF6] = Hle::handle_fillrect;
                 self.command_table[0xF5] = Hle::handle_settile;
                 self.command_table[0xF4] = Hle::handle_loadtile;
                 self.command_table[0xF3] = Hle::handle_loadblock;
                 self.command_table[0xF2] = Hle::handle_settilesize;
-                self.command_table[0xF0] = Hle::handle_loadlut;
-                self.command_table[0xEF] = Hle::handle_rdpsetothermode;
-                self.command_table[0xEE] = Hle::handle_setprimdepth;
+                //self.command_table[0xF0] = Hle::handle_loadlut;
+                //self.command_table[0xEF] = Hle::handle_rdpsetothermode;
+                //self.command_table[0xEE] = Hle::handle_setprimdepth;
                 self.command_table[0xED] = Hle::handle_setscissor;
-                self.command_table[0xEC] = Hle::handle_setconvert;
-                self.command_table[0xEB] = Hle::handle_setkeyr;
-                self.command_table[0xEA] = Hle::handle_setkeygb;
+                //self.command_table[0xEC] = Hle::handle_setconvert;
+                //self.command_table[0xEB] = Hle::handle_setkeyr;
+                //self.command_table[0xEA] = Hle::handle_setkeygb;
                 self.command_table[0xE9] = Hle::handle_rdpfullsync;
                 self.command_table[0xE8] = Hle::handle_rdptilesync;
                 self.command_table[0xE7] = Hle::handle_rdppipesync;
                 self.command_table[0xE6] = Hle::handle_rdploadsync;
-                self.command_table[0xE4] = Hle::handle_texrect;
+                //self.command_table[0xE4] = Hle::handle_texrect;
             },
 
             HleRspSoftwareVersion::F3DEX2 => {
@@ -744,7 +710,7 @@ impl Hle {
                 self.command_table[0xD9] = Hle::handle_geometrymode;
                 self.command_table[0xDA] = Hle::handle_mtx;
                 self.command_table[0xDB] = Hle::handle_moveword02;
-                self.command_table[0xDC] = Hle::handle_movemem;
+                self.command_table[0xDC] = Hle::handle_movemem02;
                 self.command_table[0xDD] = Hle::handle_load_ucode;
                 self.command_table[0xDE] = Hle::handle_displaylist;
                 self.command_table[0xDF] = Hle::handle_enddl;
@@ -996,13 +962,13 @@ impl Hle {
         unimplemented!("unimplemented DL command ${:02X}", self.command_op);
     }
 
-    fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1
+    fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1 (S3DEX2, F3DEX2)
         let wordhi = self.command as u32;
         trace!(target: "HLE", "{} gsDPWord(0x{:08X}, wordlo);", self.command_prefix, wordhi);
         self.rdp_half_hi = wordhi;
     }
 
-    fn handle_rdphalf_2(&mut self) { // G_RDPHALF_1
+    fn handle_rdphalf_2(&mut self) { // G_RDPHALF_2 (S3DEX2, F3DEX2)
         let wordlo = self.command as u32;
         trace!(target: "HLE", "{} gsDPWord(wordhi, 0x{:08X});", self.command_prefix, wordlo);
         self.rdp_half_lo = wordlo;
@@ -1027,8 +993,25 @@ impl Hle {
         }
     }
 
-    fn handle_mtx(&mut self) { // G_MTX
-        let params = (self.command >> 32) as u8;
+    fn handle_mtx(&mut self) { // G_MTX (S3DEX2, F3DEX2)
+        let (push, mul, proj) = match self.software_version {
+            HleRspSoftwareVersion::S3DEX2 => {
+                let params = (self.command >> 48) as u8;
+                let push = (params & 0x04) != 0;
+                let mul  = (params & 0x02) == 0;
+                let proj = (params & 0x01) != 0;
+                (push, mul, proj)
+            },
+            HleRspSoftwareVersion::F3DEX2 => {
+                let params = (self.command >> 32) as u8;
+                let push = (params & 0x01) == 0; // G_MTX_PUSH is inverted on F3DEX2
+                let mul  = (params & 0x02) == 0;
+                let proj = (params & 0x04) != 0; // true = projection matrix, false = modelview
+                (push, mul, proj)
+            },
+            _ => todo!(),
+        };
+
         let addr   = self.command as u32;
 
         let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
@@ -1036,9 +1019,6 @@ impl Hle {
             self.segments[segment] + (addr & 0x007F_FFFF)
         } & 0x007F_FFFF);
 
-        let push = (params & 0x01) == 0;
-        let mul  = (params & 0x02) == 0;
-        let proj = (params & 0x04) != 0; // true = projection matrix, false = modelview
 
         let mut s = String::from("0");
         if push { s.push_str("|G_MTX_PUSH"); } else { s.push_str("|G_MTX_NOPUSH"); }
@@ -1073,13 +1053,7 @@ impl Hle {
             if mul {
                 self.current_projection_matrix = cgmat * self.current_projection_matrix;
             } else {
-                //let scale_matrix = Matrix4::from_cols(
-                //    Vector4::new(1.0, 0.0, 0.0, 0.0),
-                //    Vector4::new(0.0, 1.0, 0.0, 0.0),
-                //    Vector4::new(0.0, 0.0, 1.0/self.z_scale, 0.0),
-                //    Vector4::new(0.0, 0.0, 0.0, 1.0)
-                //);
-                self.current_projection_matrix = cgmat;// * scale_matrix;
+                self.current_projection_matrix = cgmat;
             }
         } else {
             let count = self.matrix_stack.len();
@@ -1105,8 +1079,11 @@ impl Hle {
     }
 
     fn handle_popmtx(&mut self) { // G_POPMTX
-        let num = ((self.command & 0xFFFF_FFFF) >> 6) as u32; // num / 64
-
+        let num = match self.software_version {
+            HleRspSoftwareVersion::S3DEX2 => 1, // can only pop 1
+            HleRspSoftwareVersion::F3DEX2 => ((self.command & 0xFFFF_FFFF) >> 6) as u32, // num / 64
+            _ => todo!(),
+        };
         trace!(target: "HLE", "{} gsSPPopMatrixN(G_MTX_MODELVIEW, {})", self.command_prefix, num);
         let new_size = self.matrix_stack.len().saturating_sub(num as usize);
         self.matrix_stack.truncate(new_size);
@@ -1118,7 +1095,15 @@ impl Hle {
     fn handle_moveword(&mut self, index: u8, offset: u16, data: u32) {
         match index {
             2 => { // G_MW_NUMLIGHTS
-                self.num_lights = data / 24;
+                match self.software_version {
+                    HleRspSoftwareVersion::S3DEX2 => {
+                        self.num_lights = std::cmp::min((((self.command & 0x7FFF_FFFF) >> 5) - 1) as u32, LightState::NUM_LIGHTS as u32);
+                    },
+                    HleRspSoftwareVersion::F3DEX2 => {
+                        self.num_lights = data / 24;
+                    },
+                    _ => todo!(),
+                }
                 trace!(target: "HLE", "{} gsSPNumLights({})", self.command_prefix, self.num_lights);
             },
 
@@ -1151,25 +1136,21 @@ impl Hle {
         };
     }
 
-    fn handle_moveword00(&mut self) { // G_MOVEWORD
+    fn handle_moveword00(&mut self) { // G_MOVEWORD (S3DEX2)
         let offset = ((self.command >> 40) & 0xFFFF) as u16;
         let index  = ((self.command >> 32) & 0xFF) as u8;
         let data   = self.command as u32;
         self.handle_moveword(index, offset, data)
     }
 
-    fn handle_moveword02(&mut self) { // G_MOVEWORD
+    fn handle_moveword02(&mut self) { // G_MOVEWORD (F3DEX2)
         let index  = ((self.command >> 48) & 0xFF) as u8;
         let offset = ((self.command >> 32) & 0xFFFF) as u16;
         let data   = self.command as u32;
         self.handle_moveword(index, offset, data)
     }
 
-    fn handle_movemem(&mut self) { // G_MOVEMEM
-        let size  = ((((self.command >> 48) & 0xFF) >> 3) + 1) << 3;
-        let index = (self.command >> 32) as u8;
-        let addr  = (self.command & 0xFFFF_FFFF) as u32;
-
+    fn handle_movemem(&mut self, index: u8, addr: u32, size: u64) { // G_MOVEMEM
         match index {
             2 => todo!("G_MV_MMTX"),
             6 => todo!("G_MV_PMTX"),
@@ -1315,15 +1296,35 @@ impl Hle {
         };
     }
 
+    fn handle_movemem00(&mut self) { // G_MOVEMEM (S3DEX2)
+        let index = (self.command >> 48) & 0xFF;
+        match index {
+            0x80 => { // G_VIEWPORT
+                let addr = self.command as u32;
+                self.handle_movemem(8, addr, 16);
+            },
+            _ => todo!("unimplemented G_MOVEMEM cmd ${:02X}", index),
+        }
+        //self.handle_movemem(index, offset, data)
+    }
+
+    fn handle_movemem02(&mut self) { // G_MOVEMEM (F3DEX2)
+        let size  = ((((self.command >> 48) & 0xFF) >> 3) + 1) << 3;
+        let index = (self.command >> 32) as u8;
+        let addr  = self.command as u32;
+        self.handle_movemem(index, addr, size);
+    }
+
     fn handle_load_ucode(&mut self) { // G_LOAD_UCODE
         let _cmd1 = self.next_display_list_command();
         self.command_words += 2;
 
         // nop
         trace!(target: "HLE", "{} glSPLoadUcodeEx(...)", self.command_prefix);
+        todo!();
     }
 
-    fn handle_displaylist(&mut self) { // G_DL
+    fn handle_displaylist(&mut self) { // G_DL (S3DEX2, F3DEX2)
         let is_link = (self.command & 0x00FF_0000_0000_0000) == 0;
         let addr    = self.command as u32;
 
@@ -1381,12 +1382,12 @@ impl Hle {
         trace!(target: "HLE", "{} gsSPBranchLessZraw(0x{:08X} [0x{:08X}], {}, 0x{:08X})", self.command_prefix, addr, translated_addr, vbidx, zval);
     }
 
-    fn handle_enddl(&mut self) {
+    fn handle_enddl(&mut self) { // G_ENDDL (S3DEX2, F3DEX2)
         trace!(target: "HLE", "{} gsSPEndDisplayList()", self.command_prefix);
         self.dl_stack.pop();
     }
 
-    fn handle_texture(&mut self) { // G_TEXTURE
+    fn handle_texture(&mut self) { // G_TEXTURE (S3DEX2, F3DEX2)
         let ts    = self.command as u16;
         let ss    = (self.command >> 16) as u16;
         let on    = ((self.command >> 33) & 0x7F) != 0;
@@ -1411,8 +1412,20 @@ impl Hle {
     }
 
     fn handle_vtx(&mut self) { // G_VTX
-        let numv  = (self.command >> 44) as u8;
-        let vbidx = (((self.command >> 33) & 0x7F) as u8) - numv;
+        let (numv, vbidx) = match self.software_version {
+            HleRspSoftwareVersion::S3DEX2 => {
+                let numv = (((self.command >> 52) & 0x0F) + 1) as u8;
+                let vbidx = ((self.command >> 48) & 0x0F) as u8;
+                (numv, vbidx)
+            },
+            HleRspSoftwareVersion::F3DEX2 => {
+                let numv  = (self.command >> 44) as u8;
+                let vbidx = (((self.command >> 33) & 0x7F) as u8) - numv;
+                (numv, vbidx)
+            },
+            _ => todo!(),
+        };
+
         let addr  = self.command as u32;
 
         let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
@@ -1437,7 +1450,7 @@ impl Hle {
             let view_pos: Vector4<f32> = self.current_modelview_matrix * pos;
 
             // convert F3DZEX2_Vertex to Vertex
-            let vtx = if self.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // !G_LIGHTING
+            let vtx = if self.tweakables.disable_lighting || (self.geometry_mode & 0x0002_0000) == 0 { // !G_LIGHTING
                 // Lighting disabled, we have vertex colors
                 Vertex {
                     view_position: view_pos.into(),
@@ -1475,7 +1488,7 @@ impl Hle {
                         // Alpha is still present
                         (data[3] as u8) as f32 / 255.0,
                     ],
-                    normal: view_normal.normalize().into(),
+                    view_normal: view_normal.normalize().into(),
                     tex_coords: [
                         self.tex.s_scale * (((data[2] >> 16) as i16) as f32 / 32.0), 
                         self.tex.t_scale * (( data[2]        as i16) as f32 / 32.0),
@@ -1757,7 +1770,7 @@ impl Hle {
                 let vertex_fog = self.other_modes.get_cycle1_a_shade();
                 let _prim_fog = self.other_modes.get_cycle1_a_fog();
 
-                if rsp_fog && rdp_fog && vertex_fog {
+                if rsp_fog && rdp_fog && vertex_fog && !self.tweakables.disable_fog {
                     let need_new = self.current_fog_state != *self.fog_states.last().unwrap();
                     if need_new {
                         let index = self.fog_states.len();
@@ -1889,7 +1902,7 @@ impl Hle {
                             | ((rdp_tile1.clamp_t as u32) << VertexFlags::TEXMODE_T1_SHIFT);
             }
 
-            if self.disable_textures {
+            if self.tweakables.disable_textures {
                 vtx.flags &= !VertexFlags::TEXTURED;
             } else {
                 vtx.flags |= VertexFlags::TEXTURED;
@@ -1898,7 +1911,6 @@ impl Hle {
                     vtx.flags |= VertexFlags::LINEAR_FILTER;
                 }
             }
-
         }   
 
         if self.other_modes.get_cycle_type() == CycleType::TwoCycle {
@@ -2070,6 +2082,7 @@ impl Hle {
                 //plot(x, y, &[207, 52, 235, 255]);
             }
         }
+        //plot(0, 0, &[255, 0, 0, 200]); // type of image
     }
 
     // Convert IA 4b in TMEM to RGBA 32bpp
@@ -2093,6 +2106,7 @@ impl Hle {
                 plot(x, y, &[v as u8, v as u8, v as u8, if (src & 0x01) != 0 { 255 } else { 0 }]);
             }
         }
+        //plot(0, 0, &[255, 1, 0, 200]); // type of image
     }
 
     // Convert I 4b in TMEM to RGBA 32bpp
@@ -2113,6 +2127,7 @@ impl Hle {
                 //plot(x, y, &[207, 52, 235, 255]);
             }
         }
+        //plot(0, 0, &[255, 2, 0, 200]); // type of image
     }
 
     // Convert CI 8b in TMEM to RGBA 32bpp
@@ -2160,6 +2175,7 @@ impl Hle {
                 //plot(x, y, &[207, 52, 235, 255]);
             }
         }
+        //plot(0, 0, &[255, 0, 1, 200]); // type of image
     }
 
     // Convert IA 8b in TMEM to RGBA 32bpp
@@ -2182,6 +2198,7 @@ impl Hle {
                 plot(x, y, &[v as u8, v as u8, v as u8, ((a << 4) | a) as u8]);
             }
         }
+        //plot(0, 0, &[255, 1, 1, 200]); // type of image
     }
 
     // Convert I 8b in TMEM to RGBA 32bpp
@@ -2200,6 +2217,7 @@ impl Hle {
                 //plot(x, y, &[52, 207, 235, 255]);
             }
         }
+        //plot(0, 0, &[255, 2, 1, 200]); // type of image
     }
 
     // Convert IA 16b in TMEM to RGBA 32bpp
@@ -2219,6 +2237,7 @@ impl Hle {
                 plot(x, y, &[c as u8, c as u8, c as u8, a as u8]);
             }
         }
+        //plot(0, 0, &[255, 1, 2, 200]); // type of image
     }
 
 
@@ -2239,6 +2258,7 @@ impl Hle {
                 plot(x, y, &[(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), if a {255} else {0}]);
             }
         }
+        //plot(0, 0, &[255, 3, 2, 200]); // type of image
     }
 
     fn map_tmem_rgba_32b<F>(&mut self, tmem_address: u32, texture_width: u32, texture_height: u32, line_bytes: u32, mut plot: F)
@@ -2269,6 +2289,7 @@ impl Hle {
                 plot(x, y, &src.to_be_bytes());
             }
         }
+        //plot(0, 0, &[255, 3, 3, 200]); // type of image
     }
 
     // Need to map both TEXEL0 (if textures are enabled) and TEXEL1 (if the color combiner has it set)
@@ -2549,9 +2570,22 @@ impl Hle {
     }
 
     fn handle_tri1(&mut self) { // G_TRI1
-        let v0 = ((self.command >> 49) & 0x1F) as u16;
-        let v1 = ((self.command >> 41) & 0x1F) as u16;
-        let v2 = ((self.command >> 33) & 0x1F) as u16;
+        let (v0, v1, v2) = match self.software_version {
+            HleRspSoftwareVersion::S3DEX2 => {
+                let v0 = (((self.command >> 16) & 0xFF) / 10) as u16;
+                let v1 = (((self.command >>  8) & 0xFF) / 10) as u16;
+                let v2 = (((self.command >>  0) & 0xFF) / 10) as u16;
+                (v0, v1, v2)
+            },
+            HleRspSoftwareVersion::F3DEX2 => { 
+                let v0 = ((self.command >> 49) & 0x1F) as u16;
+                let v1 = ((self.command >> 41) & 0x1F) as u16;
+                let v2 = ((self.command >> 33) & 0x1F) as u16;
+                (v0, v1, v2)
+            },
+            _ => todo!(),
+        };
+
         trace!(target: "HLE", "{} gsSP1Triangle({}, {}, {})", self.command_prefix, v0, v1, v2);
 
         // if a previous *RECT call forced depth we need to re-enable depth
@@ -2735,7 +2769,7 @@ impl Hle {
         self.disable_depth_override = Some(());
     }
 
-    fn handle_settilesize(&mut self) { // G_SETTILESIZE
+    fn handle_settilesize(&mut self) { // G_SETTILESIZE (S3DEX2, F3DEX2)
         let uls = ((self.command >> 44) & 0xFFF) as u16;
         let ult = ((self.command >> 32) & 0xFFF) as u16;
         let tile = ((self.command >> 24) & 0x07) as u8;
@@ -2751,7 +2785,7 @@ impl Hle {
                self.command_prefix, tile, uls, rdp_tile.ul.0, ult, rdp_tile.ul.1, lrs, rdp_tile.lr.0, lrt, rdp_tile.lr.1);
     }
 
-    fn handle_loadblock(&mut self) { // G_LOADBLOCK
+    fn handle_loadblock(&mut self) { // G_LOADBLOCK (S3DEX2, F3DEX2)
         let to_f32 = |i| (i as f32) / (4.0 * 1024.0);
         let uls    = ((self.command >> 44) & 0xFFF) as u16;
         let ult    = ((self.command >> 32) & 0xFFF) as u16;
@@ -2871,7 +2905,7 @@ impl Hle {
         }
     }
 
-    fn handle_loadtile(&mut self) { // G_LOADTILE
+    fn handle_loadtile(&mut self) { // G_LOADTILE (S3DEX2, F3DEX2)
         let uls  = ((self.command >> 44) & 0xFFF) as u16;
         let ult  = ((self.command >> 32) & 0xFFF) as u16;
         let tile = ((self.command >> 24) & 0x07) as u8;
@@ -2984,7 +3018,7 @@ impl Hle {
         }
     }
 
-    fn handle_settile(&mut self) { // G_SETTILE
+    fn handle_settile(&mut self) { // G_SETTILE (S3DEX2, F3DEX2)
         let fmt     = (self.command >> 53) & 0x07;
         let sz      = (self.command >> 51) & 0x03;
         let line    = (self.command >> 41) & 0x1FF;
@@ -3024,7 +3058,19 @@ impl Hle {
         self.tex.rdp_tiles[tile].shift_t = shift_t as u8;
     }
 
-    fn handle_geometrymode(&mut self) { // G_GEOMETRYMODE
+    fn handle_cleargeometrymode(&mut self) { // G_CLEARGEOMETRYMODE (S3DEX2)
+        let bits = self.command as u32;
+        trace!(target: "HLE", "{} gsSPClearGeometryMode(0x{:08X})", self.command_prefix, bits);
+        self.geometry_mode &= !bits;
+    }
+
+    fn handle_setgeometrymode(&mut self) { // G_SETGEOMETRYMODE (S3DEX2)
+        let bits = self.command as u32;
+        trace!(target: "HLE", "{} gsSPSetGeometryMode(0x{:08X})", self.command_prefix, bits);
+        self.geometry_mode |= bits;
+    }
+
+    fn handle_geometrymode(&mut self) { // G_GEOMETRYMODE (F3DEX2)
         let clearbits = !(((self.command >> 32) & 0x00FF_FFFF) as u32);
         let setbits   = self.command as u32;
         if clearbits == 0 && setbits != 0 {
@@ -3038,19 +3084,19 @@ impl Hle {
         self.geometry_mode = (self.geometry_mode & !clearbits) | setbits;
     }
 
-    fn handle_rdploadsync(&mut self) { // G_RDPLOADSYNC
+    fn handle_rdploadsync(&mut self) { // G_RDPLOADSYNC (S3DEX2, F3DEX2)
         trace!(target: "HLE", "{} gsDPLoadSync()", self.command_prefix);
     }
 
-    fn handle_rdppipesync(&mut self) { // G_RDPPIPESYNC
+    fn handle_rdppipesync(&mut self) { // G_RDPPIPESYNC (S3DEX2, F3DEX2)
         trace!(target: "HLE", "{} gsDPPipeSync()", self.command_prefix);
     }
 
-    fn handle_rdptilesync(&mut self) { // G_RDPTILESYNC
+    fn handle_rdptilesync(&mut self) { // G_RDPTILESYNC (S3DEX2, F3DEX2)
         trace!(target: "HLE", "{} gsDPTileSync()", self.command_prefix);
     }
 
-    fn handle_rdpfullsync(&mut self) { // G_RDPFULLSYNC
+    fn handle_rdpfullsync(&mut self) { // G_RDPFULLSYNC (S3DEX2, F3DEX2)
         trace!(target: "HLE", "{} gsDPFullSync()", self.command_prefix);
         self.comms.rdp_full_sync.store(1, Ordering::SeqCst);
     }
@@ -3112,9 +3158,21 @@ impl Hle {
         self.check_othermode_state_change();
     }
 
-    fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H
-        let length = ((self.command >> 32) & 0xFF) + 1;
-        let shift = 32 - length - ((self.command >> 40) & 0xFF);
+    fn handle_setothermode_h(&mut self) { // G_SETOTHERMODE_H (S3DEX2, F3DEX2)
+        let (length, shift) = match self.software_version {
+            HleRspSoftwareVersion::F3DEX2 => {
+                let length = ((self.command >> 32) & 0xFF) + 1;
+                let shift = 32 - length - ((self.command >> 40) & 0xFF);
+                (length, shift)
+            },
+
+            _ => {
+                let length = (self.command >> 32) & 0xFF;
+                let shift = (self.command >> 40) & 0xFF;
+                (length, shift)
+            }
+        };
+
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeH(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
@@ -3126,9 +3184,21 @@ impl Hle {
         self.check_othermode_state_change();
     }
 
-    fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L
-        let length = ((self.command >> 32) & 0xFF) + 1;
-        let shift = 32 - length - ((self.command >> 40) & 0xFF);
+    fn handle_setothermode_l(&mut self) { // G_SETOTHERMODE_L (S3DEX2, F3DEX2)
+        let (length, shift) = match self.software_version {
+            HleRspSoftwareVersion::F3DEX2 => {
+                let length = ((self.command >> 32) & 0xFF) + 1;
+                let shift = 32 - length - ((self.command >> 40) & 0xFF);
+                (length, shift)
+            },
+
+            _ => {
+                let length = (self.command >> 32) & 0xFF;
+                let shift = (self.command >> 40) & 0xFF;
+                (length, shift)
+            }
+        };
+
         let data = self.command as u32;
 
         trace!(target: "HLE", "{} gsSPSetOtherModeL(shift={}, length={}, data=0x{:08X})", self.command_prefix, shift, length, data);
@@ -3151,7 +3221,7 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPSetPrimDepth(...)", self.command_prefix);
     }
 
-    fn handle_setscissor(&mut self) { // G_SETSCISSOR
+    fn handle_setscissor(&mut self) { // G_SETSCISSOR (S3DEX2, F3DEX2)
         // TODO: I think the x/y values are 12bit 10.2 fixed point format?
         let x0 = ((self.command >> 44) & 0xFFF) as u16;
         let y0 = ((self.command >> 32) & 0xFFF) as u16;
@@ -3173,7 +3243,7 @@ impl Hle {
         trace!(target: "HLE", "{} gsDPSetConvert(...)", self.command_prefix);
     }
 
-    fn handle_fillrect(&mut self) { // G_FILLRECT
+    fn handle_fillrect(&mut self) { // G_FILLRECT (S3DEX2, F3DEX2)
         let x1 = (((self.command >> 44) & 0xFFF) as u16) >> 2;
         let y1 = (((self.command >> 32) & 0xFFF) as u16) >> 2;
         let x0 = (((self.command >> 12) & 0xFFF) as u16) >> 2;
@@ -3312,8 +3382,7 @@ impl Hle {
         self.current_fog_state.color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0];
     }
 
-    fn handle_setfillcolor(&mut self) { // G_SETFILLCOLOR
-        //assert!((self.command >> 16) as u16 == (self.command & 0xFFFF) as u16); // Someday some code will fill a rect with alternating colors
+    fn handle_setfillcolor(&mut self) { // G_SETFILLCOLOR (S3DEX2, F3DEX2)
         self.fill_color = self.command as u32;
         trace!(target: "HLE", "{} gsDPSetFillColor(0x{:08X})", self.command_prefix, self.fill_color);
     }
@@ -3354,7 +3423,7 @@ impl Hle {
         self.color_combiner_state_changed();
     }
 
-    fn handle_setenvcolor(&mut self) { // G_SETENVCOLOR
+    fn handle_setenvcolor(&mut self) { // G_SETENVCOLOR (S3DEX2, F3DEX2)
         let r = (self.command >> 24) as u8;
         let g = (self.command >> 16) as u8;
         let b = (self.command >>  8) as u8;
@@ -3371,7 +3440,7 @@ impl Hle {
         self.color_combiner_state_changed();
     }
 
-    fn handle_setcombine(&mut self) { // G_SETCOMBINE
+    fn handle_setcombine(&mut self) { // G_SETCOMBINE (S3DEX2, F3DEX2)
         let a0c = ((self.command >> 52) & 0x0F) as u8;
         let b0c = ((self.command >> 28) & 0x0F) as u8;
         let c0c = ((self.command >> 47) & 0x1F) as u8;
@@ -3439,7 +3508,7 @@ impl Hle {
         }
     }
 
-    fn handle_settimg(&mut self) { // G_SETTIMG
+    fn handle_settimg(&mut self) { // G_SETTIMG (S3DEX2, F3DEX2)
         let fmt   = (self.command >> 53) & 0x07;
         let sz    = (self.command >> 51) & 0x03;
         let width = (self.command >> 32) & 0x0FFF;
@@ -3467,7 +3536,7 @@ impl Hle {
         self.tex.address = translated_addr;
     }
 
-    fn handle_setzimg(&mut self) { // G_SETZIMG
+    fn handle_setzimg(&mut self) { // G_SETZIMG (S3DEX2, F3DEX2)
         let addr = self.command as u32;
 
         let translated_addr = if (addr & 0xE000_0000) != 0 { addr } else {
@@ -3492,7 +3561,7 @@ impl Hle {
         }
     }
 
-    fn handle_setcimg(&mut self) { // G_SETCIMG
+    fn handle_setcimg(&mut self) { // G_SETCIMG (S3DEX2, F3DEX2)
         let addr  = self.command as u32;
         let width = ((self.command >> 32) & 0x0FFF) as u16 + 1;
         let bpp   = ((self.command >> 51) & 0x03) as u8;

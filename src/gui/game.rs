@@ -231,12 +231,16 @@ pub struct Game {
     //is_backward_pressed: bool,
     //is_left_pressed: bool,
     //is_right_pressed: bool,
+    demo_open: bool,
+    stats_window_opened: bool,
+    tweakables_window_opened: bool,
+
+    // copy of tweakables so we don't need the lock every frame
+    tweakables: n64::Tweakables,
 
     ui_frame_count: u64,
     ui_last_fps_time: Instant,
     ui_fps: f64,
-
-    //z_scale: f32,
 
     game_frame_count: u64,
     game_last_fps_time: Instant,
@@ -797,6 +801,9 @@ impl App for Game {
         // Grab ownership of the hle_command_buffer
         let hle_command_buffer = std::mem::replace(&mut comms.hle_command_buffer, None).unwrap();
 
+        // Grab copy of tweakables
+        let tweakables = *comms.tweakables.read().unwrap();
+
         let mut ret = Self {
             args: args,
             comms: comms,
@@ -856,11 +863,15 @@ impl App for Game {
             //is_backward_pressed: false,
             //is_left_pressed: false,
             //is_right_pressed: false,
+            demo_open: false,
+            stats_window_opened: true,
+            tweakables_window_opened: false,
+
+            tweakables: tweakables,
 
             ui_frame_count: 0,
             ui_last_fps_time: Instant::now(),
             ui_fps: 0.0,
-            //z_scale: 1.0,
 
             game_frame_count: 0,
             game_last_fps_time: Instant::now(),
@@ -983,7 +994,7 @@ impl App for Game {
 
             // CTRL+T to toggle disable textures
             if appwnd.input().key_pressed(KeyCode::KeyT) {
-                let mut ef = self.comms.emulation_flags.write().unwrap();
+                let mut ef = self.comms.tweakables.write().unwrap();
                 ef.disable_textures = !ef.disable_textures;
             }
 
@@ -1006,7 +1017,7 @@ impl App for Game {
 
             // CTLR+L to disable lighting (and view normals as if they're the model color)
             if appwnd.input().key_pressed(KeyCode::KeyL) {
-                let mut ef = self.comms.emulation_flags.write().unwrap();
+                let mut ef = self.comms.tweakables.write().unwrap();
                 ef.disable_lighting = !ef.disable_lighting;
             }
 
@@ -1043,6 +1054,11 @@ impl App for Game {
             self.comms.break_cpu();
 
             // TODO reset rendering states
+        }
+
+        // Show demo window
+        if appwnd.input().key_pressed(KeyCode::F12) {
+            self.demo_open = true;
         }
 
         if self.check_inputs {
@@ -1259,31 +1275,69 @@ impl App for Game {
     }
 
     fn render_ui(&mut self, _appwnd: &AppWindow, ui: &imgui::Ui) {
-        //let mut ef = self.comms.emulation_flags.write().unwrap();
+        if self.demo_open {
+            ui.show_demo_window(&mut self.demo_open);
+        }
+
+        //let mut ef = self.comms.tweakables.write().unwrap();
         //ef.disable_lighting = !ef.disable_lighting;
+        if ui.is_mouse_released(imgui::MouseButton::Right) {
+            ui.open_popup("main_context");
+        }
 
-        let window = ui.window("Stats");
-        window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
-              .position([0.0, 0.0], imgui::Condition::FirstUseEver)
-              .build(|| {
-                  ui.text(format!("UI   FPS: {}", self.ui_fps));
-                  ui.text(format!("GAME FPS: {}", self.game_fps));
-                  ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
+        if let Some(main_context_token) = ui.begin_popup("main_context") {
+            if let Some(windows_menu_token) = ui.begin_menu("Windows") {
+                ui.checkbox("Stats", &mut self.stats_window_opened);
+                ui.checkbox("Tweakables", &mut self.tweakables_window_opened);
+                windows_menu_token.end();
+            }
 
-                  ////let mut z_scale = self.z_scale;
-                  //if ui.slider(format!("z_scale"), 1.0, 16384.0, &mut self.z_scale) {
-                  //    //if z_scale < -0.001 || z_scale > 0.001 {
-                  //    //    self.z_scale = z_scale;
-                  //        let mut ef = self.comms.emulation_flags.write().unwrap();
-                  //        ef.z_scale = self.z_scale;
-                  //    //}
-                  //}
-                  //if ui.button("Reset z_scale") {
-                  //    self.z_scale = 1024.0;
-                  //    let mut ef = self.comms.emulation_flags.write().unwrap();
-                  //    ef.z_scale = self.z_scale;
-                  //}
-              });
+            main_context_token.end();
+        }
+
+        if self.stats_window_opened {
+            let window = ui.window("Stats");
+            window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
+                  .position([0.0, 0.0], imgui::Condition::FirstUseEver)
+                  .opened(&mut self.stats_window_opened) // TODO: remember closed state between runs
+                  .build(|| {
+                      ui.text(format!("UI   FPS: {}", self.ui_fps));
+                      ui.text(format!("GAME FPS: {}", self.game_fps));
+                      ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
+                  }
+            );
+        }
+
+        if self.tweakables_window_opened {
+            let mut tweakables_dirty = false;
+            let window = ui.window("Tweakables");
+            window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
+                  .position([400.0, 0.0], imgui::Condition::FirstUseEver)
+                  .opened(&mut self.tweakables_window_opened)
+                  .build(|| {
+                      let mut texturing = !self.tweakables.disable_textures;
+                      if ui.checkbox("Texturing", &mut texturing) {
+                          self.tweakables.disable_textures = !texturing;
+                          tweakables_dirty = true;
+                      }
+                      let mut lighting = !self.tweakables.disable_lighting;
+                      if ui.checkbox("Lighting", &mut lighting) {
+                          self.tweakables.disable_lighting = !lighting;
+                          tweakables_dirty = true;
+                      }
+                      let mut fog = !self.tweakables.disable_fog;
+                      if ui.checkbox("Fog", &mut fog) {
+                          self.tweakables.disable_fog = !fog;
+                          tweakables_dirty = true;
+                      }
+                  }
+            );
+
+            if tweakables_dirty {
+                let mut tw = self.comms.tweakables.write().unwrap();
+                *tw = self.tweakables;
+            }
+        }
     }
 }
 

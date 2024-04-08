@@ -25,6 +25,13 @@ enum CicType {
     UnknownPAL,  // uses the 7101 seed
 }
 
+#[derive(Copy, Clone, Debug)]
+enum Eeprom {
+    None,
+    _4KiB,
+    _16KiB,
+}
+
 /// N64 PIF-ROM, where the boot rom is stored
 /// boot_rom is big endian data
 /// Essentially part of the PeripheralInterface but the PIF-ROM and features abstracted out
@@ -37,14 +44,18 @@ pub struct PifRom {
     command_finished: bool,
     seed: u32,
     _cic_type: CicType,
+    eeprom: Eeprom,
 }
 
 impl PifRom {
     pub fn new(comms: SystemCommunication, boot_rom: Vec<u8>, pi: &mut peripheral::PeripheralInterface) -> PifRom {
         let mut ram = vec![0u32; 16]; // 64 byte RAM
 
+        // Read game header
+        let header = pi.read_block(0x1000_0000, 0x40).expect("error reading rom header");
+
         // Get the country code of the rom
-        let cc = ((pi.read_u32(0x1000_003C).expect("error reading rom") >> 8) as u8) as char;
+        let cc = ((header[0x3C >> 2] >> 8) as u8) as char;
         let is_pal = match cc {
             'D' | 'F' | 'I' | 'P' | 'S' | 'U' | 'X' | 'Y' => true, // Germany, France, Italy, Europe, Spain, Australia
             _ => false,
@@ -59,6 +70,22 @@ impl PifRom {
         let seed = seed as u32;
         ram[9] = (seed << 8) | seed;
 
+        // Get the game code
+        let mut game_code = [0u8; 3];
+        game_code[0] = header[0x38 >> 2] as u8;
+        game_code[1] = (header[0x3C >> 2] >> 24) as u8;
+        game_code[2] = (header[0x3C >> 2] >> 16) as u8;
+        let game_code = String::from_utf8(game_code.into()).unwrap_or(String::from("???"));
+        info!(target: "PIF", "Game code: {}", game_code);
+
+        let eeprom = match game_code.as_str() {
+            "NSM" => {
+                info!(target: "PIF", "Game has 4KiB EEPROM");
+                Eeprom::_4KiB
+            },
+            _ => Eeprom::None,
+        };
+
         PifRom {
             comms: comms,
 
@@ -68,6 +95,7 @@ impl PifRom {
             command_finished: false,
             seed: seed,
             _cic_type: cic_type,
+            eeprom: eeprom,
         }
     }
 
@@ -249,6 +277,8 @@ impl PifRom {
         const JOYBUS_COMMAND_ID: u8 = 0x00;
         const JOYBUS_COMMAND_READ: u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
+        const JOYBUS_COMMAND_READ_EEPROM: u8 = 0x04;
+        const JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05;
         const JOYBUS_COMMAND_RESET: u8 = 0xFF;
 
         // copy over current ram with the joybus memory copy
@@ -289,7 +319,7 @@ impl PifRom {
                         break 'cmd_loop;
                     }
 
-                    let _original_res_length = res_length;
+                    let original_res_length = res_length;
                     res_length &= 0x3F;
                     let res_addr = cmd_start + COMMAND_OFFSET + cmd_length as usize;
 
@@ -307,6 +337,26 @@ impl PifRom {
                                 self.write_u8_correct(0x05, res_addr + 0).unwrap();
                                 self.write_u8_correct(0x00, res_addr + 1).unwrap();
                                 self.write_u8_correct(0x02, res_addr + 2).unwrap(); // 2 indicates no pak installed, 1 otherwise
+                            } else if channel == 4 { // Cart channel
+                                match self.eeprom {
+                                    Eeprom::_4KiB => {
+                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x00C0 16Kbit 
+                                        self.write_u8_correct(0x80, res_addr + 1).unwrap();
+                                        self.write_u8_correct(0x00, res_addr + 2).unwrap(); // 0x80 set = write in progress
+                                    },
+                                    Eeprom::_16KiB => {
+                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x00C0 16Kbit 
+                                        self.write_u8_correct(0xC0, res_addr + 1).unwrap();
+                                        self.write_u8_correct(0x00, res_addr + 2).unwrap(); // 0x80 set = write in progress
+                                    },
+                                    _ => {
+                                        self.write_u8_correct(0x00, res_addr + 0).unwrap();
+                                        self.write_u8_correct(0x00, res_addr + 1).unwrap();
+                                        self.write_u8_correct(0x00, res_addr + 2).unwrap();
+                                        // setting bit 7 to the res length byte indicates device isn't present
+                                        self.write_u8_correct((original_res_length | 0x80) as u32, cmd_start + RESLEN_OFFSET).unwrap();
+                                    },
+                                }
                             }
 
                             channel += 1;
@@ -359,7 +409,12 @@ impl PifRom {
                                 error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
                                 break 'cmd_loop;
                             }
-                        }
+                        },
+
+                        JOYBUS_COMMAND_READ_EEPROM => { // read EEPROM block
+                            let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
+                            warn!(target: "JOY", "{}: JOYBUS_COMMAND_READ_EEPROM channel={}, block={}, res_addr={}", cmd_count - 1, channel, block, res_addr - 0x7C0);
+                        },
 
                         _ => {
                             error!(target: "JOY", "unhandled joybus command ${:02X} on channel {}", cmd, channel);
