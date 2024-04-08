@@ -930,7 +930,7 @@ impl App for Game {
             self.ui_last_fps_time = Instant::now();
         }
 
-        // CTRL+F5+n to generate interrupt signal n
+        // CTRL+F(5+n) to generate interrupt signal n
         if appwnd.input().held_control() {
             const KEYS: &[KeyCode] = &[
                 KeyCode::F5, KeyCode::F6, KeyCode::F7,
