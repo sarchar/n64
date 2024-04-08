@@ -15,7 +15,7 @@ recommend [n64-systemtest](https://github.com/lemmy-64/n64-systemtest).
 Clone the repository and execute:
 
 ```
-$ cargo run --release --features gui -- n64-systemtest.z64
+$ cargo run --release -- n64-systemtest.z64
 ```
 
 Or if you want to use the debugger,
