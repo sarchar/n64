@@ -88,6 +88,13 @@ optional = true
 version = "0.3"
 optional = true
 
+[dependencies.sdl2]
+version = "0.36"
+default-features = false
+
+[dependencies.samplerate]
+version = "0.2.4"
+
 [build-dependencies.cc]
 version = "1.0"
 

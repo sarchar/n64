@@ -32,6 +32,9 @@ pub struct DmaInfo {
 
     // callback function to let the initiator know the DMA has completed
     pub completed     : Option<mpsc::Sender<DmaInfo>>,
+
+    // time this structure was created at
+    pub created_at    : std::time::Instant,
 }
 
 impl Default for DmaInfo {
@@ -49,6 +52,7 @@ impl Default for DmaInfo {
             source_bits   : 0,
             dest_bits     : 0,
             completed     : None,
+            created_at    : std::time::Instant::now(),
         }
     }
 }
@@ -57,6 +61,14 @@ impl fmt::Debug for DmaInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "DmaInfo {{ initiator: {:?}, source_address: ${:08X}, dest_address: ${:08X}, count: {}, length: {}, source_stride: ${:X}, dest_stride: ${:X}, source_mask: ${:08X}, dest_mask: ${:08X}, source_bits: ${:X}, dest_bits: ${:X} }}",
                     self.initiator, self.source_address, self.dest_address, self.count, self.length, self.source_stride, self.dest_stride, self.source_mask, self.dest_mask, self.source_bits, self.dest_bits)
+    }
+}
+
+impl DmaInfo {
+    // used to measure performance
+    pub fn duration(&self) -> f64 {
+        let delta = std::time::Instant::now() - self.created_at;
+        delta.as_secs_f64()
     }
 }
 
@@ -173,6 +185,7 @@ impl Rcp {
         self.pi.step();
         self.si.step();
         self.vi.step(cpu_cycles_elapsed);
+        self.ai.step();
         //{
         //    let mut rdp = self.rdp.lock().unwrap();
         //    rdp.step();

@@ -10,6 +10,9 @@ You'll need a PIF rom (sorry, can't help you out here. Google is your friend)
 in the ./bios/ directory "pifrom.v64".  And you'll need a program to run. I
 recommend [n64-systemtest](https://github.com/lemmy-64/n64-systemtest).
 
+You'll also need to have SDL2 installed.  Follow the instructions at
+[https://crates.io/crates/sdl](https://crates.io/crates/sdl2).
+
 # Building
 
 Clone the repository and execute:

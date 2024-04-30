@@ -278,7 +278,7 @@ impl PifRom {
         const JOYBUS_COMMAND_READ: u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
         const JOYBUS_COMMAND_READ_EEPROM: u8 = 0x04;
-        const JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05;
+        const _JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05; // TODO
         const JOYBUS_COMMAND_RESET: u8 = 0xFF;
 
         // copy over current ram with the joybus memory copy

@@ -97,6 +97,16 @@ impl PeripheralInterface {
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         match offset & 0xF_FFFF {
+            // PI_DRAM_ADDR
+            0x0_0000 => {
+                Ok(self.dram_addr)
+            },
+
+            // PI_CART_ADDR
+            0x0_0004 => {
+                Ok(self.cart_addr)
+            },
+
             // PI_STATUS
             0x0_0010 => {
                 trace!(target: "PI", "read PI_STATUS");

@@ -206,12 +206,19 @@ impl Rsp {
 
         thread::spawn(move || {
             let mut _started_time = std::time::Instant::now();
+            //let mut task_time = std::time::Instant::now();
+            //let mut audio_task = false;
             'main_loop: loop {
                 let mut c = core.lock().unwrap();
 
                 // halted can only be set while we don't have a lock, so check here
                 if c.halted {
                     //.info!(target: "RSP", "RSP core halted (broke={}), waiting for wakeup", c.broke);
+                    //if audio_task {
+                    //    let task_duration = std::time::Instant::now() - task_time;
+                    //    println!("audio task took {} s", task_duration.as_secs_f64());
+                    //    audio_task = false;
+                    //}
 
                     // drop the lock on the core and wait for a wakeup signal
                     drop(c);
@@ -243,6 +250,9 @@ impl Rsp {
                         // Task type is the first element of the OSTask structure, which is at 0xFC0 
                         let task_type = c.read_u32(0x0FC0).unwrap();
                         debug!(target: "RSP", "processing task type {}", task_type);
+
+                        // restart task time
+                        //task_time = std::time::Instant::now();
                         match task_type {
                             1 => { // M_GFXTASK
                                 let dl_start = c.read_u32(0x0FF0).unwrap(); // OSTask->data_ptr
@@ -283,18 +293,19 @@ impl Rsp {
 
                             2 => { // M_AUDTASK
                                 // run on RSP for now
-                                debug!(target: "RSP", "stubbed audio tasks for now, as they crash");
-                                    // set SIG2 (SP_STATUS_TASKDONE)
-                                    {
-                                        let mut shared_state = c.shared_state.write().unwrap();
-                                        shared_state.signals |= 1 << 2;
-                                    }
+                                //debug!(target: "RSP", "stubbed audio tasks for now, as they crash");
+                                //    // set SIG2 (SP_STATUS_TASKDONE)
+                                //    {
+                                //        let mut shared_state = c.shared_state.write().unwrap();
+                                //        shared_state.signals |= 1 << 2;
+                                //    }
 
-                                    // and break, which usually triggers SP interrupt
-                                    let _ = c.special_break().unwrap();
+                                //    // and break, which usually triggers SP interrupt
+                                //    let _ = c.special_break().unwrap();
 
-                                    // RSP isn't running
-                                    c.halted = true;
+                                //    // RSP isn't running
+                                //    c.halted = true;
+                                //audio_task = true;
                             },
 
                             // All other tasks types are LLE'd
@@ -374,7 +385,8 @@ impl Rsp {
     pub fn step(&mut self) {
         let _ = self.is_broke(); // update interrupts
 
-        if let Ok(_) = self.dma_completed_rx.try_recv() {
+        if let Ok(_old_dma_info) = self.dma_completed_rx.try_recv() {
+            //println!("dma completed after {} s", _old_dma_info.duration());
             // we got a completed DMA, so if one is pending start it immediately
             let mut shared_state = self.shared_state.write().unwrap();
             shared_state.dma_busy = false;
@@ -1636,14 +1648,26 @@ impl RspCpuCore {
                                 shared_state.dma_full = Some(dma_info);
                             }
                         } else {
-                            // update the addresses as if the dma has been completed
-                            shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
-                            shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
-                            shared_state.dma_current_read_length  = 0xFF8;
-                            shared_state.dma_current_write_length = 0xFF8;
-                            shared_state.dma_busy = true;
-                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
-                            self.comms.break_cpu();
+                            // see if we can direct copy this without the DMA system
+                            if ((dma_info.dest_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
+                                && (dma_info.source_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                let access = self.comms.rdram.read();
+                                let rdram: &[u32] = access.as_deref().unwrap().as_ref().unwrap();
+                                let slice = &rdram[(dma_info.source_address >> 2) as usize..][..(dma_info.length >> 2) as usize];
+
+                                let mem_offset = (dma_info.dest_address & 0x1FFF) >> 2; // 8KiB, repeated
+                                let mut mem = self.mem.write().unwrap();
+                                mem[mem_offset as usize..][..(dma_info.length >> 2) as usize].copy_from_slice(&slice);
+                            } else {
+                                // update the addresses as if the dma has been completed
+                                shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
+                                shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
+                                shared_state.dma_current_read_length  = 0xFF8;
+                                shared_state.dma_current_write_length = 0xFF8;
+                                shared_state.dma_busy = true;
+                                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                                self.comms.break_cpu();
+                            }
                         }
 
                         Ok(())
@@ -1677,14 +1701,26 @@ impl RspCpuCore {
                                 shared_state.dma_full = Some(dma_info);
                             }
                         } else {
-                            // update the addresses as if the dma has been completed
-                            shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
-                            shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
-                            shared_state.dma_current_read_length  = 0xFF8;
-                            shared_state.dma_current_write_length = 0xFF8;
-                            shared_state.dma_busy = true;
-                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
-                            self.comms.break_cpu();
+                            // see if we can direct copy this without the DMA system
+                            if ((dma_info.source_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
+                                && (dma_info.dest_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                let mem_offset = (dma_info.source_address & 0x1FFF) >> 2; // 8KiB, repeated
+                                let mem = self.mem.read().unwrap();
+                                let slice = &mem[mem_offset as usize..][..(dma_info.length >> 2) as usize];
+
+                                let mut access = self.comms.rdram.write();
+                                let rdram: &mut [u32] = access.as_mut().unwrap().as_mut().unwrap();
+                                rdram[(dma_info.dest_address >> 2) as usize..][..(dma_info.length >> 2) as usize].copy_from_slice(slice);
+                            } else {
+                                // update the addresses as if the dma has been completed
+                                shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);
+                                shared_state.dma_current_dram         = (shared_state.dma_dram & !0x07) + shared_state.dma_total_size;
+                                shared_state.dma_current_read_length  = 0xFF8;
+                                shared_state.dma_current_write_length = 0xFF8;
+                                shared_state.dma_busy = true;
+                                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                                self.comms.break_cpu();
+                            }
                         }
 
                         Ok(())
