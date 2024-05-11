@@ -2,9 +2,12 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::collections::HashMap;
 
 #[allow(unused_imports)]
-use tracing::{debug, error, warn, info};
+use tracing::{debug, error, warn, info, trace};
+
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
 use crate::*;
 
@@ -108,6 +111,135 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
+const CACHED_BLOCK_REGION_SIZE: u32 = 8+2; // 256 instructions max per block (+2 => multiply by sizeof(u32))
+const CACHED_BLOCK_REGION_MASK: u64 = (1u64 << CACHED_BLOCK_REGION_SIZE) - 1;
+
+struct CompiledBlockRegion {
+    blocks: Vec<CompiledBlock>,
+    mapping: [Option<usize>; 1 << (CACHED_BLOCK_REGION_SIZE - 2)],
+}
+
+impl Default for CompiledBlockRegion {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            mapping: [None; 1 << (CACHED_BLOCK_REGION_SIZE - 2)], 
+        }
+    }
+}
+
+struct CompiledBlock {
+    start_address: u64,
+    entry_point: dynasmrt::AssemblyOffset,
+    code_buffer: dynasmrt::mmap::ExecutableBuffer,
+}
+
+enum CachedBlockStatus<'a> {
+    Uncompilable,
+    NotCached,
+    Cached(&'a CompiledBlock),
+}
+
+enum CompileInstructionResult {
+    Continue, // Instruction compiled, keep going
+    Stop,     // Instruction compiled, stop
+}
+
+// win64 calling convention/ABI:
+// caller saved: rax, rcx, rdx, r8-r11, xmm0-xmm5 (volatile)
+// callee saved: rbx, rbp, rdi, rsi, rsp, r12-r15, xmm6-xmm15 (non-volatile)
+// TODO important: fpcsr is nonvolatile (callee saved), which controls fp rounding
+// rax is return value
+// rsp is the stack pointer and must be 0x10 (16) bytes aligned before a function call
+// rcx, rdx, r8, and r8 are the first four arguments to a function call
+// further arguments are pushed to the stack in right-to-left order (left-most arguments are closer to rsp)
+// xmm0l, xmm1l, xmm2l, and xmmr3l are the first four floating point arguments
+// at the end of a function, rsp must be equal to what it was at the beginning of a function, 
+// unless the return value is in the stack, then rsp must be the original value minus the return value size
+// ebp used to be used as a base pointer for stack frames, but is not generally the case
+// if a dynamic stack is useful, rbp can be used (and is callee saved) to save and restore the stack pointer
+macro_rules! letsgo {
+    ($ops:ident $($t:tt)*) => {
+        // for registers that we're using often, we want to use as many callee saved registers as
+        // possible, otherwise we need to save them before every external call
+        // 
+        // convention: v_ are volatile registers, r_ are non-volatile, s_ are stack offsets
+        // all the r_ registers must be saved in the prologue and restored in the epilogue of each
+        // code block
+        // we also do not alias rax (function pointer) or any of the arguments to function calls, (and 
+        // all are valid to be used as another temporary storage register)
+        dynasm!($ops
+            ; .arch x64
+            ; .alias r_gpr, rbx
+            ; .alias r_cp0gpr, rdi
+            ; .alias r_cpu, rsi
+            ; .alias v_tmp, r10
+            ; .alias v_tmp_32, r10d
+            ; .alias v_tmp2, r11
+            $($t)*
+        )
+    }
+}
+
+// stack storage offsets
+const s_cycle_count: i32 = 0x00;  // number of r4300 instructions executed
+const _s_next: i32 = 0x04; // next rsp offset
+
+// use letscall! to call external "win64" functions
+// this call uses the first two parameters (Cpu, instruction) for all calls
+// you can setup arguments before calling letscall!() in r8, r9, and the rest in stack
+macro_rules! letscall {
+    ($ops:ident, $target:expr) => {
+            //; mov edx, DWORD [rsp + s_inst]             // arg1 opcode
+        letsgo!($ops
+            ; mov rcx, r_cpu                            // arg0 *mut Cpu
+            ; mov rax, QWORD $target as _               // function pointer
+            ; sub rsp, BYTE 0x20                        // fixup stack for function call
+            ; call rax                                  // make the call
+            ; add rsp, BYTE 0x20                        // restore stack
+        );
+    }
+}
+
+// conditionally write the constant value for register $reg into self.gpr
+// overwrites rax
+macro_rules! letssave {
+    ($self:ident, $ops:ident, $reg:expr) => {
+        if let Some(v) = $self.jit_reg_states[$reg].const_value {
+            if $self.jit_reg_states[$reg].dirty {
+                // [MOV r/m64, imm32] sign-extends, which we can make use of to reduce generated code
+                if v as i32 as i64 == v as i64 { // check that sign extension produces the original value
+                    letsgo!($ops
+                        ; mov QWORD [r_gpr + ($reg * 8) as i32], DWORD v as u32 as _
+                    );
+                } else {
+                    letsgo!($ops
+                        ; mov rax, QWORD v as _
+                        ; mov QWORD [r_gpr + ($reg * 8) as i32], rax
+                    );
+                }
+                $self.jit_reg_states[$reg].dirty = false;
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct JitRegState {
+    const_value: Option<u64>, // when Some(), constant propagation
+    dirty      : bool       , // when const_value is Some(), indicates whether the value has been
+                              // changed since the last time it was saved to self.gpr[].
+}
+
+impl Default for JitRegState {
+    fn default() -> Self {
+        Self {
+            const_value: None, // don't know what the register values are at the beginning of compilation
+            dirty      : false,
+        }
+    }
+}
+
 pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u64,                     // lookahead PC
@@ -143,6 +275,11 @@ pub struct Cpu {
     inst: InstructionDecode,
 
     num_steps: u64,
+
+    // JIT
+    cached_block_regions: HashMap<u64, CompiledBlockRegion>,
+    compile_instruction_table: [CpuInstructionBuilder; 64],
+    jit_reg_states: [JitRegState; 32],
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -165,7 +302,11 @@ impl From<ReadWriteFault> for InstructionFault {
     }
 }
 
+
 type CpuInstruction = fn(&mut Cpu) -> Result<(), InstructionFault>;
+
+type Assembler = dynasmrt::Assembler<dynasmrt::x64::X64Relocation>;
+type CpuInstructionBuilder = fn(&mut Cpu, &mut Assembler) -> CompileInstructionResult;
 
 impl Cpu {
     pub fn new(bus: Rc<RefCell<dyn Addressable>>) -> Cpu {
@@ -230,7 +371,24 @@ impl Cpu {
             inst: InstructionDecode {
                 v: 0, op: 0, regimm: 0, special: 0, rd: 0, rs: 0, rt: 0,
                 imm: 0, signed_imm: 0, sa: 0, target: 0,
-            }
+            },
+
+            // JIT
+            cached_block_regions: HashMap::new(),
+
+            compile_instruction_table: [ 
+               //  _000                 _001                     _010                     _011                     _100                     _101                     _110                     _111
+    /* 000_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 001_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+            ],
+
+            jit_reg_states: [JitRegState::default(); 32],
         };
         
         let _ = cpu.reset(false);
@@ -342,6 +500,18 @@ impl Cpu {
         }
     }
 
+    unsafe extern "win64" fn read_u32_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
+        println!("read_u32_bridge from ${:08X}", virtual_address as u32);
+        let cpu = { &mut *cpu };
+        match cpu.read_u32(virtual_address as usize) {
+            Ok(value) => value,
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in read_u32_bridge: {:?}", e);
+            }
+        }
+    }
+
     // The VR4300 has to do two reads to get a doubleword
     #[inline(always)]
     fn read_u64(&mut self, virtual_address: usize) -> Result<u64, InstructionFault> {
@@ -433,6 +603,8 @@ impl Cpu {
 
     // prefetch the next instruction
     fn prefetch(&mut self) -> Result<(), InstructionFault> {
+        // TODO: (optimization) don't do the read_u32 when running the JIT engine
+        // there will be times when we still need it, but probably doesn't need to be here
         self.next_instruction = self.read_u32(self.pc as usize)?; 
         self.next_instruction_pc = self.pc;
         self.pc += 4;
@@ -858,6 +1030,211 @@ impl Cpu {
         Ok(None)
     }
 
+    fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
+        if let Some(physical_address) = self.translate_address(virtual_address, true, false)? {
+            trace!("physical_address=${:08X}", physical_address.physical_address as u32);
+
+            if physical_address.physical_address < 0x0080_0000 { // RDRAM
+                // Using the physical_address, determine where the memory came from
+                todo!();
+            } else {
+                // If we're in PIF-ROM, allow compilation, otherwise all other memory is interpreted
+                if physical_address.physical_address >= 0x1FC0_0000 && physical_address.physical_address < 0x1FC0_07C0 {
+                    match self.cached_block_regions.get(&(physical_address.physical_address >> CACHED_BLOCK_REGION_SIZE)) {
+                        Some(region) => {
+                            match region.mapping[((physical_address.physical_address & CACHED_BLOCK_REGION_MASK) >> 2) as usize] {
+                                Some(cached_block_index) => {
+                                    let cached_block = &region.blocks[cached_block_index];
+                                    return Ok(CachedBlockStatus::Cached(cached_block));
+                                },
+
+                                // Region exists, but exact address isn't compiled yet
+                                None => {
+                                    return Ok(CachedBlockStatus::NotCached);
+                                }
+                            }
+                        },
+
+                        // Region doesn't exist, but can be compiled
+                        None => {
+                            return Ok(CachedBlockStatus::NotCached);
+                        },
+                    }
+                } else {
+                    return Ok(CachedBlockStatus::Uncompilable);
+                }
+            }
+        }
+
+        // fallback to interpreter
+        Ok(CachedBlockStatus::Uncompilable)
+    }
+
+    // run the JIT core, return the number of cycles actually ran
+    pub fn run_for(&mut self, max_cycles: u64) -> Result<u64, InstructionFault> {
+        // TODO: accumulate steps run
+        //
+        // TODO: accumulate Cop0_Count and trigger timer interrupt
+        // calculate amount to increment based on max_cycles?
+        //
+        // TODO: Decrement Random
+        // calculate change based on max_cycles?
+        //
+        // TODO: Catch PC address and TLB exceptions
+
+        // self.next_instruction_pc contains the address of code we need to be executing _now_
+        //let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+        //let entry_point = ops.offset();
+        //dynasm!(ops
+        //    ; .arch x64
+        //    ; xor rdx, rdx
+        //    ; mov rax, QWORD 0x7fefabab_12125050i64 as _
+        //    ; ret
+        //);
+
+        //let buf = ops.finalize().unwrap();
+        //let do_it: extern "win64" fn() -> i64 = unsafe { std::mem::transmute(buf.ptr(entry_point)) };
+        //let v = do_it();
+        //println!("we're alive: ${:016X}", v);
+        trace!(target: "CPU", "run_for started at ${:08X}", self.next_instruction_pc as u32);
+
+        let mut cycles_ran = 0;
+        while cycles_ran < max_cycles {
+            match self.lookup_cached_block(self.next_instruction_pc)? {
+                CachedBlockStatus::NotCached => {
+                    trace!(target: "CPU", "target ${:08X} not found in cache, compiling", self.next_instruction_pc as u32);
+                    let compiled_block = self.build_block()?;
+                    println!("rt={}, gpr[{}]=${:016X}", self.inst.rt, self.inst.rt, self.gpr[self.inst.rt as usize]);
+                    cycles_ran += self.run_block(&compiled_block)?;
+                    println!("rt={}, gpr[{}]=${:016X}, cycles_ran={}", 9, 9, self.gpr[9], cycles_ran);
+                },
+                _ => todo!(),
+            }
+        }
+
+        Ok(cycles_ran)
+    }
+
+    // compile a block of code starting at self.next_instruction_pc
+    fn build_block(&mut self) -> Result<CompiledBlock, InstructionFault> {
+        let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
+        let start_address = self.next_instruction_pc;
+
+        let entry_point = assembler.offset();
+
+        // reset register states
+        self.jit_reg_states = [JitRegState::default(); 32];
+
+        // TODO: prologue
+        // Save r_ registers, and load values into s_ storage
+        // currently 0x10 bytes are reserved but we only use 0x04
+        // an extra 0x08 is added for alignment for function calls
+        letsgo!(assembler
+            ; int3
+            ; push r_gpr
+            ; push r_cp0gpr
+            ; push r_cpu
+            ; mov r_cpu, QWORD self as *mut Self as _
+            ; mov r_gpr, QWORD self.gpr.as_mut_ptr() as _
+            ; mov r_cp0gpr, QWORD self.cp0gpr.as_mut_ptr() as _
+            ; sub rsp, BYTE 0x10 // setup the stack so function calls are aligned
+                                 // since we pushed 0x18 bytes rsp should be 0x10 aligned now
+            ; mov DWORD [rsp+s_cycle_count], DWORD 0 as _
+        );
+
+        // TODO: jump table
+
+        // TODO: instructions
+        let mut done_compiling = false;
+        while !done_compiling {
+            // setup self.inst
+            self.decode_instruction(self.next_instruction);
+
+            // next instruction prefetch TODO: abstract out the match block from step() instead of unwrap()
+            self.next_instruction = self.read_u32(self.pc as usize).unwrap();
+
+            // update and increment PC (perhaps this should also be part of next instruction prefetch)
+            self.current_instruction_pc = self.next_instruction_pc;
+            self.next_instruction_pc = self.pc;
+            self.pc += 4;
+
+            // TODO per-instruction prologue
+            //letsgo!(assembler
+            //    ; mov DWORD [rsp + s_inst], self.inst.v as _ // save current instruction opcode
+            //);
+
+            // compile the instruction
+            match self.compile_instruction_table[self.inst.op as usize](self, &mut assembler) {
+                CompileInstructionResult::Continue => {
+                },
+
+                CompileInstructionResult::Stop => {
+                    done_compiling = true;
+                },
+            }
+
+            // TODO post-instruction prologue
+            letsgo!(assembler
+                ; inc DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
+            )
+        }
+
+        // TODO: so fucking much
+
+        // TODO: dump out constant registers
+        for i in 1..32 {
+            letssave!(self, assembler, i as usize);
+        }
+
+        // TODO: epilog
+        // Restore the stack in reverse order and set return value in rax
+        letsgo!(assembler
+            ; mov eax, DWORD [rsp+s_cycle_count]
+            ; add rsp, BYTE 0x10
+            ; pop r_cpu
+            ; pop r_cp0gpr
+            ; pop r_gpr
+            ; ret
+        );
+
+        // TODO: convert to CompiledBlock
+        let compiled_block = CompiledBlock {
+            start_address: start_address,
+            entry_point: entry_point,
+            code_buffer: assembler.finalize().unwrap(),
+        };
+        
+        Ok(compiled_block)
+    }
+
+    // return number of instructions executed
+    fn run_block(&mut self, compiled_block: &CompiledBlock) -> Result<u64, InstructionFault> {
+        // place &self into rax
+        let call_block: extern "win64" fn() -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        match call_block() {
+            i if i >= 0 => Ok(i as u64),
+            i => { // i < 0 indicates error
+                todo!("execution error code: {}", i);
+            },
+        }
+    }
+
+    #[inline]
+    fn decode_instruction(&mut self, inst: u32) {
+        self.inst.v = inst;
+
+        // instruction decode
+        self.inst.op         = inst >> 26;
+        self.inst.rs         = ((inst >> 21) & 0x1F) as usize;
+        self.inst.rt         = ((inst >> 16) & 0x1F) as usize;
+        self.inst.rd         = ((inst >> 11) & 0x1F) as usize;
+        self.inst.imm        = (inst & 0xFFFF) as u64;
+        self.inst.signed_imm = (self.inst.imm as i16) as u64;
+        self.inst.target     = inst & 0x3FFFFFF;
+        self.inst.sa         = (inst >> 6) & 0x1F;
+    }
+
+    // interpret a single instruction
     pub fn step(&mut self) -> Result<(), InstructionFault> {
         self.num_steps += 1;
 
@@ -897,19 +1274,8 @@ impl Cpu {
             return self.address_exception(self.pc, false);
         }
 
-        // current instruction
-        let inst = self.next_instruction;
-        self.inst.v = inst;
-
-        // instruction decode
-        self.inst.op         = inst >> 26;
-        self.inst.rs         = ((inst >> 21) & 0x1F) as usize;
-        self.inst.rt         = ((inst >> 16) & 0x1F) as usize;
-        self.inst.rd         = ((inst >> 11) & 0x1F) as usize;
-        self.inst.imm        = (inst & 0xFFFF) as u64;
-        self.inst.signed_imm = (self.inst.imm as i16) as u64;
-        self.inst.target     = inst & 0x3FFFFFF;
-        self.inst.sa         = (inst >> 6) & 0x1F;
+        // current instruction decode
+        self.decode_instruction(self.next_instruction);
 
         // next instruction prefetch. we need to catch TLB misses
         self.next_instruction = match self.read_u32(self.pc as usize) {
@@ -1044,7 +1410,7 @@ impl Cpu {
                 // on error, restore the previous instruction since it didn't complete
                 self.pc -= 4;
                 self.next_instruction_pc = self.current_instruction_pc;
-                self.next_instruction = inst;
+                self.next_instruction = self.inst.v;
                 result
             },
         };
@@ -1066,8 +1432,13 @@ impl Cpu {
     }
 
     fn inst_unknown(&mut self) -> Result<(), InstructionFault> {
-        error!(target: "CPU", "unimplemented function ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        error!(target: "CPU", "unimplemented instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
         Err(InstructionFault::Unimplemented)
+    }
+
+    fn build_inst_unknown(&mut self, _: &mut Assembler) -> CompileInstructionResult {
+        error!(target: "CPU", "unimplemented instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        todo!();
     }
 
     fn inst_addi(&mut self) -> Result<(), InstructionFault> {
@@ -1427,6 +1798,179 @@ impl Cpu {
         Ok(())
     }
 
+    unsafe extern "win64" fn inst_cop0_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
+        let cpu = { &mut *cpu };
+        // we're running inside a compiled block so self.inst isn't being used, we
+        // can safely destroy it and call into rust code
+        cpu.decode_instruction(inst);
+        match cpu.inst_cop0() {
+            Ok(_) => 0,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("inst_cop0 error = {:?}", err);
+            }
+        }
+    }
+
+    // convert into inst_cop at some point
+    // all the cop should implement a common cop trait (mfc/mtc/ctc/etc)
+    fn build_inst_cop0(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        let cop0_op = (self.inst.v >> 21) & 0x1F;
+        match cop0_op {
+            0b00_000 => { // MFC
+                //self.gpr[self.inst.rt] = (match self.inst.rd {
+                //    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                //        self.cp0gpr_latch
+                //    },
+
+                //    _ => self.cp0gpr[self.inst.rd],
+                //} as i32) as u64;
+                todo!()
+            },
+
+            0b00_001 => { // DMFC
+                //self.gpr[self.inst.rt] = match self.inst.rd {
+                //    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                //        self.cp0gpr_latch
+                //    },
+
+                //    _ => self.cp0gpr[self.inst.rd],
+                //};
+                todo!()
+            },
+
+            0b00_100 => { // MTC
+                println!("->mtc0 c{}, r{}", self.inst.rd, self.inst.rt);
+                // if the source register is constant we need to put it into rt before calling inst_cop0_bridge
+                // otherwise, rt already contains the value
+                letssave!(self, assembler, self.inst.rt);
+
+                // prepare arg1 opcode
+                letsgo!(assembler
+                    ; mov edx, DWORD self.inst.v as _
+                );
+
+                // call self.inst_cop0_bridge(Cpu, inst)
+                letscall!(assembler, Cpu::inst_cop0_bridge);
+
+                return CompileInstructionResult::Continue;
+
+                //.// Two options: we can keep r_cpu (self) in a register or we can skip
+                //.// that can use an extra instruction. TODO: what's better?
+                //.// We use a register (r_cpu) for access that may be generally uncommon
+                //.// Option 1:
+                //.let cp0gpr_latch_offset = offset_of!(Cpu, cp0gpr_latch) as i32;
+                //.letsgo!(assembler
+                //.    ; movsxd v_tmp, DWORD [r_gpr + (self.inst.rt*8) as i32] // sign-extend from DWORD to QWORD
+                //.    ; mov QWORD [r_cpu + cp0gpr_latch_offset], v_tmp        // latch value for unused register reads
+                //.);
+                //.// Option 2:
+                //.//letsgo!(assembler
+                //.//    ; movsxd v_tmp, DWORD [r_gpr + (self.inst.rt*8) as i32] // sign-extend from DWORD to QWORD
+                //.//    ; mov r9, QWORD &mut self.cp0gpr_latch as *mut u64 as _
+                //.//    ; mov QWORD [r9], v_tmp        // latch value for unused register reads
+                //.//);
+
+                //.self.build_mask_cp0_register(assembler, self.inst.rd);
+
+                //.letsgo!(assembler
+                //.    ; mov QWORD [r_cp0gpr + (self.inst.rd*8) as i32], v_tmp
+                //.);
+            },
+
+            0b00_101 => { // DMTC
+                //let val = self.gpr[self.inst.rt];
+
+                //// save write value for unused register reads
+                //self.cp0gpr_latch = val;
+
+                //self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
+                todo!()
+            },
+
+            0b10_000..=0b11_111 => {
+                let special = self.inst.v & 0x3F;
+                match special {
+                    0b000_001 => { // tlbr
+                        //let tlb = &self.tlb[(self.cp0gpr[Cop0_Index] & 0x1F) as usize];
+                        //let g = (tlb.entry_hi >> 12) & 0x01;
+                        //self.cp0gpr[Cop0_PageMask] = tlb.page_mask;
+                        //self.cp0gpr[Cop0_EntryHi]  = tlb.entry_hi & !(0x1000 | tlb.page_mask);
+                        //self.cp0gpr[Cop0_EntryLo1] = tlb.entry_lo1 | g;
+                        //self.cp0gpr[Cop0_EntryLo0] = tlb.entry_lo0 | g;
+                        ////info!(target: "CPU", "COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        ////            self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        todo!()
+                    },
+
+                    0b000_010 => { // tlbwi
+                        ////info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        ////            self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        //self.set_tlb_entry(self.cp0gpr[Cop0_Index] & 0x1F);
+                        todo!()
+                    },
+
+                    0b000_110 => { // tlbwr
+                        ////info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                        ////            self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        //self.set_tlb_entry(self.cp0gpr[Cop0_Random] & 0x1F);
+                        todo!()
+                    },
+
+                    0b001_000 => { // tlbp
+                        ////info!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}",
+                        ////            self.cp0gpr[Cop0_EntryHi]);
+                        //self.cp0gpr[Cop0_Index] = 0x8000_0000;
+                        //let entry_hi = self.cp0gpr[Cop0_EntryHi];
+                        //let asid = entry_hi & 0xFF;
+                        //for i in 0..32 {
+                        //    let tlb = &self.tlb[i];
+
+                        //    // if ASID matches or G is set, check this TLB entry
+                        //    if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
+
+                        //    // region must match
+                        //    if ((tlb.entry_hi ^ entry_hi) & 0xC000_0000_0000_0000) != 0 { continue; }
+
+                        //    // compare only VPN2 with the inverse of page mask
+                        //    let tlb_vpn = (tlb.entry_hi & 0xFF_FFFF_E000) & !tlb.page_mask;
+                        //    let ehi_vpn = (entry_hi & 0xFF_FFFF_E000) & !tlb.page_mask;
+
+                        //    if tlb_vpn == ehi_vpn {
+                        //        self.cp0gpr[Cop0_Index] = i as u64;
+                        //        break;
+                        //    }
+                        //}
+                        todo!()
+                    },
+
+                    0b011_000 => { // eret
+                        //assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
+
+                        //// If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
+                        //// ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
+                        //if (self.cp0gpr[Cop0_Status] & 0x04) != 0 {
+                        //    panic!("COP0: error bit set"); // TODO
+                        //} else {
+                        //    self.pc = self.cp0gpr[Cop0_EPC];
+                        //    self.cp0gpr[Cop0_Status] &= !0x02;
+                        //}
+
+                        //self.prefetch()?;
+
+                        //// clear LLbit so that SC writes fail
+                        //self.llbit = false;
+                        todo!()
+                    },
+
+                    _ => panic!("COP0: unknown cp0 function 0b{:03b}_{:03b}", special >> 3, special & 0x07),
+                }
+            },
+
+            _ => panic!("CPU: unknown cop0 op: 0b{:02b}_{:03b} (0b{:032b})", cop0_op >> 3, cop0_op & 0x07, self.inst.v)
+        }
+    }
+
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
         // if the co-processor isn't enabled, generate an exception
         if (self.cp0gpr[Cop0_Status] & 0x4000_0000) == 0 {
@@ -1716,10 +2260,19 @@ impl Cpu {
         Ok(())
     }
 
-
     fn inst_lui(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.inst.signed_imm << 16;
         Ok(())
+    }
+
+    fn build_inst_lui(&mut self, _: &mut Assembler) -> CompileInstructionResult {
+        println!("->lui r{}, ${:04X}", self.inst.rt, self.inst.signed_imm as u16);
+
+        // lui converts the register to constant value, which we can track
+        self.jit_reg_states[self.inst.rt].const_value = Some(self.inst.signed_imm << 16);
+        self.jit_reg_states[self.inst.rt].dirty = true;
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_lw(&mut self) -> Result<(), InstructionFault> {
@@ -1735,6 +2288,56 @@ impl Cpu {
             }
         }
         Ok(())
+    }
+
+    fn build_inst_lw(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("->lw r{}, ${:04X}(r{})", self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        if let Some(v) = self.jit_reg_states[self.inst.rs].const_value {
+            // address being read from is constant so we can the offset now
+            let address = v.wrapping_add(self.inst.signed_imm);
+            if (address & 0x03) != 0 {
+                // address exception
+                todo!();
+            } else {
+                // can read
+                if address as i32 as i64 == address as i64 { // make use of cpu sign extension
+                    letsgo!(assembler
+                        ; mov rdx, DWORD address as u32 as _
+                    );
+                } else {
+                    letsgo!(assembler
+                        ; mov rdx, QWORD address as _
+                    );
+                }
+            }
+        } else {
+            // address is dynamic
+            letsgo!(assembler
+                ; mov rdx, QWORD [r_gpr + (self.inst.rs * 8) as i32] // add signed_imm (sign-extended from 32-bits) to source register
+                ; add rdx, DWORD self.inst.signed_imm as _           // .
+                ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
+                ; and v_tmp, BYTE 0x03       // .
+                ; jz >no_exc                 // .
+                ; int3           // call self.address_exception
+                ; int3           // end current run_block
+                ;no_exc:
+            );
+
+        }
+
+        // rdx contains address
+        letscall!(assembler, Cpu::read_u32_bridge);
+
+        // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
+        letsgo!(assembler
+            ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
+            ; mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+        );
+
+        // rt is no longer const
+        self.jit_reg_states[self.inst.rt].const_value = None;
+
+        CompileInstructionResult::Stop
     }
 
     fn inst_lwu(&mut self) -> Result<(), InstructionFault> {
@@ -1822,6 +2425,30 @@ impl Cpu {
     fn inst_ori(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] | self.inst.imm;
         Ok(())
+    }
+
+    fn build_inst_ori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("->ori r{}, r{}, 0x{:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+
+        // if rs is constant, we can mark rt as constant. otherwise, rt is not
+        if let Some(v) = self.jit_reg_states[self.inst.rs as usize].const_value {
+            letsgo!(assembler
+                ; mov v_tmp, QWORD 0xABCD_ABCD_1234_1234u64 as _
+                ; mov v_tmp_32, DWORD 0x0000_5555
+            );
+            self.jit_reg_states[self.inst.rt as usize].const_value = Some(v | self.inst.imm);
+            self.jit_reg_states[self.inst.rt as usize].dirty = true;
+        } else {
+            letsgo!(assembler
+                ; mov v_tmp_32, DWORD self.inst.imm as _ // zeroes out the upper dword of v_tmp
+                ; or v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]
+                ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp
+            );
+            // mark dest register as non-const
+            self.jit_reg_states[self.inst.rt as usize].const_value = None;
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_regimm(&mut self) -> Result<(), InstructionFault> {

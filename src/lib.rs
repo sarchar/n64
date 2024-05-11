@@ -156,6 +156,7 @@ pub struct Tweakables {
 // Settings -- normal things people may want to configure (like antialiasing, audio playback rate, etc.)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Settings {
+    cpu_interpreter_only: bool,
 }
 
 // Collection of thread-safe channels for the front end to communicate with the emulating system
@@ -270,13 +271,22 @@ impl System {
     }
 
     #[inline(always)]
-    pub fn step(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
+    pub fn run_for(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
         let mut cycles_ran = 0;
-        while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
-            self.cpu.step()?;
-            cycles_ran += 1;
-            self.comms.total_cpu_steps.inc();
+
+        if self.comms.settings.read().unwrap().cpu_interpreter_only {
+            while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
+                self.cpu.step()?;
+                cycles_ran += 1;
+            }
+        } else {
+            if !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
+                cycles_ran = self.cpu.run_for(cpu_cycles)?;
+            }
         }
+
+        // accumulate total cycles ran
+        self.comms.total_cpu_steps.add(cycles_ran as usize);
 
         // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
         self.comms.break_cpu_cycles.store(false, Ordering::SeqCst);
@@ -312,7 +322,7 @@ impl System {
     pub fn run(&mut self) {
         loop { 
             let num_cycles = self.rcp.borrow().calculate_free_cycles();
-            let _ = self.step(num_cycles); 
+            let _ = self.run_for(num_cycles); 
         }
     }
 

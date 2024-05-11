@@ -3,6 +3,10 @@ name = "n64"
 version = "0.0.1"
 edition = "2021"
 
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
 [features]
 default = ["gui", "nodebuglogging"]
 gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image", "cgmath"]
@@ -94,6 +98,9 @@ default-features = false
 
 [dependencies.samplerate]
 version = "0.2.4"
+
+[dependencies.dynasmrt]
+version = "2.0.0"
 
 [build-dependencies.cc]
 version = "1.0"

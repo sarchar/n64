@@ -260,7 +260,7 @@ impl Debugger {
             //println!("${:08X}: {}", address, inst);
 
             // Break loop on any instruction error or memory access
-            if let Err(_) = self.system.step(1) {
+            if let Err(_) = self.system.run_for(1) {
                 break;
             }
 
@@ -305,7 +305,7 @@ impl Debugger {
         self.cpu_running.store(true, Ordering::SeqCst);
         while count > 0 && self.cpu_running.load(Ordering::SeqCst) {
             // Break loop on any instruction error
-            if let Err(_) = self.system.step(1) {
+            if let Err(_) = self.system.run_for(1) {
                 break;
             }
 
