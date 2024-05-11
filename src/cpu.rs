@@ -111,7 +111,7 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-const CACHED_BLOCK_REGION_SIZE: u32 = 8+2; // 256 instructions max per block (+2 => multiply by sizeof(u32))
+const CACHED_BLOCK_REGION_SIZE: u32 = 2+8; // 256 instructions max per block (+2 => multiply by sizeof(u32))
 const CACHED_BLOCK_REGION_MASK: u64 = (1u64 << CACHED_BLOCK_REGION_SIZE) - 1;
 
 struct CompiledBlockRegion {
@@ -173,6 +173,7 @@ macro_rules! letsgo {
             ; .alias r_gpr, rbx
             ; .alias r_cp0gpr, rdi
             ; .alias r_cpu, rsi
+            ; .alias r_cond, r12
             ; .alias v_tmp, r10
             ; .alias v_tmp_32, r10d
             ; .alias v_tmp2, r11
@@ -184,6 +185,15 @@ macro_rules! letsgo {
 // stack storage offsets
 const s_cycle_count: i32 = 0x00;  // number of r4300 instructions executed
 const _s_next: i32 = 0x04; // next rsp offset
+
+// trigger a debugger breakpoint
+macro_rules! letsbreak {
+    ($ops:ident) => {
+        letsgo!($ops
+            ; int3
+        );
+    }
+}
 
 // use letscall! to call external "win64" functions
 // this call uses the first two parameters (Cpu, instruction) for all calls
@@ -220,6 +230,28 @@ macro_rules! letssave {
                 }
                 $self.jit_reg_states[$reg].dirty = false;
             }
+        }
+    }
+}
+
+// place a u64 constant value into the specified register using as few instructions/bytes as possible
+// signed ints smaller than u64 are sign-extended
+// need to pass both the 64-bit and 32-bit register names
+macro_rules! letsset {
+    ($ops:ident, $reg64:ident, $reg32:ident, $value:expr) => {
+        let v = $value as u64;
+        if v == 0 {
+            letsgo!($ops
+                ; xor $reg64, $reg64
+            );
+        } else if (v & 0xFFFF_FFFF_0000_0000) == 0u64 {
+            letsgo!($ops
+                ; mov $reg32, DWORD v as i32 as _
+            );
+        } else {
+            letsgo!($ops
+                ; mov $reg64, QWORD v as _
+            );
         }
     }
 }
@@ -280,6 +312,9 @@ pub struct Cpu {
     cached_block_regions: HashMap<u64, CompiledBlockRegion>,
     compile_instruction_table: [CpuInstructionBuilder; 64],
     jit_reg_states: [JitRegState; 32],
+    jit_block_start_pc: u64,
+    jit_conditional_branch: Option<usize>,
+    jit_fixups: Vec<(usize, usize)>,
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -379,8 +414,8 @@ impl Cpu {
             compile_instruction_table: [ 
                //  _000                 _001                     _010                     _011                     _100                     _101                     _110                     _111
     /* 000_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 001_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
-    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 001_ */  Cpu::build_inst_unknown, Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
@@ -389,6 +424,9 @@ impl Cpu {
             ],
 
             jit_reg_states: [JitRegState::default(); 32],
+            jit_block_start_pc: 0,
+            jit_conditional_branch: None,
+            jit_fixups: Vec::new(),
         };
         
         let _ = cpu.reset(false);
@@ -1124,29 +1162,57 @@ impl Cpu {
 
         // reset register states
         self.jit_reg_states = [JitRegState::default(); 32];
+        self.jit_reg_states[0].const_value = Some(0);
+        self.jit_reg_states[0].dirty = false;
+
+        // set global block start address to the correct pc
+        self.jit_block_start_pc = self.next_instruction_pc;
+
+        // reset state that belongs to this block
+        self.jit_conditional_branch = None;
+        self.jit_fixups.clear();
+
+        // break before executing
+        //letsbreak!(assembler);
 
         // TODO: prologue
         // Save r_ registers, and load values into s_ storage
         // currently 0x10 bytes are reserved but we only use 0x04
         // an extra 0x08 is added for alignment for function calls
         letsgo!(assembler
-            ; int3
             ; push r_gpr
             ; push r_cp0gpr
             ; push r_cpu
+            ; push r_cond
             ; mov r_cpu, QWORD self as *mut Self as _
             ; mov r_gpr, QWORD self.gpr.as_mut_ptr() as _
             ; mov r_cp0gpr, QWORD self.cp0gpr.as_mut_ptr() as _
-            ; sub rsp, BYTE 0x10 // setup the stack so function calls are aligned
-                                 // since we pushed 0x18 bytes rsp should be 0x10 aligned now
+            ; sub rsp, BYTE 0x18 // setup the stack so function calls are aligned
+                                 // since we pushed 0x20 bytes rsp should be 0x10 aligned now
             ; mov DWORD [rsp+s_cycle_count], DWORD 0 as _
         );
 
         // TODO: jump table
+        let mut instruction_start_offsets = [0usize; 1 << (CACHED_BLOCK_REGION_SIZE - 2)];
 
-        // TODO: instructions
+        let block_start_offset = assembler.offset();
+        letsgo!(assembler
+            ;block_start:
+            ; jmp >forward
+        );
+        let jump_table_start = assembler.offset();
+        letsgo!(assembler
+            ; .qword 0
+            ;forward:
+            ; mov v_tmp, QWORD 0x1234u64 as _
+        );
+
+        // loop over instructions, compiling one at a time
+        let mut instruction_index = 0usize;
+        let instruction_count = 1usize << (CACHED_BLOCK_REGION_SIZE - 2);
+
         let mut done_compiling = false;
-        while !done_compiling {
+        while !done_compiling && instruction_index < instruction_count {
             // setup self.inst
             self.decode_instruction(self.next_instruction);
 
@@ -1157,6 +1223,14 @@ impl Cpu {
             self.current_instruction_pc = self.next_instruction_pc;
             self.next_instruction_pc = self.pc;
             self.pc += 4;
+
+            // save whether there's a branch after this instruction (delay slot)
+            let jit_conditional_branch = self.jit_conditional_branch;
+            self.jit_conditional_branch = None;
+
+            // set pointer to instruction offset
+            instruction_start_offsets[instruction_index] = assembler.offset().0;
+            instruction_index += 1;
 
             // TODO per-instruction prologue
             //letsgo!(assembler
@@ -1176,7 +1250,32 @@ impl Cpu {
             // TODO post-instruction prologue
             letsgo!(assembler
                 ; inc DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
-            )
+            );
+
+            if let Some(branch_offset) = jit_conditional_branch {
+                // for now, catch if there's a branch in the delay slot
+                assert!(self.jit_conditional_branch.is_none()); // TODO delay slot set jit_conditional_branch
+
+                letsgo!(assembler
+                    ; dec r_cond          // test if r_cond is 1
+                    ; jnz >no_branch      // and don't branch if it's not
+                );
+
+                // track the address for the jump that needs to be fixed up
+                // add 2 for the "mov rax, QWORD .." instruction encoding
+                let fixup_offset = assembler.offset().0 + 2;
+
+                // TODO optimization convert to JMP rel32 and compute the relative address in the fixup
+                // TODO might want a flags field in the git_fixups entries
+                letsgo!(assembler
+                    ;branch:              // otherwise, perform a branch to branch_offset
+                    ; mov rax, QWORD 0u64 as _
+                    ; jmp rax
+                    ;no_branch:
+                );
+
+                self.jit_fixups.push((branch_offset, fixup_offset));
+            }
         }
 
         // TODO: so fucking much
@@ -1190,18 +1289,39 @@ impl Cpu {
         // Restore the stack in reverse order and set return value in rax
         letsgo!(assembler
             ; mov eax, DWORD [rsp+s_cycle_count]
-            ; add rsp, BYTE 0x10
+            ; add rsp, BYTE 0x18
+            ; pop r_cond
             ; pop r_cpu
             ; pop r_cp0gpr
             ; pop r_gpr
             ; ret
         );
 
+        let executable_buffer = {
+            let executable_buffer = assembler.finalize().unwrap();
+            let mut memory_ptr = executable_buffer.make_mut().unwrap();
+            // calculate the offset from the start of the buffer
+            let block_start_address = (block_start_offset.0) + (memory_ptr.as_ptr() as *const _ as usize);
+            (*memory_ptr)[jump_table_start.0..jump_table_start.0+8].copy_from_slice(&block_start_address.to_le_bytes());
+
+            // fixup jumps
+            for &(branch_offset, fixup_offset) in &self.jit_fixups {
+                // compute absolute jump address
+                let mut target_instruction_offset = instruction_start_offsets[branch_offset >> 2];
+                target_instruction_offset += memory_ptr.as_ptr() as *const _ as usize;
+
+                // write address to fixup offset
+                (*memory_ptr)[fixup_offset..fixup_offset+8].copy_from_slice(&target_instruction_offset.to_le_bytes());
+            }
+
+            memory_ptr.make_exec().unwrap()
+        };
+
         // TODO: convert to CompiledBlock
         let compiled_block = CompiledBlock {
             start_address: start_address,
             entry_point: entry_point,
-            code_buffer: assembler.finalize().unwrap(),
+            code_buffer: executable_buffer,
         };
         
         Ok(compiled_block)
@@ -1462,9 +1582,65 @@ impl Cpu {
         Ok(())
     }
 
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    fn build_inst_addiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("->addiu r{}, r{}, ${:04X}", self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
+        if let Some(v) = self.jit_reg_states[self.inst.rs].const_value {
+            // we can set rt to constant
+            self.jit_reg_states[self.inst.rt].const_value = Some(((v as u32).wrapping_add(self.inst.signed_imm as u32) as i32) as u64);
+            self.jit_reg_states[self.inst.rt].dirty = true;
+        } else {
+            todo!("this code path isn't tested but should work");
+            letsgo!(assembler
+                ; mov v_tmp_32, DWORD [r_gpr + (self.inst.rs*8) as i32]      // put rs into v_tmp
+                ; add v_tmp_32, DWORD self.inst.signed_imm as u32 as _       // 32-bit add signed_imm with overflow 
+                ; movsxd v_tmp2, v_tmp_32                                    // sign-extend v_tmp into rt
+                ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp2        // .
+            );
+            self.jit_reg_states[self.inst.rt].const_value = None;
+        }
+        CompileInstructionResult::Stop
+    }
+
     fn inst_andi(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] & self.inst.imm;
         Ok(())
+    }
+
+    #[allow(unreachable_code)] // remove after all code paths have been tested
+    #[allow(unused_variables)] // remove after all code paths have been tested
+    fn build_inst_andi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("->andi r{}, r{}, 0x{:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
+
+        // if destination register is 0, this is a nop
+        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
+
+        // if rs is constant, we can mark rt as constant. otherwise, rt is not
+        if let Some(v) = self.jit_reg_states[self.inst.rs as usize].const_value {
+            todo!("this code path isn't tested but should work");
+            self.jit_reg_states[self.inst.rt as usize].const_value = Some(v & self.inst.imm);
+            self.jit_reg_states[self.inst.rt as usize].dirty = true;
+        } else {
+            if self.inst.rs == self.inst.rt { // can save an instruction when the operands are the same register
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; and QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp  // and rs with self.inst.imm, store result
+                );
+            } else {
+                todo!("this code path isn't tested but should work");
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; and v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]  // and rs with self.inst.imm
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp  // store result in rt
+                );
+            }
+
+            // mark dest register as non-const
+            self.jit_reg_states[self.inst.rt as usize].const_value = None;
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_cop(&mut self) -> Result<(), InstructionFault> {
@@ -2043,6 +2219,65 @@ impl Cpu {
         self.branch_likely(condition)
     }
 
+    fn build_inst_beql(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("->beql r{}, r{}, ${:08X}", self.inst.rs, self.inst.rt, (self.inst.signed_imm << 2) as u32);
+        let rs_is_const = self.jit_reg_states[self.inst.rs].const_value.is_some();
+        let rt_is_const = self.jit_reg_states[self.inst.rt].const_value.is_some();
+
+        // compute target jump and determine if the destination is within the current block
+        // (self.pc is pointing at the delay slot)
+        let dest = (self.pc - 4).wrapping_add((self.inst.signed_imm as u64) << 2);
+        println!("conditional branch to ${:08X}", dest as u32);
+        let dest_offs = dest.wrapping_sub(self.jit_block_start_pc);
+        println!("dest offset in block: ${:04X}", dest_offs as u16);
+
+        // compute current instruction offset to determine if branch target is before or after this instruction
+        let cur_offs = self.current_instruction_pc.wrapping_sub(self.jit_block_start_pc);
+        if dest_offs < cur_offs {
+            println!("dest is already compiled");
+        } else if dest_offs == cur_offs {
+            todo!("branch to self");
+        } else {
+            todo!("branch to not-yet-compiled code");
+        }
+
+        match (rs_is_const, rt_is_const) {
+            (true, true) => {
+                todo!();
+            },
+
+            (true, false) => {
+                todo!();
+            },
+
+            (false, true) => {
+                let rt_const = self.jit_reg_states[self.inst.rt].const_value.unwrap();
+                // if value in rs == value in rt, skip the delay slot and continue executing
+                // otherwise, execute delay slot and branch
+
+                letsbreak!(assembler);
+
+                letsset!(assembler, v_tmp, v_tmp_32, rt_const); // put rt into v_tmp
+                letsgo!(assembler
+                    ; xor r_cond, r_cond
+                    ; cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+                    ; jne >dont_branch
+                    ; inc r_cond
+                    ;dont_branch:
+                );
+
+                self.jit_conditional_branch = Some(dest_offs as usize);
+                self.next_is_delay_slot = true;
+            },
+
+            (false, false) => {
+                todo!();
+            },
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     fn inst_bgtz(&mut self) -> Result<(), InstructionFault> {
         let condition = (self.gpr[self.inst.rs] as i64) > 0;
         self.branch(condition);
@@ -2265,12 +2500,18 @@ impl Cpu {
         Ok(())
     }
 
-    fn build_inst_lui(&mut self, _: &mut Assembler) -> CompileInstructionResult {
+    fn build_inst_lui(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("->lui r{}, ${:04X}", self.inst.rt, self.inst.signed_imm as u16);
+
+        // if destination register is 0, this is a nop
+        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
 
         // lui converts the register to constant value, which we can track
         self.jit_reg_states[self.inst.rt].const_value = Some(self.inst.signed_imm << 16);
         self.jit_reg_states[self.inst.rt].dirty = true;
+        //letsgo!(assembler
+        //    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], DWORD (self.inst.signed_imm << 16) as u32 as _
+        //);
 
         CompileInstructionResult::Continue
     }
@@ -2292,6 +2533,7 @@ impl Cpu {
 
     fn build_inst_lw(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("->lw r{}, ${:04X}(r{})", self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
         if let Some(v) = self.jit_reg_states[self.inst.rs].const_value {
             // address being read from is constant so we can the offset now
             let address = v.wrapping_add(self.inst.signed_imm);
@@ -2328,6 +2570,9 @@ impl Cpu {
         // rdx contains address
         letscall!(assembler, Cpu::read_u32_bridge);
 
+        // if destination register is 0, we still do the read (above) but don't store the result
+        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
+
         // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
         letsgo!(assembler
             ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
@@ -2337,7 +2582,7 @@ impl Cpu {
         // rt is no longer const
         self.jit_reg_states[self.inst.rt].const_value = None;
 
-        CompileInstructionResult::Stop
+        CompileInstructionResult::Continue
     }
 
     fn inst_lwu(&mut self) -> Result<(), InstructionFault> {
@@ -2427,23 +2672,34 @@ impl Cpu {
         Ok(())
     }
 
+    #[allow(unreachable_code)] // remove after all code paths have been tested
+    #[allow(unused_variables)] // remove after all code paths have been tested
     fn build_inst_ori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("->ori r{}, r{}, 0x{:04X}", self.inst.rt, self.inst.rs, self.inst.imm);
 
+        // if destination register is 0, this is a nop
+        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
+
         // if rs is constant, we can mark rt as constant. otherwise, rt is not
         if let Some(v) = self.jit_reg_states[self.inst.rs as usize].const_value {
-            letsgo!(assembler
-                ; mov v_tmp, QWORD 0xABCD_ABCD_1234_1234u64 as _
-                ; mov v_tmp_32, DWORD 0x0000_5555
-            );
             self.jit_reg_states[self.inst.rt as usize].const_value = Some(v | self.inst.imm);
             self.jit_reg_states[self.inst.rt as usize].dirty = true;
         } else {
-            letsgo!(assembler
-                ; mov v_tmp_32, DWORD self.inst.imm as _ // zeroes out the upper dword of v_tmp
-                ; or v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]
-                ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp
-            );
+            if self.inst.rs == self.inst.rt { // can save an instruction when the operands are the same register
+                todo!("this code path isn't tested but should work");
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; or QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp   // or rs with self.inst.imm, store result
+                );
+            } else {
+                todo!("this code path isn't tested but should work");
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; or v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]   // or rs with self.inst.imm
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp  // store result in rt
+                );
+            }
+
             // mark dest register as non-const
             self.jit_reg_states[self.inst.rt as usize].const_value = None;
         }
