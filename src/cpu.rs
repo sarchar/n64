@@ -114,21 +114,14 @@ struct TlbEntry {
 const CACHED_BLOCK_REGION_SIZE: u32 = 2+8; // 256 instructions max per block (+2 => multiply by sizeof(u32))
 const CACHED_BLOCK_REGION_MASK: u64 = (1u64 << CACHED_BLOCK_REGION_SIZE) - 1;
 
-struct CompiledBlockRegion {
-    blocks: Vec<CompiledBlock>,
-    mapping: [Option<usize>; 1 << (CACHED_BLOCK_REGION_SIZE - 2)],
-}
-
-impl Default for CompiledBlockRegion {
-    fn default() -> Self {
-        Self {
-            blocks: Vec::new(),
-            mapping: [None; 1 << (CACHED_BLOCK_REGION_SIZE - 2)], 
-        }
-    }
+#[derive(Copy, Clone, Debug)]
+enum CachedBlockReference {
+    CachedBlock(u64),             // official reference to the block
+    AddressReference(usize, u64), // usize is an offset into the cache, u64 is a block id
 }
 
 struct CompiledBlock {
+    id: u64, // unique ID
     start_address: u64,
     entry_point: dynasmrt::AssemblyOffset,
     code_buffer: dynasmrt::mmap::ExecutableBuffer,
@@ -233,12 +226,13 @@ macro_rules! letsset {
     }
 }
 
-// The branch likely instructions only vary in their comparison, so this macro encapsulates all the
+// The branch and branch likely instructions only vary in their comparison, so this macro encapsulates all the
 // common code.  $not_cond needs to be the x64 instruction that would cause the branch NOT to be
 // taken.  I.e., for branch-if-equal, use JNE (jump if not equal).  The reason is that the negated
-// condition skips the instruction that sets the "should branch" flag to 1.
-macro_rules! build_branch_likely {
-    ($self:ident, $ops:ident, $cond_string:literal, $not_cond:ident) => {
+// condition skips the instruction that sets the "should branch" flag to 1.  Set is_likely to true
+// for the branch likely family
+macro_rules! build_branch {
+    ($self:ident, $ops:ident, $cond_string:literal, $not_cond:ident, $is_likely:expr) => {
         println!("${:08X}[{:5}]: {} r{}, r{}, ${:08X}", $self.current_instruction_pc as u32, $self.jit_current_offset, 
                  $cond_string, $self.inst.rs, $self.inst.rt, ($self.inst.signed_imm << 2) as u32);
 
@@ -270,7 +264,7 @@ macro_rules! build_branch_likely {
             ;skip_set_cond:
         );
 
-        $self.jit_conditional_branch = Some((dest_offs as usize, true));
+        $self.jit_conditional_branch = Some((dest_offs as usize, $is_likely as bool));
         $self.next_is_delay_slot = true;
     }
 }
@@ -312,7 +306,10 @@ pub struct Cpu {
     num_steps: u64,
 
     // JIT
-    cached_block_regions: HashMap<u64, CompiledBlockRegion>,
+    cached_blocks: HashMap<u64, CompiledBlock>,
+    pif_rom_cached_block_map: [Option<CachedBlockReference>; 0x800 >> 2],
+    next_block_id: u64,
+
     compile_instruction_table: [CpuInstructionBuilder; 64],
     jit_block_start_pc: u64,
     jit_conditional_branch: Option<(usize, bool)>, // branch_offset, is_branch_likely
@@ -412,11 +409,13 @@ impl Cpu {
             },
 
             // JIT
-            cached_block_regions: HashMap::new(),
+            cached_blocks: HashMap::new(),
+            pif_rom_cached_block_map: [None; 0x800 >> 2],
+            next_block_id: 0,
 
             compile_instruction_table: [ 
                //  _000                 _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_inst_unknown, Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
@@ -1093,25 +1092,50 @@ impl Cpu {
             } else {
                 // If we're in PIF-ROM, allow compilation, otherwise all other memory is interpreted
                 if physical_address.physical_address >= 0x1FC0_0000 && physical_address.physical_address < 0x1FC0_07C0 {
-                    match self.cached_block_regions.get(&(physical_address.physical_address >> CACHED_BLOCK_REGION_SIZE)) {
-                        Some(region) => {
-                            match region.mapping[((physical_address.physical_address & CACHED_BLOCK_REGION_MASK) >> 2) as usize] {
-                                Some(cached_block_index) => {
-                                    let cached_block = &region.blocks[cached_block_index];
+                    match self.pif_rom_cached_block_map[((physical_address.physical_address & 0x7FF) >> 2) as usize] {
+                        Some(reference) => {
+                            // might be valid
+                            match reference {
+                                // block is valid
+                                CachedBlockReference::CachedBlock(block_id) => {
+                                    // block must exist
+                                    let cached_block = self.cached_blocks.get(&block_id).unwrap();
                                     return Ok(CachedBlockStatus::Cached(cached_block));
                                 },
 
-                                // Region exists, but exact address isn't compiled yet
-                                None => {
-                                    return Ok(CachedBlockStatus::NotCached);
+                                // lookup offset and match block_id
+                                CachedBlockReference::AddressReference(offset, block_id_ref) => {
+                                    match self.pif_rom_cached_block_map[offset] {
+                                        Some(other_reference) => {
+                                            match other_reference {
+                                                CachedBlockReference::CachedBlock(block_id) => {
+                                                    // block id must exist because this is a CachedBlock
+                                                    let cached_block = self.cached_blocks.get(&block_id).unwrap();
+                                                    if cached_block.id == block_id_ref {
+                                                        return Ok(CachedBlockStatus::Cached(cached_block));
+                                                    }
+                                                    // not the matching block
+                                                    return Ok(CachedBlockStatus::NotCached);
+                                                },
+
+                                                // no indirect references
+                                                CachedBlockReference::AddressReference(_, _) => {
+                                                    return Ok(CachedBlockStatus::NotCached);
+                                                }
+                                            }
+                                        },
+                                        None => {
+                                            return Ok(CachedBlockStatus::NotCached);
+                                        }
+                                    }
                                 }
                             }
                         },
 
-                        // Region doesn't exist, but can be compiled
+                        // not found
                         None => {
                             return Ok(CachedBlockStatus::NotCached);
-                        },
+                        }
                     }
                 } else {
                     return Ok(CachedBlockStatus::Uncompilable);
@@ -1148,9 +1172,11 @@ impl Cpu {
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
                     trace!(target: "CPU", "target ${:08X} not found in cache, compiling", self.next_instruction_pc as u32);
-                    let compiled_block = self.build_block()?;
+                    let compiled_block_id = self.build_block()?;
+                    let compiled_block = self.cached_blocks.remove(&compiled_block_id).unwrap();
                     println!("rt={}, gpr[{}]=${:016X}", self.inst.rt, self.inst.rt, self.gpr[self.inst.rt as usize]);
                     cycles_ran += self.run_block(&compiled_block)?;
+                    self.cached_blocks.insert(compiled_block_id, compiled_block);
                     println!("rt={}, gpr[{}]=${:016X}, cycles_ran={}", 9, 9, self.gpr[9], cycles_ran);
                 },
                 _ => todo!(),
@@ -1161,7 +1187,7 @@ impl Cpu {
     }
 
     // compile a block of code starting at self.next_instruction_pc
-    fn build_block(&mut self) -> Result<CompiledBlock, InstructionFault> {
+    fn build_block(&mut self) -> Result<u64, InstructionFault> {
         let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
         let start_address = self.next_instruction_pc;
 
@@ -1169,10 +1195,14 @@ impl Cpu {
 
         // set global block start address to the correct pc
         self.jit_block_start_pc = self.next_instruction_pc;
+        let cache_map_offset = ((self.next_instruction_pc & 0x7FF) >> 2) as usize;
 
         // reset state that belongs to this block
         self.jit_conditional_branch = None;
         self.jit_fixups.clear();
+
+        let block_id = self.next_block_id;
+        self.next_block_id += 1;
 
         // break before executing
         //letsbreak!(assembler);
@@ -1225,6 +1255,10 @@ impl Cpu {
             self.current_instruction_pc = self.next_instruction_pc;
             self.next_instruction_pc = self.pc;
             self.pc += 4;
+
+            // update the block cache map
+            assert!(self.current_instruction_pc >= 0xBFC0_0000); //TODO: support RDRAM
+            self.pif_rom_cached_block_map[((self.current_instruction_pc & 0x7FF) >> 2) as usize] = Some(CachedBlockReference::AddressReference(cache_map_offset, block_id));
 
             // save whether there's a branch after this instruction (delay slot)
             let jit_conditional_branch = self.jit_conditional_branch;
@@ -1279,8 +1313,9 @@ impl Cpu {
                 if is_branch_likely {
                     // fall through to take the branch
                 } else {
-                    todo!("test when a non-branch_likely branch is implemented");
-                    println!("** checking branch condition:");
+                    //todo!("test when a non-branch_likely branch is implemented");
+                    done_compiling = true;
+                    println!("** checking normal branch condition:");
                     letsgo!(assembler
                         ; dec r_cond          // test if r_cond is 1
                         ; jnz >no_branch      // and don't branch if it's not
@@ -1340,12 +1375,17 @@ impl Cpu {
 
         // TODO: convert to CompiledBlock
         let compiled_block = CompiledBlock {
+            id: block_id,
             start_address: start_address,
             entry_point: entry_point,
             code_buffer: executable_buffer,
         };
-        
-        Ok(compiled_block)
+
+        // insert into block cache
+        self.cached_blocks.insert(block_id, compiled_block);
+        self.pif_rom_cached_block_map[cache_map_offset] = Some(CachedBlockReference::CachedBlock(block_id));
+
+        Ok(block_id)
     }
 
     // return number of instructions executed
@@ -1603,8 +1643,6 @@ impl Cpu {
         Ok(())
     }
 
-    #[allow(unreachable_code)]
-    #[allow(unused_variables)]
     fn build_inst_addiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("${:08X}[{:5}]: addiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
@@ -2230,7 +2268,7 @@ impl Cpu {
     }
 
     fn build_inst_beql(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        build_branch_likely!(self, assembler, "beql", jne);
+        build_branch!(self, assembler, "beql", jne, true);
         CompileInstructionResult::Continue
     }
 
@@ -2262,13 +2300,18 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_bne(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        build_branch!(self, assembler, "bne", je, false);
+        CompileInstructionResult::Continue
+    }
+
     fn inst_bnel(&mut self) -> Result<(), InstructionFault> {
         let condition = self.gpr[self.inst.rs] != self.gpr[self.inst.rt];
         self.branch_likely(condition)
     }
 
     fn build_inst_bnel(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        build_branch_likely!(self, assembler, "bnel", je);
+        build_branch!(self, assembler, "bnel", je, true);
         CompileInstructionResult::Continue
     }
 
