@@ -265,12 +265,12 @@ macro_rules! build_branch_likely {
             ; xor r_cond, r_cond                                      // clear r_cond
             ; mov v_tmp, QWORD [r_gpr + ($self.inst.rs * 8) as i32]   // compare gpr[rs] to gpr[rt]
             ; cmp v_tmp, QWORD [r_gpr + ($self.inst.rt * 8) as i32]   // .
-            ; $not_cond >dont_branch                                  // if not equal, don't set flag
+            ; $not_cond >skip_set_cond                                // if not equal, don't set flag
             ; inc r_cond                                              // otherwise set flag
-            ;dont_branch:
+            ;skip_set_cond:
         );
 
-        $self.jit_conditional_branch = Some(dest_offs as usize);
+        $self.jit_conditional_branch = Some((dest_offs as usize, true));
         $self.next_is_delay_slot = true;
     }
 }
@@ -315,7 +315,7 @@ pub struct Cpu {
     cached_block_regions: HashMap<u64, CompiledBlockRegion>,
     compile_instruction_table: [CpuInstructionBuilder; 64],
     jit_block_start_pc: u64,
-    jit_conditional_branch: Option<usize>,
+    jit_conditional_branch: Option<(usize, bool)>, // branch_offset, is_branch_likely
     jit_current_offset: usize,
     jit_fixups: Vec<(usize, usize)>,
 }
@@ -1136,14 +1136,6 @@ impl Cpu {
         // TODO: Catch PC address and TLB exceptions
 
         // self.next_instruction_pc contains the address of code we need to be executing _now_
-        //let mut ops = dynasmrt::x64::Assembler::new().unwrap();
-        //let entry_point = ops.offset();
-        //dynasm!(ops
-        //    ; .arch x64
-        //    ; xor rdx, rdx
-        //    ; mov rax, QWORD 0x7fefabab_12125050i64 as _
-        //    ; ret
-        //);
 
         //let buf = ops.finalize().unwrap();
         //let do_it: extern "win64" fn() -> i64 = unsafe { std::mem::transmute(buf.ptr(entry_point)) };
@@ -1248,6 +1240,20 @@ impl Cpu {
             //    ; mov DWORD [rsp + s_inst], self.inst.v as _ // save current instruction opcode
             //);
 
+            // for branch likely instructions, skip the delay slot instruction if the branch is not taken
+            if let Some((_, is_branch_likely)) = jit_conditional_branch {
+                assert!(self.next_is_delay_slot); // always the case when jit_conditional_branch is set
+                if is_branch_likely {
+                    println!("** previous instruction was a branch_likely, checking r_cond..");
+                    // if the branch is not taken (r_cond == 0), we skip over the next compiled instruction
+                    letsgo!(assembler
+                        ; dec r_cond     // test if r_cond starts at 1
+                        ; jne >no_branch // if it's non-zero, r_cond wasn't 1, and we can skip the next instruction,
+                        ;; ()            // but we can also skip the branch check below
+                    );
+                }
+            }
+
             // compile the instruction
             match self.compile_instruction_table[self.inst.op as usize](self, &mut assembler) {
                 CompileInstructionResult::Continue => {
@@ -1263,15 +1269,23 @@ impl Cpu {
                 ; inc DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
             );
 
-            if let Some(branch_offset) = jit_conditional_branch {
+            if let Some((branch_offset, is_branch_likely)) = jit_conditional_branch {
                 // for now, catch if there's a branch in the delay slot
                 assert!(self.jit_conditional_branch.is_none()); // TODO delay slot set jit_conditional_branch
 
-                println!("** checking branch condition:");
-                letsgo!(assembler
-                    ; dec r_cond          // test if r_cond is 1
-                    ; jnz >no_branch      // and don't branch if it's not
-                );
+                // if we are executing code here, we're either not using branch_likely (and we have
+                // to check r_cond), or we are using branch_likely and know that we're taking the
+                // branch
+                if is_branch_likely {
+                    // fall through to take the branch
+                } else {
+                    todo!("test when a non-branch_likely branch is implemented");
+                    println!("** checking branch condition:");
+                    letsgo!(assembler
+                        ; dec r_cond          // test if r_cond is 1
+                        ; jnz >no_branch      // and don't branch if it's not
+                    );
+                }
 
                 // track the address for the jump that needs to be fixed up
                 // add 2 for the "mov rax, QWORD .." instruction encoding
@@ -1606,7 +1620,6 @@ impl Cpu {
                 ; movsxd v_tmp2, v_tmp_32                                    // sign-extend v_tmp into rt
                 ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp2        // .
             );
-            return CompileInstructionResult::Stop // TEMP
         }
 
         CompileInstructionResult::Continue
