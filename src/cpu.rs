@@ -654,7 +654,8 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn read_u32_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
-        println!("read_u32_bridge from ${:08X}", virtual_address as u32);
+        trace!(target: "JIT", "read_u32_bridge from ${:08X}", virtual_address as u32);
+
         let cpu = { &mut *cpu };
         match cpu.read_u32(virtual_address as usize) {
             Ok(value) => value,
@@ -726,7 +727,8 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
-        println!("write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+        trace!(target: "JIT", "write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+
         let cpu = { &mut *cpu };
         match cpu.write_u32(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
@@ -1301,8 +1303,10 @@ impl Cpu {
         //println!("we're alive: ${:016X}", v);
         trace!(target: "CPU", "run_for started at ${:08X}", self.next_instruction_pc as u32);
 
-        let mut cycles_ran = 0;
-        while cycles_ran < max_cycles {
+        let steps_start = self.num_steps;
+        // const MIN_STEPS_TO_BE_WORTH_IT: u64 = 8; // TODO does this "optimization" make sense?
+        while self.num_steps < (steps_start + max_cycles) {
+            let run_limit = (steps_start + max_cycles) - self.num_steps;
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
                     trace!(target: "CPU", "target ${:08X} not found in cache, compiling", self.next_instruction_pc as u32);
@@ -1311,16 +1315,16 @@ impl Cpu {
                     // build block and remove from cached_blocks to satisfy the borrow checker
                     let (compiled_block_id, compiled_block) = self.build_block()?;
 
-                    println!("[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={}]", compiled_block.id, compiled_block.start_address, cycles_ran);
-                    cycles_ran += self.run_block(&compiled_block)?;
+                    println!("[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
+                    self.num_steps += self.run_block(&compiled_block, run_limit)?;
 
                     // reinsert into hash table
                     self.cached_blocks.insert(compiled_block_id, compiled_block);
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
-                    println!("[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={}]", compiled_block.id, compiled_block.start_address, cycles_ran);
-                    cycles_ran += self.run_block(&compiled_block)?;
+                    println!("[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
+                    self.num_steps += self.run_block(&compiled_block, run_limit)?;
 
                     // reinsert into hash table
                     let compiled_block_id = compiled_block.id;
@@ -1330,7 +1334,7 @@ impl Cpu {
             }
         }
 
-        Ok(cycles_ran)
+        Ok(self.num_steps - steps_start)
     }
 
     // compile a block of code starting at self.next_instruction_pc
@@ -1373,7 +1377,7 @@ impl Cpu {
             ;   sub rsp, BYTE 0x28 // setup the stack so function calls are aligned
                                    // 0x20 bytes is enough room for the s_* variables
                                    // since we pushed 0x20 bytes rsp should be 0x10 aligned now
-            ;   mov DWORD [rsp+s_cycle_count], DWORD 0 as _
+            ;   mov DWORD [rsp+s_cycle_count], ecx
                 // copy self.lo to the stack
             ;   mov rax, QWORD &self.lo as *const u64 as _
             ;   mov v_tmp, QWORD [rax]
@@ -1386,6 +1390,7 @@ impl Cpu {
 
         let mut instruction_start_offsets = HashMap::new();
         let mut jit_fixups = Vec::new();
+        let mut num_nops = 0;
 
         // TODO: jump table
         //
@@ -1406,6 +1411,15 @@ impl Cpu {
 
         let mut done_compiling = false;
         while self.next_is_delay_slot || (!done_compiling && instruction_index < JIT_BLOCK_MAX_INSTRUCTION_COUNT) {
+            // tally up non-delay slot NOPs and break if we get too many (most of the time this
+            // would be a non-code region)
+            num_nops = if !self.next_is_delay_slot && self.next_instruction == 0 { num_nops + 1 } else { 0 };
+            if num_nops == 4 {
+                // if there were other nops, next_is_delay_slot can't be set
+                assert!(!self.next_is_delay_slot);
+                break;
+            }
+
             // setup self.inst
             self.decode_instruction(self.next_instruction);
 
@@ -1468,10 +1482,12 @@ impl Cpu {
 
             // TODO post-instruction prologue
             letsgo!(assembler
-                ;   inc DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
+                ;   dec DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
             );
 
             if jit_jump {
+                println!("** performing jump");
+
                 // move jump target value into self.pc, call self.prefetch and gtfo
                 letsgo!(assembler
                     ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // copy jump target to self.pc
@@ -1484,7 +1500,7 @@ impl Cpu {
                 // otherwise, we're doing an unnecessary read_u32() on every jump
                 letscall!(assembler, Cpu::prefetch_bridge);
 
-                // jr has to leave the block, but continue compiling
+                // jumps have to leave the block, but continue compiling
                 letsgo!(assembler
                     ;   jmp >epilog
                 );
@@ -1503,18 +1519,44 @@ impl Cpu {
                 // add 2 for the "mov rax, QWORD .." instruction encoding
                 //let fixup_offset = assembler.offset().0 + 2;
                 let dynamic_label = assembler.new_dynamic_label();
+                let branch_target = (self.jit_block_start_pc as i64) + branch_offset;
 
                 // if we are executing code here, we're either not using branch_likely (and we have
                 // to check r_cond), or we are using branch_likely and know that we're taking the
                 // branch
                 if is_branch_likely {
+                    println!("** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
+
+                    // test if we need to break out of the block
                     letsgo!(assembler
-                        ;   jmp =>dynamic_label
+                        ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
+                        ;   jg =>dynamic_label                           // .
+                        ;break_out:
+                        ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // put branch target in self.pc
+                        ;   mov rax, QWORD branch_target as u64 as _        // PC address we need to jump to
+                        ;   mov QWORD [v_tmp], rax                          // .
+                        ;;  letscall!(assembler, Cpu::prefetch_bridge)      // setup next_instruction_pc
+                        ;   jmp >epilog                                     // exit the block
                         ;no_branch:
+                        ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // also test on the non-branch version
+                        ;   jle <break_out                               // and less than or equal to zero, break out
                     );
                 } else {
                     println!("** checking normal branch condition:");
                     letsgo!(assembler
+                        ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
+                        ;   jg >no_break_out
+                        ;break_out:
+                        ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // put branch target in self.pc
+                        ;   mov rax, QWORD self.next_instruction_pc as _    // default to fall through
+                        ;   dec r_cond                                      // check if r_cond is set
+                        ;   jne >skip_set                                   // .
+                        ;   mov rax, QWORD branch_target as u64 as _        // if set, use the branch target instead
+                        ;skip_set:
+                        ;   mov QWORD [v_tmp], rax                          // store branch dest in self.pc
+                        ;;  letscall!(assembler, Cpu::prefetch_bridge)      // setup next_instruction_pc
+                        ;   jmp >epilog                                     // exit the block
+                        ;no_break_out:
                         ;   dec r_cond          // test if r_cond is 1
                         ;   jz =>dynamic_label  // and branch if so
                     );
@@ -1527,6 +1569,8 @@ impl Cpu {
         // TODO: so fucking much
         if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
             println!("[terminating block compilation after {} instructions]", instruction_index);
+        } else if num_nops == 4 {
+            println!("[terminating block compilation after {} nops]", num_nops);
         }
 
         // If we fall through into epilog, we need to store self.pc before returning.
@@ -1552,6 +1596,7 @@ impl Cpu {
         }
         letscall!(assembler, Cpu::prefetch_bridge);
 
+
         // TODO: epilog
         // Restore the stack in reverse order and set return value in rax
         letsgo!(assembler
@@ -1567,7 +1612,8 @@ impl Cpu {
             ;   mov v_tmp, QWORD [rsp+s_hi]
             ;   mov QWORD [rax], v_tmp
                 // cycle count to return value
-            ;   mov eax, DWORD [rsp+s_cycle_count]
+            ;   mov v_tmp_32, DWORD [rsp+s_cycle_count]
+            ;   movsxd rax, v_tmp_32 // return value
                 // restore stack
             ;   add rsp, BYTE 0x28 // must match the sub rsp in the prologue
             ;   pop r_cond
@@ -1654,13 +1700,15 @@ impl Cpu {
     }
 
     // return number of instructions executed
-    fn run_block(&mut self, compiled_block: &CompiledBlock) -> Result<u64, InstructionFault> {
+    fn run_block(&mut self, compiled_block: &CompiledBlock, run_limit: u64) -> Result<u64, InstructionFault> {
         // place &self into rax
-        let call_block: extern "win64" fn() -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
-        match call_block() {
-            i if i >= 0 => Ok(i as u64),
-            i => { // i < 0 indicates error
-                todo!("execution error code: {}", i);
+        let call_block: extern "win64" fn(u64) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything
+        // else negative is an error
+        match call_block(run_limit) {
+            i if i >= -2147483648 => Ok((run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
+            i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
+                todo!("execution error code: {}", i as u32);
             },
         }
     }
