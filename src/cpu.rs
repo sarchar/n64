@@ -111,7 +111,7 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 2048; // max instruction count per block
+const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 32; //2048; // max instruction count per block
 
 const CACHED_BLOCK_MAP_RDRAM_OFFSET  : usize = 0;
 const CACHED_BLOCK_MAP_PIFROM_OFFSET : usize = CACHED_BLOCK_MAP_RDRAM_OFFSET   + (0x80_0000 >> 2);
@@ -131,10 +131,10 @@ struct CompiledBlock {
     code_buffer: dynasmrt::mmap::ExecutableBuffer,
 }
 
-enum CachedBlockStatus<'a> {
+enum CachedBlockStatus {
     Uncompilable,
     NotCached,
-    Cached(&'a CompiledBlock),
+    Cached(CompiledBlock),
 }
 
 enum CompileInstructionResult {
@@ -268,29 +268,32 @@ macro_rules! build_branch {
         println!("** conditional branch to ${:08X}", dest as u32);
 
         let dest_offs = (dest as i64).wrapping_sub($self.jit_block_start_pc as i64);
-        println!("** dest offset in block: ${:04X}", dest_offs as u16);
+        println!("** dest offset relative to block start: ${:04X}", dest_offs as i16);
 
         // compute current instruction offset to determine if branch target is before or after this instruction
-        let cur_offs = ($self.current_instruction_pc - $self.jit_block_start_pc) as i64;
+        //let cur_offs = ($self.current_instruction_pc - $self.jit_block_start_pc) as i64;
 
-        if dest_offs < 0 { // dest is before jit_block_start_pc
-            todo!("branch to destination before current block start");
-        } else if dest_offs < cur_offs {
-            println!("** dest is already compiled");
-        } else if dest_offs == cur_offs {
-            todo!("branch to self");
-        } else {
-            // number of instructions already compiled in this block (+1 for this branch instruction):
-            let compiled_instruction_count = (4 + cur_offs) >> 2;
-            // instructions left availble 
-            let instructions_remaining = (JIT_BLOCK_MAX_INSTRUCTION_COUNT as i64) - compiled_instruction_count;
-            // distance ahead in # of instructions
-            let forward_instructions = (dest_offs - cur_offs) >> 2;
-            // allow the branch if it should appear within the current block, otherwise terminate the bblock
-            if forward_instructions > instructions_remaining {
-                todo!("branch to out of block");
-            }
-        }
+        // all dest_offs are valid to create jumps for, later in build_block we'll either exit a
+        // block or continue in the same block
+        //
+        //if dest_offs < 0 { // dest is before jit_block_start_pc
+        //    todo!("branch to destination before current block start");
+        //} else if dest_offs < cur_offs {
+        //    println!("** dest is already compiled");
+        //} else if dest_offs == cur_offs {
+        //    todo!("branch to self");
+        //} else {
+        //    // number of instructions already compiled in this block (+1 for this branch instruction):
+        //    let compiled_instruction_count = (4 + cur_offs) >> 2;
+        //    // instructions left availble 
+        //    let instructions_remaining = (JIT_BLOCK_MAX_INSTRUCTION_COUNT as i64) - compiled_instruction_count;
+        //    // distance ahead in # of instructions
+        //    let forward_instructions = (dest_offs - cur_offs) >> 2;
+        //    // allow the branch if it should appear within the current block, otherwise terminate the bblock
+        //    if forward_instructions > instructions_remaining {
+        //        todo!("branch to out of block");
+        //    }
+        //}
 
         // clear r_cond
         letsgo!($ops
@@ -334,7 +337,7 @@ macro_rules! build_branch {
             );
         }
 
-        $self.jit_conditional_branch = Some((dest_offs as usize, $is_likely as bool));
+        $self.jit_conditional_branch = Some((dest_offs as i64, $is_likely as bool));
         $self.next_is_delay_slot = true;
     }
 }
@@ -389,9 +392,8 @@ pub struct Cpu {
     jit_regimm_table: [CpuInstructionBuilder; 32],
     jit_block_start_pc: u64,
     jit_jump: bool, // true when a jump is happening
-    jit_conditional_branch: Option<(usize, bool)>, // branch_offset, is_branch_likely
+    jit_conditional_branch: Option<(i64, bool)>, // branch_offset, is_branch_likely
     jit_current_assembler_offset: usize,
-    jit_fixups: Vec<(usize, dynasmrt::DynamicLabel)>,
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -491,12 +493,12 @@ impl Cpu {
             next_block_id: 0,
 
             jit_instruction_table: [ 
-               //  _000                 _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+               //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_unknown, Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
@@ -504,12 +506,12 @@ impl Cpu {
 
             jit_special_table: [ 
                //  _000                     _001                      _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_inst_unknown, Cpu::build_special_sllv, Cpu::build_inst_unknown, Cpu::build_special_srlv, Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_special_jr  , Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_inst_unknown, Cpu::build_special_or  , Cpu::build_special_xor , Cpu::build_inst_unknown,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and , Cpu::build_special_or  , Cpu::build_special_xor , Cpu::build_inst_unknown,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_special_sltu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
             ],
@@ -527,7 +529,6 @@ impl Cpu {
             jit_jump: false,
             jit_conditional_branch: None,
             jit_current_assembler_offset: 0,
-            jit_fixups: Vec::new(),
         };
         
         let _ = cpu.reset(false);
@@ -616,6 +617,19 @@ impl Cpu {
         } else {
             // invalid TLB translation, no physical address present to read and no exception
             Ok(0)
+        }
+    }
+
+    // returns a sign-extended i8 as u32
+    unsafe extern "win64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
+        println!("read_u8_bridge from ${:08X}", virtual_address as u32);
+        let cpu = { &mut *cpu };
+        match cpu.read_u8(virtual_address as usize) {
+            Ok(value) => (value as i8) as u32,
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in read_u8_bridge: {:?}", e);
+            }
         }
     }
 
@@ -1222,7 +1236,7 @@ impl Cpu {
                         // block is valid
                         CachedBlockReference::CachedBlock(block_id) => {
                             // block must exist
-                            let cached_block = self.cached_blocks.get(&block_id).unwrap();
+                            let cached_block = self.cached_blocks.remove(&block_id).unwrap();
                             return Ok(CachedBlockStatus::Cached(cached_block));
                         },
 
@@ -1235,6 +1249,7 @@ impl Cpu {
                                             // block id must exist because this is a CachedBlock
                                             let cached_block = self.cached_blocks.get(&block_id).unwrap();
                                             if cached_block.id == block_id_ref {
+                                                let cached_block = self.cached_blocks.remove(&block_id).unwrap();
                                                 return Ok(CachedBlockStatus::Cached(cached_block));
                                             }
                                             // not the matching block
@@ -1294,16 +1309,23 @@ impl Cpu {
                     println!("[block not found, building new block at next_instruction_pc=${:08X}", self.next_instruction_pc as u32);
 
                     // build block and remove from cached_blocks to satisfy the borrow checker
-                    let compiled_block_id = self.build_block()?;
-                    let compiled_block = self.cached_blocks.remove(&compiled_block_id).unwrap();
+                    let (compiled_block_id, compiled_block) = self.build_block()?;
 
-                    println!("[executing block id={} block_start=${:08X} start_offset=TODO]", compiled_block.id, compiled_block.start_address);
+                    println!("[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={}]", compiled_block.id, compiled_block.start_address, cycles_ran);
                     cycles_ran += self.run_block(&compiled_block)?;
 
                     // reinsert into hash table
                     self.cached_blocks.insert(compiled_block_id, compiled_block);
                 },
 
+                CachedBlockStatus::Cached(compiled_block) => {
+                    println!("[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={}]", compiled_block.id, compiled_block.start_address, cycles_ran);
+                    cycles_ran += self.run_block(&compiled_block)?;
+
+                    // reinsert into hash table
+                    let compiled_block_id = compiled_block.id;
+                    self.cached_blocks.insert(compiled_block_id, compiled_block);
+                }
                 _ => todo!(),
             }
         }
@@ -1312,7 +1334,7 @@ impl Cpu {
     }
 
     // compile a block of code starting at self.next_instruction_pc
-    fn build_block(&mut self) -> Result<u64, InstructionFault> {
+    fn build_block(&mut self) -> Result<(u64, CompiledBlock), InstructionFault> {
         let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
         let start_address = self.next_instruction_pc;
 
@@ -1329,7 +1351,6 @@ impl Cpu {
         // reset state that belongs to this block
         self.jit_jump = false;
         self.jit_conditional_branch = None;
-        self.jit_fixups.clear();
 
         let block_id = self.next_block_id;
         self.next_block_id += 1;
@@ -1363,9 +1384,11 @@ impl Cpu {
             ;   mov QWORD [rsp+s_hi], v_tmp
         );
 
-        // TODO: jump table
-        let mut instruction_start_offsets = [None; JIT_BLOCK_MAX_INSTRUCTION_COUNT];
+        let mut instruction_start_offsets = HashMap::new();
+        let mut jit_fixups = Vec::new();
 
+        // TODO: jump table
+        //
         //.let block_start_offset = assembler.offset();
         //.letsgo!(assembler
         //.    ;block_start:
@@ -1382,8 +1405,7 @@ impl Cpu {
         let mut instruction_index = 0usize;
 
         let mut done_compiling = false;
-        let mut must_continue = false;
-        while must_continue || (!done_compiling && instruction_index < JIT_BLOCK_MAX_INSTRUCTION_COUNT) {
+        while self.next_is_delay_slot || (!done_compiling && instruction_index < JIT_BLOCK_MAX_INSTRUCTION_COUNT) {
             // setup self.inst
             self.decode_instruction(self.next_instruction);
 
@@ -1395,9 +1417,13 @@ impl Cpu {
             self.next_instruction_pc = self.pc;
             self.pc += 4;
 
+            // in delay slot flag
+            self.is_delay_slot = self.next_is_delay_slot;
+            self.next_is_delay_slot = false;
+
             // update the block cache map
             assert!(self.current_instruction_pc >= 0xBFC0_0000); //TODO: support RDRAM
-            self.cached_block_map[cached_block_map_index + instruction_index] = Some(CachedBlockReference::AddressReference(cached_block_map_index, block_id));
+            //.self.cached_block_map[cached_block_map_index + instruction_index] = Some(CachedBlockReference::AddressReference(cached_block_map_index, block_id));
 
             // save whether there's a jump that terminates the block after this instruction (w/ delay slot)
             let jit_jump = std::mem::replace(&mut self.jit_jump, false);
@@ -1406,8 +1432,9 @@ impl Cpu {
             let jit_conditional_branch = std::mem::replace(&mut self.jit_conditional_branch, None);
 
             // set pointer to instruction offset
-            instruction_start_offsets[instruction_index] = Some(assembler.offset().0);
-            self.jit_current_assembler_offset = instruction_start_offsets[instruction_index].unwrap();
+            let instruction_offset = assembler.offset().0;
+            instruction_start_offsets.insert(instruction_index as i64, instruction_offset);
+            self.jit_current_assembler_offset = instruction_offset;
             instruction_index += 1;
 
             // TODO per-instruction prologue
@@ -1417,7 +1444,7 @@ impl Cpu {
 
             // for branch likely instructions, skip the delay slot instruction if the branch is not taken
             if let Some((_, is_branch_likely)) = jit_conditional_branch {
-                assert!(self.next_is_delay_slot); // always the case when jit_conditional_branch is set
+                assert!(self.is_delay_slot); // always the case when jit_conditional_branch is set
                 if is_branch_likely {
                     println!("** previous instruction was a branch_likely, checking r_cond..");
                     // if the branch is not taken (r_cond == 0), we skip over the next compiled instruction
@@ -1457,10 +1484,20 @@ impl Cpu {
                 // otherwise, we're doing an unnecessary read_u32() on every jump
                 letscall!(assembler, Cpu::prefetch_bridge);
 
-                done_compiling = true;
+                // jr has to leave the block, but continue compiling
+                letsgo!(assembler
+                    ;   jmp >epilog
+                );
+
+                //done_compiling = true;
             } else if let Some((branch_offset, is_branch_likely)) = jit_conditional_branch {
                 // TODO for now, catch if there's a branch in the delay slot, later I'll need to figure that out.
                 assert!(self.jit_conditional_branch.is_none()); // TODO delay slot set jit_conditional_branch
+
+                // TODO we can actually return from block execution here if branch_offset is
+                // guaranteed to be outside of the block:
+                // let will_exit_block = branch_offset < 0 || (branch_offset >> 2) >= instruction_start_offsets.len()
+                // wouldn't be much of an optimization though since it just eliminates a single jump
 
                 // track the address for the jump that needs to be fixed up
                 // add 2 for the "mov rax, QWORD .." instruction encoding
@@ -1483,14 +1520,37 @@ impl Cpu {
                     );
                 }
 
-                self.jit_fixups.push((branch_offset, dynamic_label));
+                jit_fixups.push((branch_offset, dynamic_label));
             }
-
-            // if the just compiled instruction is a branch, we need must_compile for the delay slot instruction
-            must_continue = self.jit_conditional_branch.is_some() || self.jit_jump;
         }
 
         // TODO: so fucking much
+        if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
+            println!("[terminating block compilation after {} instructions]", instruction_index);
+        }
+
+        // If we fall through into epilog, we need to store self.pc before returning.
+        // Thankfully, self.pc has been updating and currently points to the next instruction
+        // This kind of seems silly, but recall that the value in self.pc is translated to a
+        // constant in the generated code.
+        // And technically, we shouldn't exit a block right before a delay slot instruction
+        // So it should never be true here
+        assert!(!self.next_is_delay_slot);
+        letsgo!(assembler
+            ;restore_pc:
+            ;   mov rax, QWORD &mut self.pc as *mut u64 as _
+        );
+        if (self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!(assembler
+                ;   mov QWORD [rax], DWORD self.next_instruction_pc as i32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD self.next_instruction_pc as _
+                ;   mov QWORD [rax], v_tmp
+            );
+        }
+        letscall!(assembler, Cpu::prefetch_bridge);
 
         // TODO: epilog
         // Restore the stack in reverse order and set return value in rax
@@ -1526,11 +1586,11 @@ impl Cpu {
 
             // fixup jumps
             {
-                for &(branch_offset, dynamic_label) in &self.jit_fixups {
-                    // compute absolute jump address
-                    if let Some(target_instruction_offset) = instruction_start_offsets[branch_offset >> 2] {
+                for &(branch_offset, dynamic_label) in &jit_fixups {
+                    if instruction_start_offsets.contains_key(&(branch_offset >> 2)) {
+                        let target_instruction_offset = instruction_start_offsets.get(&(branch_offset >> 2)).unwrap();
                         let labels = assembler.labels_mut();
-                        let _ = labels.define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(target_instruction_offset)).unwrap();
+                        let _ = labels.define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(*target_instruction_offset)).unwrap();
                         //target_instruction_offset += memory_ptr.as_ptr() as *const _ as usize;
 
                         //// write address to fixup offset
@@ -1538,7 +1598,7 @@ impl Cpu {
                     } else {
                         // whatever the branch target was supposed to be needs to be loaded into PC and then we jump to the epilog
                         let code_start_offset = assembler.offset();
-                        let target_branch_address = start_address + branch_offset as u64;
+                        let target_branch_address = ((start_address as i64) + branch_offset) as u64;
 
                         println!("** creating unknown branch target handler for branch to ${:08X}", target_branch_address as u32);
                         letsgo!(assembler
@@ -1570,7 +1630,7 @@ impl Cpu {
                         let _ = labels.define_dynamic(dynamic_label, code_start_offset).unwrap();
 
                         // and any other jumps that might go to the same address
-                        instruction_start_offsets[branch_offset >> 2] = Some(code_start_offset.0);
+                        instruction_start_offsets.insert(branch_offset >> 2, code_start_offset.0);
                     }
                 }
             }
@@ -1588,10 +1648,9 @@ impl Cpu {
         };
 
         // insert into block cache
-        self.cached_blocks.insert(block_id, compiled_block);
         self.cached_block_map[cached_block_map_index] = Some(CachedBlockReference::CachedBlock(block_id));
 
-        Ok(block_id)
+        Ok((block_id, compiled_block))
     }
 
     // return number of instructions executed
@@ -2592,6 +2651,29 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_j(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
+        println!("${:08X}[{:5}]: j ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest);
+
+        // move the dest into s_jump_target storage and jump to it
+        if (dest & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!(assembler
+                ; mov QWORD [rsp+s_jump_target], DWORD dest as i32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ; mov v_tmp, QWORD dest as u64 as _
+                ; mov QWORD [rsp+s_jump_target], v_tmp
+            );
+        }
+
+        self.jit_jump = true;
+        self.next_is_delay_slot = true;
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn inst_jal(&mut self) -> Result<(), InstructionFault> {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
 
@@ -2608,6 +2690,32 @@ impl Cpu {
         self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as i8) as u64;
         Ok(())
     }
+
+    fn build_inst_lb(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: lb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
+        letsgo!(assembler
+            ; mov rdx, QWORD [r_gpr + (self.inst.rs * 8) as i32] // add signed_imm (sign-extended from 32-bits) to source register
+            ; add rdx, DWORD self.inst.signed_imm as i32 as _    // .
+        );
+
+        // rdx contains address
+        letscall!(assembler, Cpu::read_u8_bridge);
+
+        // if destination register is 0, we still do the read (above) but don't store the result
+        if self.inst.rt != 0 { 
+            // result of call to self.read_u8_bridge() is in eax, and needs to be sign extended into rt
+            letsgo!(assembler
+                ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
+                ; mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn inst_lbu(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
@@ -2796,13 +2904,13 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
-        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
-
-        // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
-        letsgo!(assembler
-            ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
-            ; mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
-        );
+        if self.inst.rt != 0 { 
+            // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
+            letsgo!(assembler
+                ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
+                ; mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+            );
+        }
 
         CompileInstructionResult::Continue
     }
@@ -3121,8 +3229,6 @@ impl Cpu {
         println!("${:08X}[{:5}]: sw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        //letsbreak!(assembler);
-
         // value to write in 2nd argument
         if self.inst.rt == 0 {
             letsgo!(assembler
@@ -3287,7 +3393,6 @@ impl Cpu {
         self.branch_likely(condition)
     }
 
-
     fn special_add(&mut self) -> Result<(), InstructionFault> {
         // add does cause an overflow exception
         let rs = self.gpr[self.inst.rs] as u32;
@@ -3304,23 +3409,27 @@ impl Cpu {
         Ok(())
     }
 
-    #[allow(unreachable_code)]
-    #[allow(unused_variables)]
     fn build_special_add(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        todo!("wrote this function before it was used. test me");
         println!("${:08X}[{:5}]: add r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
-        letsbreak!(assembler);
+
         letsgo!(assembler
-            ; mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
-            ; add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
-            ; jno >no_overflow
-            ; int3  // do self.overflow_exception()
+            ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
+            ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   jno >no_overflow
+            ;   mov rax, DWORD 0x0001_0001 as _  // TEMP error code to find where the int3 comes from
+            ;   int3  // do self.overflow_exception()
             ;no_overflow:
-            ; movsxd v_tmp2, v_tmp_32
-            ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2
         );
-        CompileInstructionResult::Stop
+
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   movsxd v_tmp2, v_tmp_32
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2
+            );
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn special_addu(&mut self) -> Result<(), InstructionFault> {
@@ -3330,11 +3439,58 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_addu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: addu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 { // if destination is zero, no-op
+            if self.inst.rt == 0 { // We can skip the sub
+                letsgo!(assembler
+                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 32-bit value to v_tmp
+                    ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
+                    ;   mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp2        // store in rd
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
+                    ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // 32-bit sub rt
+                    ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend v_tmp into rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // .
+                );
+            }
+        }
+
+        CompileInstructionResult::Stop
+    }
+
+
     fn special_and(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] & self.gpr[self.inst.rt];
 
         Ok(())
     }
+    
+    fn build_special_and(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: and r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 { // if dest register is 0, this is a no-op
+            if self.inst.rs == 0 || self.inst.rt == 0 { // if either source register is 0, set our destination register
+                letsgo!(assembler
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], DWORD 0i32 as _
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   and v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_break(&mut self) -> Result<(), InstructionFault> {
         self.breakpoint_exception()?;
@@ -3559,10 +3715,10 @@ impl Cpu {
                 ; mov QWORD [rsp+s_jump_target], v_tmp
             );
 
-            if self.inst.rs == 31 { 
-                println!("returning to link register, see if code return works. it'll likely return into the middle of a previously compiled block");
-                return CompileInstructionResult::Stop;
-            }
+            //if self.inst.rs == 31 { 
+            //    println!("returning to link register, see if code return works. it'll likely return into the middle of a previously compiled block");
+            //    return CompileInstructionResult::Stop;
+            //}
         }
 
         self.jit_jump = true;
@@ -3577,7 +3733,7 @@ impl Cpu {
     }
 
     fn build_special_mfhi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mflo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+        println!("${:08X}[{:5}]: mfhi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
                  
         if self.inst.rd != 0 {
             letsgo!(assembler
@@ -3586,7 +3742,7 @@ impl Cpu {
             );
         }
 
-        CompileInstructionResult::Stop
+        CompileInstructionResult::Continue
     }
 
     fn special_mflo(&mut self) -> Result<(), InstructionFault> {
@@ -3801,6 +3957,24 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_sllv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sllv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        if self.inst.rd != 0 { // if dest is zero, this is a no-op
+            letsgo!(assembler
+                ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                ;   and cl, BYTE 0x1F as _                                  // mod with 31
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
+                ;   shl v_tmp_32, cl                                        // 32-bit shift left
+                ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     fn special_slt(&mut self) -> Result<(), InstructionFault> {
         // set rd to 1 if rs < rt, otherwise 0
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rs] as i64) < (self.gpr[self.inst.rt] as i64)) as u64;
@@ -3811,6 +3985,25 @@ impl Cpu {
         // set rd to 1 if rs < rt, otherwise 0
         self.gpr[self.inst.rd] = (self.gpr[self.inst.rs] < self.gpr[self.inst.rt]) as u64;
         Ok(())
+    }
+
+    fn build_special_sltu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sltu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   xor rax, rax                                          // value to store at the end
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
+                ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+                ;   jae >skip                                             // if rs >= rt (unsigned), branch
+                ;   inc rax                                               // if rs < rt, set rax=1
+                ;skip:
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], rax    // store flag in rd
+            );
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn special_sra(&mut self) -> Result<(), InstructionFault> {
@@ -3863,6 +4056,25 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_srlv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: srlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        if self.inst.rd != 0 { // if dest is zero, this is a no-op
+            letsgo!(assembler
+                ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                ;   and cl, BYTE 0x1F as _                                  // mod with 31
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
+                ;   shr v_tmp_32, cl                                        // 32-bit unsigned shift right
+                ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_sub(&mut self) -> Result<(), InstructionFault> {
         // sub causes an overflow exception
         let rs = self.gpr[self.inst.rs] as u32;
@@ -3889,7 +4101,6 @@ impl Cpu {
         println!("${:08X}[{:5}]: subu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
-        letsbreak!(assembler);
         if self.inst.rd != 0 { // if destination is zero, no-op
             if self.inst.rt == 0 { // We can skip the sub
                 letsgo!(assembler
@@ -3907,7 +4118,7 @@ impl Cpu {
             }
         }
 
-        CompileInstructionResult::Stop
+        CompileInstructionResult::Continue
     }
 
 
