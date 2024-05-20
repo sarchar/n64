@@ -199,7 +199,7 @@ macro_rules! letsbreak {
 }
 
 // use letscall! to call external "win64" functions
-// this call uses the first two parameters (Cpu, instruction) for all calls
+// this call uses the first parameter (Cpu) for all calls
 // you can setup arguments before calling letscall!() in r8, r9, and the rest in stack
 macro_rules! letscall {
     ($ops:ident, $target:expr) => {
@@ -212,6 +212,22 @@ macro_rules! letscall {
         );
     }
 }
+
+// use letscop! to call external "win64" functions on other objects
+// this call uses the first two parameters (Cpu, instruction) for all calls
+// you can setup arguments before calling letscall!() in r8, r9, and the rest in stack
+macro_rules! letscop {
+    ($ops:ident, $obj:expr, $target:expr) => {
+        letsgo!($ops
+            ; mov rcx, QWORD $obj as *mut _ as _        // arg0 *mut T
+            ; mov rax, QWORD $target as _               // function pointer
+            ; sub rsp, BYTE 0x20                        // fixup stack for function call
+            ; call rax                                  // make the call
+            ; add rsp, BYTE 0x20                        // restore stack
+        );
+    }
+}
+
 
 // place a u64 constant value into the specified register using as few instructions/bytes as possible
 // signed ints smaller than u64 are sign-extended
@@ -494,9 +510,9 @@ impl Cpu {
 
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_unknown, Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
-    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
@@ -511,7 +527,7 @@ impl Cpu {
     /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and , Cpu::build_special_or  , Cpu::build_special_xor , Cpu::build_inst_unknown,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_special_sltu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
             ],
@@ -1208,9 +1224,9 @@ impl Cpu {
     }
 
     fn get_cached_block_map_index(&mut self, physical_address: &Address) -> Option<usize> {
+        // Using the physical_address, determine where the memory came from
         if physical_address.physical_address < 0x0080_0000 { // RDRAM
-            // Using the physical_address, determine where the memory came from
-            todo!();
+            Some(CACHED_BLOCK_MAP_RDRAM_OFFSET + ((physical_address.physical_address & 0x007F_FFFF) >> 2) as usize)
         } else if physical_address.physical_address >= 0x0400_0000 && physical_address.physical_address < 0x0400_2000 {
             Some(CACHED_BLOCK_MAP_RSP_MEM_OFFSET + ((physical_address.physical_address & 0x1FFF) >> 2) as usize)
         } else if physical_address.physical_address >= 0x1FC0_0000 && physical_address.physical_address < 0x1FC0_07C0 {
@@ -1222,8 +1238,8 @@ impl Cpu {
 
     fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
         if let Some(physical_address) = self.translate_address(virtual_address, false, false)? {
-            trace!(target: "CPU", "looking up cached block @ physical_address=${:08X}", physical_address.physical_address as u32);
-            println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
+            trace!(target: "JIT", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
+            //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
 
             // determine where in the block map to look up the block
             let cached_block_map_index = match self.get_cached_block_map_index(&physical_address) {
@@ -1310,7 +1326,7 @@ impl Cpu {
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
                     trace!(target: "CPU", "target ${:08X} not found in cache, compiling", self.next_instruction_pc as u32);
-                    println!("[block not found, building new block at next_instruction_pc=${:08X}", self.next_instruction_pc as u32);
+                    println!("[block not found, building new block at next_instruction_pc=${:08X}]", self.next_instruction_pc as u32);
 
                     // build block and remove from cached_blocks to satisfy the borrow checker
                     let (compiled_block_id, compiled_block) = self.build_block()?;
@@ -1323,7 +1339,7 @@ impl Cpu {
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
-                    println!("[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
+                    trace!(target: "JIT", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
                     self.num_steps += self.run_block(&compiled_block, run_limit)?;
 
                     // reinsert into hash table
@@ -2243,6 +2259,51 @@ impl Cpu {
         }
     }
 
+    fn build_inst_cop(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        let copno = ((self.inst.v >> 26) & 0x03) as u64;
+        let cop = match copno {
+            0 => panic!("TODO"),
+            1 => &mut self.cop1,
+            _ => {
+                todo!(); //self.coprocessor_unusable_exception(copno)?;
+                //return Ok(());
+            },
+        };
+
+        // if the co-processor isn't enabled, generate an exception
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
+            ;   mov eax, DWORD [v_tmp]
+            ;   and eax, DWORD (0x1000_0000 << copno) as _
+            ;   jnz >skip
+            ;   mov rax, QWORD 0x1234_5555_0101_0000u64 as _ // error code to find this msg
+            ;   int3 // TODO call self.coprocessor_unusable_exception()
+            ;skip:
+        );
+
+        if (self.inst.v & (1 << 25)) != 0 {
+            todo!();
+        } else {
+            let func = (self.inst.v >> 21) & 0x0F;
+            match func {
+                0b00_110 => { // CTC
+                    println!("${:08X}[{:5}]: ctc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                             self.inst.rd, self.inst.rt);
+
+                    // contents of rt in second arg, register number rd in third
+                    letsgo!(assembler
+                        ; mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                        ; mov r8, DWORD self.inst.rd as _  // zeroes out high dword of rdx
+                    );
+                    letscop!(assembler, cop, cop1::Cop1::ctc_bridge);
+                },
+                _ => panic!("JIT: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     // convert into inst_cop at some point
     // all the cop should implement a common cop trait (mfc/mtc/ctc/etc)
     fn inst_cop0(&mut self) -> Result<(), InstructionFault> {
@@ -2733,6 +2794,40 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_jal(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
+        println!("${:08X}[{:5}]: jal ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest as u32);
+
+        if (self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!(assembler
+                ; mov QWORD [r_gpr + (31 * 8) as i32], DWORD self.pc as i32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ; mov rax, QWORD self.pc as i64 as _
+                ; mov QWORD [r_gpr + (31 * 8) as i32], rax
+            );
+        }
+
+        // move the dest into s_jump_target storage and jump to it
+        if (dest & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!(assembler
+                ; mov QWORD [rsp+s_jump_target], DWORD dest as i32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ; mov v_tmp, QWORD dest as u64 as _
+                ; mov QWORD [rsp+s_jump_target], v_tmp
+            );
+        }
+
+        self.jit_jump = true;
+        self.next_is_delay_slot = true;
+
+        CompileInstructionResult::Stop
+    }
+
+
     fn inst_lb(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         self.gpr[self.inst.rt] = (self.read_u8(address as usize)? as i8) as u64;
@@ -3065,7 +3160,6 @@ impl Cpu {
                 ; or QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp   // or rs with self.inst.imm, store result
             );
         } else {
-            todo!("this code path isn't tested but should work");
             letsgo!(assembler
                 ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
                 ; or v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]   // or rs with self.inst.imm
@@ -4028,6 +4122,26 @@ impl Cpu {
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rs] as i64) < (self.gpr[self.inst.rt] as i64)) as u64;
         Ok(())
     }
+
+    fn build_special_slt(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: slt r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   xor rax, rax                                          // value to store at the end
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
+                ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+                ;   jge >skip                                             // if rs >= rt (signed), branch
+                ;   inc rax                                               // if rs < rt, set rax=1
+                ;skip:
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], rax    // store flag in rd
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_sltu(&mut self) -> Result<(), InstructionFault> {
         // set rd to 1 if rs < rt, otherwise 0

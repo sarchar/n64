@@ -279,6 +279,7 @@ impl Cop1 {
     }
 
     // Move Control Word to Coprocessor
+    #[inline]
     pub fn ctc(&mut self, value: u64, rd: usize) -> Result<(), InstructionFault> {
         match rd {
             0 => {
@@ -301,6 +302,20 @@ impl Cop1 {
             _ => Err(InstructionFault::CoprocessorUnusable),
         }
     }
+
+    pub unsafe extern "win64" fn ctc_bridge(cop1: *mut Cop1, rt_value: u64, rd: u64) -> i64 {
+        let cop1 = { &mut *cop1 };
+        // we're running inside a compiled block so self.inst isn't being used, we
+        // can safely destroy it and call into rust code
+        match cop1.ctc(rt_value, rd as usize) {
+            Ok(_) => 0,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("ctc_bridge error = {:?}", err);
+            }
+        }
+    }
+
 
     // Move (general purpose value) from Coprocessor
     pub fn mfc(&mut self, rd: usize) -> Result<u32, InstructionFault> {
