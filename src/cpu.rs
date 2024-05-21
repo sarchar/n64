@@ -268,6 +268,31 @@ macro_rules! letslink {
     }
 }
 
+// add a signed immediate to a base register and store in a specific register
+// used for stores and loads. $offset will be cast to 32-bits and sign-extended to the destination
+// register (if 64-bit)
+macro_rules! letsoffset {
+    ($ops:ident, $base_reg:expr, $offset:expr, $reg:ident) => {
+        if $base_reg == 0 {
+            letsgo!($ops
+                ; xor $reg, $reg
+            );
+        } else {
+            letsgo!($ops
+                ; mov $reg, QWORD [r_gpr + ($base_reg * 8) as i32]
+            );
+        }
+
+        let v = $offset as i32;
+        if v != 0 {
+            letsgo!($ops
+                ; add $reg, DWORD v as _ // will do signed addition for both 32-bit
+                                         // and 64-bit destination regs
+            );
+        }
+    }
+}
+
 // The branch and branch likely instructions only vary in their comparison, so this macro encapsulates all the
 // common code.  $not_cond needs to be the x64 instruction that would cause the branch NOT to be
 // taken.  I.e., for branch-if-equal, use JNE (jump if not equal).  The reason is that the negated
@@ -511,25 +536,25 @@ impl Cpu {
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
     /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_unknown, Cpu::build_inst_lui    ,
+    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_daddiu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
             ],
 
             jit_special_table: [ 
-               //  _000                     _001                      _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_inst_unknown, Cpu::build_special_sllv, Cpu::build_inst_unknown, Cpu::build_special_srlv, Cpu::build_inst_unknown,
-    /* 001_ */  Cpu::build_special_jr  , Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and , Cpu::build_special_or  , Cpu::build_special_xor , Cpu::build_inst_unknown,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+               //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown, Cpu::build_special_srlv, Cpu::build_inst_unknown,
+    /* 001_ */  Cpu::build_special_jr  , Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_sync,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or  , Cpu::build_special_xor , Cpu::build_special_nor ,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 111_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_dsll32, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
             ],
 
             jit_regimm_table: [ 
@@ -719,6 +744,19 @@ impl Cpu {
         } else {
             // invalid TLB translation, no physical address present to read
             Ok(WriteReturnSignal::None)
+        }
+    }
+
+    unsafe extern "win64" fn write_u8_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
+        trace!(target: "JIT", "write_u8_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+
+        let cpu = { &mut *cpu };
+        match cpu.write_u8(value, virtual_address as usize) {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in write_u8_bridge: {:?}", e);
+            }
         }
     }
 
@@ -1551,7 +1589,9 @@ impl Cpu {
                         ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // put branch target in self.pc
                         ;   mov rax, QWORD branch_target as u64 as _        // PC address we need to jump to
                         ;   mov QWORD [v_tmp], rax                          // .
-                        ;;  letscall!(assembler, Cpu::prefetch_bridge)      // setup next_instruction_pc
+                    );
+                    letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
+                    letsgo!(assembler
                         ;   jmp >epilog                                     // exit the block
                         ;no_branch:
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // also test on the non-branch version
@@ -1570,7 +1610,9 @@ impl Cpu {
                         ;   mov rax, QWORD branch_target as u64 as _        // if set, use the branch target instead
                         ;skip_set:
                         ;   mov QWORD [v_tmp], rax                          // store branch dest in self.pc
-                        ;;  letscall!(assembler, Cpu::prefetch_bridge)      // setup next_instruction_pc
+                    );
+                    letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
+                    letsgo!(assembler
                         ;   jmp >epilog                                     // exit the block
                         ;no_break_out:
                         ;   dec r_cond          // test if r_cond is 1
@@ -1977,19 +2019,33 @@ impl Cpu {
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rs == 0 {
-            letsgo!(assembler
-                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], DWORD self.inst.signed_imm as u32 as _
-            );
+            if self.inst.rt != 0 { // don't overwrite r0
+                letsgo!(assembler
+                    ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], DWORD self.inst.signed_imm as u32 as _
+                );
+            }
         } else {
             letsgo!(assembler
                 ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
-                ;   add v_tmp_32, DWORD self.inst.signed_imm as u32 as _
-                ;   jno >no_overflow
-                ;   int3  // do self.overflow_exception()
-                ;no_overflow:
-                ;   movsxd v_tmp2, v_tmp_32
-                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
             );
+
+            // skip add and checking overflow if signed_imm is 0
+            if self.inst.signed_imm != 0 {
+                letsgo!(assembler
+                    ;   add v_tmp_32, DWORD self.inst.signed_imm as u32 as _
+                    ;   jno >no_overflow
+                    ;   int3  // do self.overflow_exception()
+                    ;no_overflow:
+                );
+            }
+
+            // don't overwrite r0
+            if self.inst.rt != 0 {
+                letsgo!(assembler
+                    ;   movsxd v_tmp2, v_tmp_32
+                    ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
+                );
+            }
         }
 
         CompileInstructionResult::Continue
@@ -2034,20 +2090,19 @@ impl Cpu {
         println!("${:08X}[{:5}]: andi r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.imm);
 
-        // if destination register is 0, this is a nop
-        if self.inst.rt == 0 { return CompileInstructionResult::Continue; }
-
-        if self.inst.rs == self.inst.rt { // can save an instruction when the operands are the same register
-            letsgo!(assembler
-                ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
-                ; and QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp  // and rs with self.inst.imm, store result
-            );
-        } else {
-            letsgo!(assembler
-                ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
-                ; and v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]  // and rs with self.inst.imm
-                ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp  // store result in rt
-            );
+        if self.inst.rt != 0 { // if destination register is 0, this is a nop
+            if self.inst.rs == self.inst.rt { // can save an instruction when the operands are the same register
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; and QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp  // and rs with self.inst.imm, store result
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; and v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]  // and rs with self.inst.imm
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp  // store result in rt
+                );
+            }
         }
 
         CompileInstructionResult::Continue
@@ -2750,6 +2805,28 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_daddiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: daddiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
+
+        if self.inst.rt != 0 { // if destination is zero, no-op
+            if self.inst.rs == 0 { // We can skip the add and use a move
+                letsgo!(assembler
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], DWORD self.inst.signed_imm as u32 as _ // sign-extends
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]      // put rs into v_tmp
+                    ; add v_tmp, DWORD self.inst.signed_imm as u32 as _       // add sign-extended signed_imm with overflow 
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp      // .
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn inst_j(&mut self) -> Result<(), InstructionFault> {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
 
@@ -2764,19 +2841,17 @@ impl Cpu {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
         println!("${:08X}[{:5}]: j ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest);
 
-        // move the dest into s_jump_target storage and jump to it
-        if (dest & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-            letsgo!(assembler
-                ; mov QWORD [rsp+s_jump_target], DWORD dest as i32 as _
-            );
-        } else {
-            letsgo!(assembler
-                ; mov v_tmp, QWORD dest as u64 as _
-                ; mov QWORD [rsp+s_jump_target], v_tmp
-            );
-        }
+        // since we have a known jump target, we can use the conditional branch code to always branch
+        // and make use of jumps within the same block
+        letsgo!(assembler
+            ; xor r_cond, r_cond
+            ; inc r_cond
+        );
 
-        self.jit_jump = true;
+        // compute jump offset relative to block start
+        let dest_offs = (dest as i64).wrapping_sub(self.jit_block_start_pc as i64);
+
+        self.jit_conditional_branch = Some((dest_offs as i64, false)); // not a `likely` branch
         self.next_is_delay_slot = true;
 
         CompileInstructionResult::Continue
@@ -2798,6 +2873,7 @@ impl Cpu {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
         println!("${:08X}[{:5}]: jal ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest as u32);
 
+        // always set r31 to self.pc
         if (self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
             letsgo!(assembler
                 ; mov QWORD [r_gpr + (31 * 8) as i32], DWORD self.pc as i32 as _
@@ -2809,22 +2885,20 @@ impl Cpu {
             );
         }
 
-        // move the dest into s_jump_target storage and jump to it
-        if (dest & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-            letsgo!(assembler
-                ; mov QWORD [rsp+s_jump_target], DWORD dest as i32 as _
-            );
-        } else {
-            letsgo!(assembler
-                ; mov v_tmp, QWORD dest as u64 as _
-                ; mov QWORD [rsp+s_jump_target], v_tmp
-            );
-        }
+        // since we have a known jump target, we can use the conditional branch code to always branch
+        // and make use of jumps within the same block
+        letsgo!(assembler
+            ; xor r_cond, r_cond
+            ; inc r_cond
+        );
 
-        self.jit_jump = true;
+        // compute jump offset relative to block start
+        let dest_offs = (dest as i64).wrapping_sub(self.jit_block_start_pc as i64);
+
+        self.jit_conditional_branch = Some((dest_offs as i64, false)); // not a `likely` branch
         self.next_is_delay_slot = true;
 
-        CompileInstructionResult::Stop
+        CompileInstructionResult::Continue
     }
 
 
@@ -2839,10 +2913,7 @@ impl Cpu {
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
-        letsgo!(assembler
-            ; mov rdx, QWORD [r_gpr + (self.inst.rs * 8) as i32] // add signed_imm (sign-extended from 32-bits) to source register
-            ; add rdx, DWORD self.inst.signed_imm as i32 as _    // .
-        );
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // rdx contains address
         letscall!(assembler, Cpu::read_u8_bridge);
@@ -2966,6 +3037,46 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_ll(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // TODO this function is implemented at its bare minimum right now
+        // TODO needs to perform the address exceptions that the above version does
+        println!("${:08X}[{:5}]: ll r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        letsgo!(assembler
+            ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
+            ; and v_tmp, BYTE 0x03       // .
+            ; jz >valid                  // .
+            ; int3           // call self.address_exception
+            ; int3           // end current run_block
+            ;valid:
+            ; mov v_tmp, QWORD &mut self.cp0gpr[Cop0_LLAddr] as *mut u64 as _ // set Cop0_LLAddr to physical addr
+            ; mov eax, edx               // address to 32-bit eax, clearing upper dword
+            ; and eax, DWORD 0x7FFF_FFFF as _ // "physical address"
+            ; shr eax, BYTE 4 as _       // shift right 32-bit
+            ; mov QWORD [v_tmp], rax     // move 64-bit addr to Cop0_LLAddr
+            ; mov v_tmp, QWORD &mut self.llbit as *mut bool as _
+            ; mov BYTE [v_tmp], BYTE 1i8 as _
+        );
+
+        // rdx contains address
+        letscall!(assembler, Cpu::read_u32_bridge);
+
+        // if destination register is 0, we still do the read (above) but don't store the result
+        if self.inst.rt != 0 { 
+            // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
+            letsgo!(assembler
+                ; movsxd v_tmp, eax   // sign-extend eax into v_tmp
+                ; mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     fn inst_lld(&mut self) -> Result<(), InstructionFault> {
         let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
         if (virtual_address & 0x07) != 0 {
@@ -3032,9 +3143,9 @@ impl Cpu {
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
         letsgo!(assembler
-            ; mov rdx, QWORD [r_gpr + (self.inst.rs * 8) as i32] // add signed_imm (sign-extended from 32-bits) to source register
-            ; add rdx, DWORD self.inst.signed_imm as _           // .
             ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
             ; and v_tmp, BYTE 0x03       // .
             ; jz >valid                  // .
@@ -3145,8 +3256,6 @@ impl Cpu {
         Ok(())
     }
 
-    #[allow(unreachable_code)] // remove after all code paths have been tested
-    #[allow(unused_variables)] // remove after all code paths have been tested
     fn build_inst_ori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("${:08X}[{:5}]: ori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.imm);
@@ -3185,6 +3294,32 @@ impl Cpu {
         self.write_u8(self.gpr[self.inst.rt] as u32, address as usize)?;
         Ok(())
     }
+
+    fn build_inst_sb(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: rb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // value to write in 2nd argument (edx)
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ; xor rdx, rdx
+            );
+        } else {
+            letsgo!(assembler
+                ; mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+            );
+        }
+
+        // place virtual address in the 3rd argument (r8)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+
+        // edx has 32-bit value to write, r8 contains address
+        letscall!(assembler, Cpu::write_u8_bridge);
+
+        // TODO check return value for error/exception
+        CompileInstructionResult::Continue
+    }
+
     
     fn inst_sh(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
@@ -3214,6 +3349,28 @@ impl Cpu {
             self.gpr[self.inst.rt] = 0;
         }
         Ok(())
+    }
+
+    unsafe extern "win64" fn inst_sc_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_sc() {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_sc_bridge: {:?}", e);
+            }
+        }
+    }
+
+    fn build_inst_sc(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sc r{}, ${:04X}(r{}) // TODO THIS FUNCTION IS NOT DONE", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+        letscall!(assembler, Cpu::inst_sc_bridge);
+        CompileInstructionResult::Continue
     }
 
     fn inst_sd(&mut self) -> Result<(), InstructionFault> {
@@ -3298,6 +3455,13 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_sdl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // place virtual address in 2nd argument (rdx)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        CompileInstructionResult::Continue
+    }
+
     fn inst_sdr(&mut self) -> Result<(), InstructionFault> {
         let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
 
@@ -3371,7 +3535,7 @@ impl Cpu {
         println!("${:08X}[{:5}]: sw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // value to write in 2nd argument
+        // value to write in 2nd argument (edx)
         if self.inst.rt == 0 {
             letsgo!(assembler
                 ; xor rdx, rdx
@@ -3382,10 +3546,10 @@ impl Cpu {
             );
         }
 
-        // place virtual address in the 3rd argument
+        // place virtual address in the 3rd argument (r8)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+
         letsgo!(assembler
-            ; mov r8, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // add signed_imm (sign-extended from 32-bits) to source register
-            ; add r8, DWORD self.inst.signed_imm as _            // .
             ; mov v_tmp, r8              // check if address is valid (low two bits 00)
             ; and v_tmp, BYTE 0x03       // .
             ; jz >valid                  // .
@@ -3478,6 +3642,29 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_xori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: xori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.rs, self.inst.imm);
+
+        if self.inst.rt != 0 { // if destination register is 0, this is a nop
+            if self.inst.rs == self.inst.rt { // can save an instruction when the operands are the same register
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; xor QWORD [r_gpr + (self.inst.rs*8) as i32], v_tmp  // or rs with self.inst.imm, store result
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov v_tmp_32, DWORD self.inst.imm as _              // zeroes out the upper dword of v_tmp
+                    ; xor v_tmp, QWORD [r_gpr + (self.inst.rs*8) as i32]  // or rs with self.inst.imm
+                    ; mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp  // store result in rt
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn regimm_unknown(&mut self) -> Result<(), InstructionFault> {
         panic!("CPU: unimplemented regimm op: 0b{:02b}_{:03b}", self.inst.regimm >> 3, self.inst.regimm & 0x07);
     }
@@ -3555,15 +3742,29 @@ impl Cpu {
         println!("${:08X}[{:5}]: add r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
-        letsgo!(assembler
-            ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
-            ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
-            ;   jno >no_overflow
-            ;   mov rax, DWORD 0x0001_0001 as _  // TEMP error code to find where the int3 comes from
-            ;   int3  // do self.overflow_exception()
-            ;no_overflow:
-        );
+        // start with v_tmp set to 0 if zero register is used
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
 
+        // don't add anything if rt is zero (thus, no possible overflow)
+        if self.inst.rt != 0 {
+            letsgo!(assembler
+                ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   jno >no_overflow
+                ;   mov rax, DWORD 0x0001_0001 as _  // TEMP error code to find where the int3 comes from
+                ;   int3  // do self.overflow_exception()
+                ;no_overflow:
+            );
+        }
+
+        // don't store if destination is zero register
         if self.inst.rd != 0 {
             letsgo!(assembler
                 ;   movsxd v_tmp2, v_tmp_32
@@ -3586,11 +3787,22 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
-            if self.inst.rt == 0 { // We can skip the sub
+            if self.inst.rt == 0 && self.inst.rs == 0 { // we can skip the entire operation, set the result to zero
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rt == 0 { // We can skip the add
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 32-bit value to v_tmp
                     ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
-                    ;   mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp2        // store in rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2        // store in rd
+                );
+            } else if self.inst.rs == 0 { // We can skip the add
+                letsgo!(assembler
+                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // move 32-bit value to v_tmp
+                    ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2        // store in rd
                 );
             } else {
                 letsgo!(assembler
@@ -3602,7 +3814,7 @@ impl Cpu {
             }
         }
 
-        CompileInstructionResult::Stop
+        CompileInstructionResult::Continue
     }
 
 
@@ -3617,7 +3829,7 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
-            if self.inst.rs == 0 || self.inst.rt == 0 { // if either source register is 0, set our destination register
+            if self.inst.rs == 0 || self.inst.rt == 0 { // if either source register is 0, set our destination register to 0
                 letsgo!(assembler
                     ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], DWORD 0i32 as _
                 );
@@ -3768,6 +3980,30 @@ impl Cpu {
     fn special_dsll32(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << (32 + self.inst.sa);
         Ok(())
+    }
+
+    fn build_special_dsll32(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsll32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.rs, self.inst.sa as u8);
+
+        if self.inst.rd != 0 { // NOP on rd==r0
+            if self.inst.rt == 0 { // zero out rd
+                letsgo!(assembler
+                    ; xor v_tmp, v_tmp
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov cl, BYTE self.inst.sa as _
+                    ; add cl, 32
+                    ; mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ; shl v_tmp, cl
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn special_dsra(&mut self) -> Result<(), InstructionFault> {
@@ -3944,15 +4180,23 @@ impl Cpu {
                  self.inst.rs, self.inst.rt);
 
         // must be 32-bit unsigned numbers
-        letsgo!(assembler
-            ;   mov eax, DWORD [r_gpr + (self.inst.rs * 8) as i32]   // first operand in eax
-            ;   mul DWORD [r_gpr + (self.inst.rt * 8) as i32]        // second operand m32
-                                                                     // result in edx:eax (both are caller saved)
-            ;   mov v_tmp_32, eax                // zero-extend lo/hi
-            ;   mov QWORD [rsp + s_lo], v_tmp    // .
-            ;   mov v_tmp_32, eax                // .
-            ;   mov QWORD [rsp + s_hi], v_tmp    // .
-        );
+        if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+                ;   mov QWORD [rsp + s_lo], v_tmp
+                ;   mov QWORD [rsp + s_hi], v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov eax, DWORD [r_gpr + (self.inst.rs * 8) as i32]   // first operand in eax
+                ;   mul DWORD [r_gpr + (self.inst.rt * 8) as i32]        // second operand m32
+                                                                         // result in edx:eax (both are caller saved)
+                ;   mov v_tmp_32, eax                // zero-extend lo/hi
+                ;   mov QWORD [rsp + s_lo], v_tmp    // .
+                ;   mov v_tmp_32, eax                // .
+                ;   mov QWORD [rsp + s_hi], v_tmp    // .
+            );
+        }
 
         CompileInstructionResult::Continue
     }
@@ -3961,6 +4205,37 @@ impl Cpu {
         self.gpr[self.inst.rd] = !(self.gpr[self.inst.rs] | self.gpr[self.inst.rt]);
         Ok(())
     }
+
+    fn build_special_nor(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: nor r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 { // if dest register is 0, this is a no-op
+            if self.inst.rs == 0 { // if either source register is 0, set our destination register directly
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   not v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } if self.inst.rt == 0 { // if either source register is 0, set our destination register directly
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   not v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   or  v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   not v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_or(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] | self.gpr[self.inst.rt];
@@ -3971,11 +4246,25 @@ impl Cpu {
         println!("${:08X}[{:5}]: or r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
-        letsgo!(assembler
-            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
-            ;   or  v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
-            ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
-        );
+        if self.inst.rd != 0 { // NOP on write to zero reg
+            if self.inst.rs == 0 { // just copy rt over
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rt == 0 { // just copy rs over
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else { // do the OR
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   or  v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
 
         CompileInstructionResult::Continue
     }
@@ -4014,6 +4303,16 @@ impl Cpu {
             self.trap_exception()?;
         }
         Ok(())
+    }
+
+    fn build_special_tgeu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        if self.inst.rt == 0 { // trap will always be true if rt is r0
+            todo!();
+        } else {
+            //letsgo!(assembler
+            todo!();
+        }
+        CompileInstructionResult::Continue
     }
 
     fn regimm_tgeiu(&mut self) -> Result<(), InstructionFault> {
@@ -4104,14 +4403,21 @@ impl Cpu {
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
-            letsgo!(assembler
-                ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
-                ;   and cl, BYTE 0x1F as _                                  // mod with 31
-                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
-                ;   shl v_tmp_32, cl                                        // 32-bit shift left
-                ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
-                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
-            );
+            if self.inst.rt == 0 { // if source is zero, destination is zero
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                    ;   and cl, BYTE 0x1F as _                                  // mod with 31
+                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
+                    ;   shl v_tmp_32, cl                                        // 32-bit shift left
+                    ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
+                );
+            }
         }
 
         CompileInstructionResult::Continue
@@ -4128,10 +4434,31 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 {
+            if self.inst.rs == 0 { // if rs is zero, set v_tmp to 0
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
+                );
+            }
+
             letsgo!(assembler
                 ;   xor rax, rax                                          // value to store at the end
-                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
-                ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+            );
+
+            if self.inst.rt == 0 { // compare against 0 or rt
+                letsgo!(assembler
+                    ;   cmp v_tmp, BYTE 0i8 as _
+                );
+            } else {
+                letsgo!(assembler
+                    ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+                );
+            }
+
+            letsgo!(assembler
                 ;   jge >skip                                             // if rs >= rt (signed), branch
                 ;   inc rax                                               // if rs < rt, set rax=1
                 ;skip:
@@ -4154,10 +4481,31 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 {
+            if self.inst.rs == 0 { // if rs is zero, set v_tmp to 0
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
+                );
+            }
+
             letsgo!(assembler
                 ;   xor rax, rax                                          // value to store at the end
-                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // load rs to v_tmp
-                ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+            );
+
+            if self.inst.rt == 0 { // compare against 0 or rt
+                letsgo!(assembler
+                    ;   cmp v_tmp, BYTE 0i8 as _
+                );
+            } else {
+                letsgo!(assembler
+                    ;   cmp v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // compare rs to rt
+                );
+            }
+
+            letsgo!(assembler
                 ;   jae >skip                                             // if rs >= rt (unsigned), branch
                 ;   inc rax                                               // if rs < rt, set rax=1
                 ;skip:
@@ -4180,6 +4528,30 @@ impl Cpu {
         //self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) as i32) >> self.inst.sa) as u64;
         Ok(())
     }
+
+    fn build_special_sra(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.sa);
+
+        if self.inst.rd != 0 { // if dest register is 0, this is a no-op
+            if self.inst.rt == 0 { // if source register is 0, clear our destination register
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   shr v_tmp, BYTE self.inst.sa as _                      // unsigned shift the entire 64-bit
+                    ;   movsxd v_tmp2, v_tmp_32                                // sign-extend the resulting 32-bit value
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2  // store in rd
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_srav(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x1F)) as i32) as u64;
@@ -4223,14 +4595,23 @@ impl Cpu {
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
-            letsgo!(assembler
-                ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
-                ;   and cl, BYTE 0x1F as _                                  // mod with 31
-                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
-                ;   shr v_tmp_32, cl                                        // 32-bit unsigned shift right
-                ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
-                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
-            );
+            if self.inst.rt == 0 { // if source is zero, zero out destination
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                // TODO test, but I'm pretty sure the sign extension is unnecessary, since it'll
+                // always be a positive sign after the shift
+                letsgo!(assembler
+                    ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                    ;   and cl, BYTE 0x1F as _                                  // mod with 31
+                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // take value to shift into v_tmp_32
+                    ;   shr v_tmp_32, cl                                        // 32-bit unsigned shift right
+                    ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend to 64-bits
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
+                );
+            }
         }
 
         CompileInstructionResult::Continue
@@ -4264,18 +4645,32 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
-            if self.inst.rt == 0 { // We can skip the sub
+            if self.inst.rs == 0 && self.inst.rt == 0 { // zero out the result
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rt == 0 { // We can skip the sub, we know rs is not zero
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 32-bit value to v_tmp
                     ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
-                    ;   mov QWORD [r_gpr + (self.inst.rt*8) as i32], v_tmp2        // store in rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // store in rd
                 );
             } else {
+                if self.inst.rs == 0 { // zero out v_tmp, still perform the sub negating value in rt
+                    letsgo!(assembler
+                        ;   xor v_tmp, v_tmp
+                    );
+                } else {
+                    letsgo!(assembler
+                        ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
+                    );
+                }
+
                 letsgo!(assembler
-                    ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
-                    ;   sub v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // 32-bit sub rt
-                    ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend v_tmp into rd
-                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // .
+                    ;   sub v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // 64-bit sub rt
+                    ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend v_tmp_32 into rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // .
                 );
             }
         }
@@ -4294,6 +4689,10 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_sync(&mut self, _: &mut Assembler) -> CompileInstructionResult {
+        CompileInstructionResult::Continue
+    }
+
     fn special_xor(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs] ^ self.gpr[self.inst.rt];
         Ok(())
@@ -4304,25 +4703,28 @@ impl Cpu {
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
-            if self.inst.rs == 0 { // if either source register is 0, set our destination register
+            if self.inst.rs == 0 && self.inst.rt == 0 { // if both are zero, result is zero
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rs == 0 { // if either source register is 0, set our destination register
                 letsgo!(assembler
                     ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
                 );
             } else if self.inst.rt == 0 {
                 letsgo!(assembler
                     ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
                 );
-            } else {
+            } else { // otherwise perform the xor
                 letsgo!(assembler
                     ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
                     ;   xor v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
                 );
             }
-
-            // store result
-            letsgo!(assembler
-                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
-            );
         }
 
         CompileInstructionResult::Continue
