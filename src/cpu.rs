@@ -537,14 +537,14 @@ impl Cpu {
 
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_unknown, Cpu::build_inst_sltiu  , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_unknown, Cpu::build_inst_cache  ,
     /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
-    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
+    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sdc1   , Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
             ],
 
             jit_special_table: [ 
@@ -552,7 +552,7 @@ impl Cpu {
     /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown, Cpu::build_special_srlv  , Cpu::build_inst_unknown,
     /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_sync,
     /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_special_divu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or  , Cpu::build_special_xor   , Cpu::build_special_nor ,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
     /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
@@ -826,7 +826,9 @@ impl Cpu {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in write_u32_bridge: {:?}", e);
+                error!("error in write_u32_bridge: {:?}", e);
+                std::arch::asm!("int3");
+                0
             }
         }
     }
@@ -2426,17 +2428,94 @@ impl Cpu {
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
+                0b00_001 => { // DMFC
+                    println!("${:08X}[{:5}]: dmfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                             self.inst.rt, self.inst.rd);
+
+                    // register number rd in second argument
+                    letsgo!(assembler
+                        ;   mov rdx, DWORD self.inst.rd as _
+                    );
+
+                    // result in rax
+                    letscop!(assembler, cop, cop1::Cop1::dmfc_bridge);
+
+                    // store result in rt
+                    if self.inst.rt != 0 {
+                        letsgo!(assembler
+                            ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
+                        );
+                    }
+                    return CompileInstructionResult::Stop;
+                },
+
+                0b00_010 => { // CFC
+                    println!("${:08X}[{:5}]: cfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                             self.inst.rt, self.inst.rd);
+
+                    // register number rd in second argument
+                    letsgo!(assembler
+                        ;   mov rdx, DWORD self.inst.rd as _
+                    );
+
+                    // result in eax
+                    letscop!(assembler, cop, cop1::Cop1::cfc_bridge);
+
+                    // store result in rt
+                    if self.inst.rt != 0 {
+                        letsgo!(assembler
+                            ;   movsxd v_tmp2, eax
+                            ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
+                        );
+                    }
+                    return CompileInstructionResult::Stop;
+                },
+
+
+                0b00_101 => { // DMTC
+                    println!("${:08X}[{:5}]: dmtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                             self.inst.rd, self.inst.rt);
+
+                    // contents of rt in second arg, register number rd in third
+                    if self.inst.rt == 0 {
+                        letsgo!(assembler
+                            ;   xor rdx, rdx
+                        );
+                    } else {
+                        letsgo!(assembler
+                            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                        );
+                    }
+
+                    letsgo!(assembler
+                        ;   mov r8, DWORD self.inst.rd as _
+                    );
+
+                    letscop!(assembler, cop, cop1::Cop1::dmtc_bridge);
+                },
+
                 0b00_110 => { // CTC
                     println!("${:08X}[{:5}]: ctc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
                     // contents of rt in second arg, register number rd in third
+                    if self.inst.rt == 0 {
+                        letsgo!(assembler
+                            ;   xor rdx, rdx
+                        );
+                    } else {
+                        letsgo!(assembler
+                            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                        );
+                    }
+
                     letsgo!(assembler
-                        ; mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
-                        ; mov r8, DWORD self.inst.rd as _  // zeroes out high dword of rdx
+                        ; mov r8, DWORD self.inst.rd as _
                     );
+
                     letscop!(assembler, cop, cop1::Cop1::ctc_bridge);
                 },
+
                 _ => panic!("JIT: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
             }
         }
@@ -2589,14 +2668,29 @@ impl Cpu {
         let cop0_op = (self.inst.v >> 21) & 0x1F;
         match cop0_op {
             0b00_000 => { // MFC
-                //self.gpr[self.inst.rt] = (match self.inst.rd {
-                //    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
-                //        self.cp0gpr_latch
-                //    },
+                if self.inst.rt != 0 {
+                    match self.inst.rd {
+                        7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                            letsgo!(assembler
+                                ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
+                            );
+                        },
 
-                //    _ => self.cp0gpr[self.inst.rd],
-                //} as i32) as u64;
-                todo!()
+                        _ => {
+                            letsgo!(assembler
+                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
+                            );
+                        },
+                    }
+
+                    letsgo!(assembler
+                        ;   mov v_tmp_32, DWORD [rax]
+                        ;   movsxd v_tmp2, v_tmp_32
+                        ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
+                    );
+                }
+
+                CompileInstructionResult::Continue
             },
 
             0b00_001 => { // DMFC
@@ -2607,14 +2701,35 @@ impl Cpu {
 
                 //    _ => self.cp0gpr[self.inst.rd],
                 //};
-                todo!()
+                if self.inst.rt != 0 {
+                    match self.inst.rd {
+                        7 | 21 | 22 | 23 | 24 | 25 | 31 => {
+                            letsgo!(assembler
+                                ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
+                            );
+                        },
+
+                        _ => {
+                            letsgo!(assembler
+                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
+                            );
+                        },
+                    }
+
+                    letsgo!(assembler
+                        ;   mov v_tmp, QWORD [rax]
+                        ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+                    );
+                }
+
+                CompileInstructionResult::Continue
             },
 
             0b00_100 => { // MTC
                 println!("${:08X}[{:5}]: mtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                          self.inst.rd, self.inst.rt);
 
-                // prepare arg1 opcode
+                // opcode in arg 2
                 letsgo!(assembler
                     ; mov edx, DWORD self.inst.v as _
                 );
@@ -2832,6 +2947,14 @@ impl Cpu {
         let condition = (self.gpr[self.inst.rs] as i64) <= 0;
         self.branch(condition);
         Ok(())
+    }
+
+    fn build_inst_blez(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // build_branch will compare rs to rt. blez only uses rs, so we set rt to r0
+        self.inst.rt = 0;
+        build_branch!(self, assembler, "blez", jg, false, true); // jump if greater than 0 to not branch, 
+                                                                 // branch taken for blez r0 
+        CompileInstructionResult::Continue
     }
 
     fn inst_blezl(&mut self) -> Result<(), InstructionFault> {
@@ -3490,7 +3613,7 @@ impl Cpu {
     }
 
     fn build_inst_sb(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: rb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        println!("${:08X}[{:5}]: sb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // value to write in 2nd argument (edx)
@@ -3629,6 +3752,32 @@ impl Cpu {
         let value = self.cop1.sdc(self.inst.rt)?;
         self.write_u64(value, address as usize)?;
         Ok(())
+    }
+
+    unsafe extern "win64" fn inst_sdc1_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_sdc1() {
+            Ok(_) => 0,
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_sdc1_bridge: {:?}", e);
+            }
+        }
+    }
+
+    fn build_inst_sdc1(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sdc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // opcode in rdx (2nd arg)
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+
+        letscall!(assembler, Cpu::inst_sdc1_bridge);
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_swc1(&mut self) -> Result<(), InstructionFault> {
@@ -4252,6 +4401,25 @@ impl Cpu {
         }
     }
 
+    // build an unsigned divide of rax/rcx
+    // (LO) is placed in rax (quotient)
+    // (HI) is placed in rdx (remainder)
+    fn build_divide_unsigned(&mut self, assembler: &mut Assembler) {
+        letsgo!(assembler
+            // check divisor for 0 value
+            ;   cmp rcx, BYTE 0i8 as _
+            ;   jne >not_zero
+            // on divide by zero, set default in rax:rdx
+            ;   mov rdx, rax                       // (HI) dividend into rdx
+            ;   mov rax, DWORD 0xFFFF_FFFFu32 as _ // (LO) sign-extended -1
+            ;   jmp >skip_div
+            ;not_zero:
+            ;   xor rdx, rdx
+            ;   div rcx  // perform (rdx:rax) / rcx, quotient in rax, remainder in rdx
+            ;skip_div:
+        );
+    }
+
     fn special_ddiv(&mut self) -> Result<(), InstructionFault> {
         let rs = self.gpr[self.inst.rs] as i64;
         let rt = self.gpr[self.inst.rt] as i64;
@@ -4291,6 +4459,46 @@ impl Cpu {
         self.hi = (self.hi as i32) as u64;
 
         Ok(())
+    }
+
+    fn build_special_divu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: divu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
+
+        // dividend goes into rax (64-bit divide but truncated to 32-bit values)
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor rax, rax
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov eax, DWORD [r_gpr + (self.inst.rt * 8) as i32] // zero-extend
+            );
+        }
+
+        // divisor goes into rcx
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor rcx, rcx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov ecx, DWORD [r_gpr + (self.inst.rs * 8) as i32] // zero-extend
+            );
+        }
+
+        // result in rdx:rax
+        self.build_divide_unsigned(assembler);
+
+        // store quotient in LO, remainder in HI
+        letsgo!(assembler
+            ;   movsxd v_tmp, eax             // sign-extend 32-bit
+            ;   mov QWORD [rsp + s_lo], v_tmp // .
+            ;   movsxd v_tmp, edx             // sign-extend 32-bit
+            ;   mov QWORD [rsp + s_hi], v_tmp // .
+        );
+
+        CompileInstructionResult::Continue
     }
 
     fn special_dmult(&mut self) -> Result<(), InstructionFault> {
@@ -4848,7 +5056,8 @@ impl Cpu {
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]  // zeroes out upper dword of v_tmp
                     ;   shl v_tmp_32, BYTE self.inst.sa as _                     // 32-bit shift left
-                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp     // sign-extended store in rd
+                    ;   movsxd v_tmp2, v_tmp_32                                  // sign-extended store in rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2    // .
                 );
             }
         }
