@@ -5,9 +5,10 @@
 #[allow(unused_imports)]
 use tracing::{debug, error, info};
 
+use dynasmrt::{dynasm, DynasmApi};
 use num_traits::{Float, Zero};
 
-use crate::cpu::InstructionFault;
+use crate::cpu::{InstructionFault, Assembler, letsgo};
 
 const _Cop1_Revision     : usize = 0;
 const _Cop1_ControlStatus: usize = 31;
@@ -182,6 +183,14 @@ impl Cop1 {
         self.condition_signal
     }
 
+    // move the condition signal value into al. clobbers v_tmp
+    pub fn build_condition_signal_to_al(&self, assembler: &mut Assembler) {
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD &self.condition_signal as *const bool as _
+            ;   mov al, BYTE [v_tmp]
+        );
+    }
+
     // Update the cause bits in fcr_control_status and if the corresponding enable bit is set,
     // raise an exception. The unimplemented instruction bit (E) always generates an exception
     fn update_cause(&mut self, cause: u64, update_flag: bool) -> Result<(), InstructionFault> {
@@ -339,6 +348,17 @@ impl Cop1 {
         }
     }
 
+    pub unsafe extern "win64" fn mfc_bridge(cop1: *mut Cop1, rd: u64) -> u32 {
+        let cop1 = { &mut *cop1 };
+        match cop1.mfc(rd as usize) {
+            Ok(v) => v,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("mfc_bridge error = {:?}", err);
+            }
+        }
+    }
+
     // Move (general purpose value) to Coprocessor
     pub fn mtc(&mut self, value: u32, rd: usize) -> Result<(), InstructionFault> {
         if self.fr_bit { 
@@ -354,6 +374,17 @@ impl Cop1 {
             }
         };
         Ok(())
+    }
+
+    pub unsafe extern "win64" fn mtc_bridge(cop1: *mut Cop1, rt_value: u32, rd: u64) -> i64 {
+        let cop1 = { &mut *cop1 };
+        match cop1.mtc(rt_value, rd as usize) {
+            Ok(_) => 0,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("mtc_bridge error = {:?}", err);
+            }
+        }
     }
 
     pub fn dmfc(&mut self, rd: usize) -> Result<u64, InstructionFault> {
@@ -1071,5 +1102,16 @@ impl Cop1 {
         }
 
         self.function_table[self.inst.special as usize](self)
+    }
+
+    pub unsafe extern "win64" fn special_bridge(cop1: *mut Cop1, inst: u32) -> i64 {
+        let cop1 = { &mut *cop1 };
+        match cop1.special(inst) {
+            Ok(_) => 0,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("special_bridge error = {:?}", err);
+            }
+        }
     }
 }
