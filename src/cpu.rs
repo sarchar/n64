@@ -583,10 +583,10 @@ impl Cpu {
 
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_bgtz   ,
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu  , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_inst_unknown, Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_unknown, Cpu::build_inst_lwu    ,
     /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_unknown, Cpu::build_inst_cache  ,
     /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ldc1   , Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
@@ -595,14 +595,14 @@ impl Cpu {
 
             jit_special_table: [ 
                //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown, Cpu::build_special_srlv  , Cpu::build_inst_unknown,
-    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_sync,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_special_dsllv , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_special_divu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_inst_unknown, Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or  , Cpu::build_special_xor   , Cpu::build_special_nor ,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_teq   , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_inst_unknown, Cpu::build_special_dsll32, Cpu::build_inst_unknown, Cpu::build_special_dsrl32, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown , Cpu::build_special_srlv  , Cpu::build_inst_unknown,
+    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break, Cpu::build_inst_unknown  , Cpu::build_special_sync,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor ,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
+    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
+    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_inst_unknown, Cpu::build_special_dsll32, Cpu::build_inst_unknown , Cpu::build_special_dsrl32, Cpu::build_inst_unknown,
             ],
 
             jit_regimm_table: [ 
@@ -721,11 +721,14 @@ impl Cpu {
         trace!(target: "JIT", "read_u8_bridge from ${:08X}", virtual_address as u32);
 
         let cpu = { &mut *cpu };
+        //if virtual_address == 2 { std::arch::asm!("int3"); }
         match cpu.read_u8(virtual_address as usize) {
             Ok(value) => value,
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in read_u8_bridge: {:?}", e);
+                error!("error in read_u8_bridge: {:?}", e);
+                std::arch::asm!("int3");
+                0
             }
         }
     }
@@ -3136,6 +3139,14 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_inst_bgtz(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // build_branch will compare rs to rt. bgtz only uses rs, so we set rt to r0
+        self.inst.rt = 0;
+        build_branch!(self, assembler, "bgtz", jle, false, false); // jump if less than or equal to 0 to not take the branch, 
+                                                                   // branch not taken for bgtz r0 
+        CompileInstructionResult::Continue
+    }
+
     fn inst_blez(&mut self) -> Result<(), InstructionFault> {
         let condition = (self.gpr[self.inst.rs] as i64) <= 0;
         self.branch(condition);
@@ -3204,6 +3215,43 @@ impl Cpu {
         }
         Ok(())
     }
+
+    fn build_inst_daddi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: addi r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
+
+        if self.inst.rs == 0 { // source is zero, copy over the immediate
+            if self.inst.rt != 0 { // don't overwrite r0
+                letsgo!(assembler
+                    ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], DWORD self.inst.signed_imm as u32 as _
+                );
+            }
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+
+            // skip add and checking overflow if signed_imm is 0
+            if self.inst.signed_imm != 0 {
+                letsgo!(assembler
+                    ;   add v_tmp, DWORD self.inst.signed_imm as u32 as _ // add sign-extended signed_imm to 64-bit v_tmp
+                    ;   jno >no_overflow
+                    ;   int3  // do self.overflow_exception()
+                    ;no_overflow:
+                );
+            }
+
+            // don't overwrite r0
+            if self.inst.rt != 0 {
+                letsgo!(assembler
+                    ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
    fn inst_daddiu(&mut self) -> Result<(), InstructionFault> {
         // no integer overflow exception occurs with DADDIU
@@ -4735,18 +4783,18 @@ impl Cpu {
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 32-bit value to v_tmp
                     ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
-                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2        // store in rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // store in rd
                 );
             } else if self.inst.rs == 0 { // We can skip the add
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // move 32-bit value to v_tmp
                     ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend into v_tmp2
-                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2        // store in rd
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // store in rd
                 );
             } else {
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
-                    ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // 32-bit sub rt
+                    ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // 32-bit add rt
                     ;   movsxd v_tmp2, v_tmp_32                                    // sign-extend v_tmp into rd
                     ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2      // .
                 );
@@ -4791,6 +4839,15 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_break(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: break", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        letsgo!(assembler
+            ;   mov rax, QWORD 0xFF00_00FF_FF00_1111u64 as _ // search code
+            ;   int3    // call self.breakpoint_exception()
+        );
+        CompileInstructionResult::Continue
+    }
+
     fn special_dadd(&mut self) -> Result<(), InstructionFault> {
         // add does cause an overflow exception
         let rs = self.gpr[self.inst.rs];
@@ -4808,12 +4865,82 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_dadd(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dadd r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        // start with v_tmp set to 0 if zero register is used
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
+
+        // don't add anything if rt is zero (thus, no possible overflow)
+        if self.inst.rt != 0 {
+            letsgo!(assembler
+                ;   add v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   jno >no_overflow
+                ;   mov rax, DWORD 0x0003_0003 as _  // TEMP error code to find where the int3 comes from
+                ;   int3  // do self.overflow_exception()
+                ;no_overflow:
+            );
+        }
+
+        // don't store if destination is zero register
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_daddu(&mut self) -> Result<(), InstructionFault> {
         // daddu does not cause an overflow exception
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_add(self.gpr[self.inst.rt]);
 
         Ok(())
     }
+
+    fn build_special_daddu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: daddu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 { // if destination is zero, no-op
+            if self.inst.rt == 0 && self.inst.rs == 0 { // we can skip the entire operation, set the result to zero
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rt == 0 { // We can skip the add
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 64-bit value to v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // store in rd
+                );
+            } else if self.inst.rs == 0 { // We can skip the add
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // move 64-bit value to v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // store in rd
+                );
+            } else {
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
+                    ;   add v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // 64-bit add rt
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // .
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn divide(&mut self, dividend: i64, divisor: i64) {
         if divisor != 0 {
@@ -4952,6 +5079,32 @@ impl Cpu {
 
         Ok(())
     }
+
+    fn build_special_dmult(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dmult r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
+
+        // must be 64-bit unsigned numbers
+        if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+                ;   mov QWORD [rsp + s_lo], v_tmp
+                ;   mov QWORD [rsp + s_hi], v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rax, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // first 64-bit operand sign-extended in rax
+                ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // second 64-bit operand sign-extended into rdx
+                ;   mul rdx                 // 64-bit unsigned multiply
+                                            // result in rdx:rax (both are caller saved)
+                ;   mov QWORD [rsp + s_lo], rax    // low 64-bits in LO
+                ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits in HI
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_dmultu(&mut self) -> Result<(), InstructionFault> {
         // must be 32-bit unsigned numbers
@@ -5136,6 +5289,33 @@ impl Cpu {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x3F);
         Ok(())
     }
+
+    fn build_special_dsrlv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsrlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        if self.inst.rd != 0 { // if dest is zero, this is a no-op
+            if self.inst.rt == 0 { // if source is zero, zero out destination
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                // TODO test, but I'm pretty sure the sign extension is unnecessary, since it'll
+                // always be a positive sign after the shift
+                letsgo!(assembler
+                    ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                    ;   and cl, BYTE 0x3F as _                                  // mod with 63
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // take value to shift into v_tmp
+                    ;   shr v_tmp, cl                                           // 64-bit unsigned shift right
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // save in rd
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_dsub(&mut self) -> Result<(), InstructionFault> {
         // sub causes an overflow exception
@@ -5749,7 +5929,8 @@ impl Cpu {
                 letsgo!(assembler
                     ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]  // zeroes out upper dword of v_tmp
                     ;   shr v_tmp_32, BYTE self.inst.sa as _                     // unsigned shift right
-                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp     // store in rd
+                    ;   movsxd v_tmp2, v_tmp_32                                  // sign-extend result
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2    // store in rd
                 );
             }
         }
@@ -5805,6 +5986,44 @@ impl Cpu {
         }
         Ok(())
     }
+
+    fn build_special_sub(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: sub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        // start with v_tmp set to 0 if zero register is used
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
+
+        // don't add anything if rt is zero (thus, no possible overflow)
+        if self.inst.rt != 0 {
+            letsgo!(assembler
+                ;   sub v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   jno >no_overflow
+                ;   mov rax, DWORD 0x00E1_00E1 as _  // TEMP error code to find where the int3 comes from
+                ;   int3  // do self.overflow_exception()
+                ;no_overflow:
+            );
+        }
+
+        // don't store if destination is zero register
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   movsxd v_tmp2, v_tmp_32
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_subu(&mut self) -> Result<(), InstructionFault> {
         // subu does not cause an overflow exception
