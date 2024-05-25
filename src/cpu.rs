@@ -587,30 +587,30 @@ impl Cpu {
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu  , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
     /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_unknown, Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_unknown, Cpu::build_inst_lwu    ,
-    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_unknown, Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_unknown, Cpu::build_inst_cache  ,
+    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_lwr    , Cpu::build_inst_lwu    ,
+    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_swr    , Cpu::build_inst_cache  ,
     /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ldc1   , Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
     /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sdc1   , Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
             ],
 
             jit_special_table: [ 
                //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown , Cpu::build_special_srlv  , Cpu::build_inst_unknown,
-    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break, Cpu::build_inst_unknown  , Cpu::build_special_sync,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_inst_unknown, Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor ,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown,
-    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_inst_unknown, Cpu::build_special_dsll32, Cpu::build_inst_unknown , Cpu::build_special_dsrl32, Cpu::build_inst_unknown,
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
+    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break, Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
+    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor   ,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
+    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown  ,
+    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32, Cpu::build_inst_unknown , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
             ],
 
             jit_regimm_table: [ 
                // _000                     _001                      _010                     _011                     _100                     _101                     _110                     _111
-    /* 00_ */  Cpu::build_regimm_bltz , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
-    /* 01_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
-    /* 10_ */  Cpu::build_inst_unknown, Cpu::build_regimm_bgezal, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_reserved,
-    /* 11_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 00_ */  Cpu::build_regimm_bltz , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 01_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 10_ */  Cpu::build_inst_unknown, Cpu::build_regimm_bgezal, Cpu::build_inst_unknown, Cpu::build_regimm_bgezall, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_reserved,
+    /* 11_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
             ],
 
 
@@ -864,7 +864,7 @@ impl Cpu {
         trace!(target: "JIT", "write_u16_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
-        match cpu.write_u8(value, virtual_address as usize) {
+        match cpu.write_u16(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
                 // TODO handle errors better
@@ -3854,6 +3854,30 @@ impl Cpu {
         Ok(())
     }
 
+    unsafe extern "win64" fn inst_lwl_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_lwl() {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_lwl_bridge: {:?}", e);
+            }
+        }
+    }
+
+    // TODO
+    fn build_inst_lwl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: lwl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+        letscall!(assembler, Cpu::inst_lwl_bridge);
+        CompileInstructionResult::Continue
+    }
+
+
     fn inst_lwr(&mut self) -> Result<(), InstructionFault> {
         let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
 
@@ -3871,6 +3895,29 @@ impl Cpu {
         // set value
         self.gpr[self.inst.rt] = (new as i32) as u64; 
         Ok(())
+    }
+
+    unsafe extern "win64" fn inst_lwr_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_lwr() {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_lwr_bridge: {:?}", e);
+            }
+        }
+    }
+
+    // TODO
+    fn build_inst_lwr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: lwr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+        letscall!(assembler, Cpu::inst_lwr_bridge);
+        CompileInstructionResult::Continue
     }
 
     fn inst_ldc1(&mut self) -> Result<(), InstructionFault> {
@@ -4571,6 +4618,29 @@ impl Cpu {
         Ok(())
     }
 
+    unsafe extern "win64" fn inst_swl_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_swl() {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_swl_bridge: {:?}", e);
+            }
+        }
+    }
+
+    // TODO
+    fn build_inst_swl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: swl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+        letscall!(assembler, Cpu::inst_swl_bridge);
+        CompileInstructionResult::Continue
+    }
+
     fn inst_swr(&mut self) -> Result<(), InstructionFault> {
         let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
 
@@ -4606,6 +4676,30 @@ impl Cpu {
         self.write_u32_phys(new, address)?;
         Ok(())
     }
+
+    unsafe extern "win64" fn inst_swr_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+        let cpu = { &mut *cpu };
+        cpu.decode_instruction(inst);
+        match cpu.inst_swr() {
+            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Err(e) => {
+                // TODO handle errors better
+                panic!("error in inst_swr_bridge: {:?}", e);
+            }
+        }
+    }
+
+    // TODO
+    fn build_inst_swr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: swr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+        letscall!(assembler, Cpu::inst_swr_bridge);
+        CompileInstructionResult::Continue
+    }
+
 
     fn inst_xori(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] ^ self.inst.imm;
@@ -4667,6 +4761,18 @@ impl Cpu {
 
         Ok(())
     }
+
+    fn build_regimm_bgezall(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // build_branch will compare rs to rt. bgezal only uses rs, so we set rt to r0
+        self.inst.rt = 0;
+        build_branch!(self, assembler, "bgezall", jl, true, true); // JL for signed comparison
+
+        // the link register is always set to the address after the delay slot
+        letslink!(self, assembler);
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn regimm_bgez(&mut self) -> Result<(), InstructionFault> {
         let condition = (self.gpr[self.inst.rs] as i64) >= 0;
@@ -4958,6 +5064,40 @@ impl Cpu {
         }
     }
 
+    // build an signed divide of rax/rcx
+    // (LO) is placed in rax (quotient)
+    // (HI) is placed in rdx (remainder)
+    fn build_divide(&mut self, assembler: &mut Assembler) {
+        letsgo!(assembler
+            // check divisor for 0 value
+            ;   cmp rcx, BYTE 0i8 as _
+            ;   jne >not_zero
+            // on divide by zero, set default in rax:rdx
+            ;   mov rdx, rax                       // (HI) dividend into rdx
+            ;   cmp rax, BYTE 0                    // check if dividend is negative
+            ;   jge >not_neg                       // .
+            ;   mov rax, BYTE 1                    // set (LO) to to 1 if dividend is negative
+            ;   jmp >skip_div
+            ;not_neg:
+            ;   mov rax, DWORD 0xFFFF_FFFFu32 as _ // otherwise set (LO) sign-extended -1
+            ;   jmp >skip_div
+            ;not_zero:
+            ;   mov v_tmp, QWORD i64::MIN as _    // compare 64-bit to sign-extended i64 MIN
+            ;   cmp rax, v_tmp
+            ;   jne >do_div
+            ;   cmp rcx, DWORD -1i32 as _          // compare 64-bit divisor to -1
+            ;   jne >do_div
+            // can't negate this value, so default to:
+            ;   mov rax, v_tmp
+            ;   xor rdx, rdx
+            ;   jmp >skip_div
+            ;do_div:
+            ;   cqo       // sign extend rax into rdx:rax
+            ;   idiv rcx  // perform (rdx:rax) / rcx, quotient in rax, remainder in rdx
+            ;skip_div:
+        );
+    }
+
     fn divide_unsigned(&mut self, dividend: u64, divisor: u64) {
         if divisor != 0 {
             // ideally the compiler will optmize this to a divmod operation
@@ -4995,12 +5135,91 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_ddiv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: ddiv r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
+
+        // dividend goes into rax
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor rax, rax
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rax, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
+
+        // divisor goes into rcx
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor rcx, rcx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rcx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            );
+        }
+
+        // dividend in rax, divisor in rcx
+        // quotient in rax, remainder in rdx
+        self.build_divide(assembler);
+
+        // store quotient in LO, remainder in HI
+        letsgo!(assembler
+            ;   mov QWORD [rsp + s_lo], rax
+            ;   mov QWORD [rsp + s_hi], rdx
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_ddivu(&mut self) -> Result<(), InstructionFault> {
         // unsigned 64 bit values
         self.divide_unsigned(self.gpr[self.inst.rs], self.gpr[self.inst.rt]);
 
         Ok(())
     }
+
+    fn build_special_ddivu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: ddivu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
+
+        // dividend goes into rax (64-bit divide but truncated to 32-bit values)
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor rax, rax
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rax, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
+
+        // divisor goes into rcx
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor rcx, rcx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rcx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            );
+        }
+
+        // result in rdx:rax
+        self.build_divide_unsigned(assembler);
+
+        // store quotient in LO, remainder in HI
+        letsgo!(assembler
+            ;   mov QWORD [rsp + s_lo], rax
+            ;   mov QWORD [rsp + s_hi], rdx
+        );
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_div(&mut self) -> Result<(), InstructionFault> {
         // must be 32-bit sign extended values
@@ -5014,6 +5233,50 @@ impl Cpu {
 
         Ok(())
     }
+
+    fn build_special_div(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: div r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
+
+        // dividend goes into rax
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor rax, rax
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rs * 8) as i32] // sign-extended into rax
+                ;   movsxd rax, v_tmp_32
+            );
+        }
+
+        // divisor goes into rcx
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor rcx, rcx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // sign-extended
+                ;   movsxd rcx, v_tmp_32
+            );
+        }
+
+        // dividend in rax, divisor in rcx
+        // quotient in rax, remainder in rdx
+        self.build_divide(assembler);
+
+        // store quotient in LO, remainder in HI
+        letsgo!(assembler
+            ;   movsxd v_tmp, eax             // sign-extend 32-bit
+            ;   mov QWORD [rsp + s_lo], v_tmp // .
+            ;   movsxd v_tmp, edx             // sign-extend 32-bit
+            ;   mov QWORD [rsp + s_hi], v_tmp // .
+        );
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_divu(&mut self) -> Result<(), InstructionFault> {
         // unsigned 32 bit values
@@ -5216,14 +5479,89 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_dsra(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.rs, self.inst.sa as u8);
+
+        if self.inst.rd != 0 { // NOP on rd==r0
+            if self.inst.rt == 0 { // zero out rd
+                letsgo!(assembler
+                    ; xor v_tmp, v_tmp
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov cl, BYTE self.inst.sa as _
+                    ; mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ; sar v_tmp, cl
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     fn special_dsrav(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i64) >> (self.gpr[self.inst.rs] & 0x3F)) as u64;
         Ok(())
     }
 
+    fn build_special_dsrav(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsrav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        if self.inst.rd != 0 { // if dest is zero, this is a no-op
+            if self.inst.rt == 0 { // if source is zero, zero out destination
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                // TODO test, but I'm pretty sure the sign extension is unnecessary, since it'll
+                // always be a positive sign after the shift
+                letsgo!(assembler
+                    ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                    ;   and cl, BYTE 0x3F as _                                  // mod with 63
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // take value to shift into v_tmp
+                    ;   sar v_tmp, cl                                           // 64-bit signed shift right
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // save in rd
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
+
     fn special_dsra32(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] as i64) >> (32 + self.inst.sa)) as u64;
         Ok(())
+    }
+
+    fn build_special_dsra32(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsra32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.sa as u8);
+
+        if self.inst.rd != 0 { // NOP on rd==r0
+            if self.inst.rt == 0 { // zero out rd
+                letsgo!(assembler
+                    ; xor v_tmp, v_tmp
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                letsgo!(assembler
+                    ; mov cl, BYTE self.inst.sa as _
+                    ; add cl, 32
+                    ; mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                    ; sar v_tmp, cl  // signed shift right
+                    ; mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn special_dsrl32(&mut self) -> Result<(), InstructionFault> {
@@ -5333,12 +5671,85 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_dsub(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        // start with v_tmp set to 0 if zero register is used
+        if self.inst.rs == 0 {
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
+            );
+        }
+
+        // don't sub anything if rt is zero (thus, no possible overflow)
+        if self.inst.rt != 0 {
+            letsgo!(assembler
+                ;   sub v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   jno >no_overflow
+                ;   mov rax, DWORD 0x0C03_0C03 as _  // TEMP error code to find where the int3 comes from
+                ;   int3  // do self.overflow_exception()
+                ;no_overflow:
+            );
+        }
+
+        // don't store if destination is zero register
+        if self.inst.rd != 0 {
+            letsgo!(assembler
+                ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_dsubu(&mut self) -> Result<(), InstructionFault> {
         // dsubu does not cause an overflow exception
         self.gpr[self.inst.rd] = self.gpr[self.inst.rs].wrapping_sub(self.gpr[self.inst.rt]);
 
         Ok(())
     }
+
+    fn build_special_dsubu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dsubu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rs, self.inst.rt);
+
+        if self.inst.rd != 0 { // if destination is zero, no-op
+            if self.inst.rt == 0 && self.inst.rs == 0 { // we can skip the entire operation, set the result to zero
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else if self.inst.rt == 0 { // We can skip the sub
+                letsgo!(assembler
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]    // move 64-bit value to v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // store in rd
+                );
+            } else { // don't skip sub when rs is 0, since rt will get negated
+                if self.inst.rs == 0 {
+                    letsgo!(assembler
+                        ;   xor v_tmp, v_tmp
+                    );
+                } else {
+                    letsgo!(assembler
+                        ;   mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]    // put rs into v_tmp
+                    );
+                }
+                letsgo!(assembler
+                    ;   sub v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // 64-bit sub rt
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp    // .
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_jalr(&mut self) -> Result<(), InstructionFault> {
         let dest = self.gpr[self.inst.rs]; // get dest before changing RD, as RS could be == RD
@@ -5909,6 +6320,34 @@ impl Cpu {
         self.gpr[self.inst.rd] = ((self.gpr[self.inst.rt] >> (self.gpr[self.inst.rs] & 0x1F)) as i32) as u64;
         Ok(())
     }
+
+    fn build_special_srav(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: srav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rd, self.inst.rt, self.inst.rs);
+
+        if self.inst.rd != 0 { // if dest is zero, this is a no-op
+            if self.inst.rt == 0 { // if source is zero, zero out destination
+                letsgo!(assembler
+                    ;   xor v_tmp, v_tmp
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
+                );
+            } else {
+                // TODO test, but I'm pretty sure the sign extension is unnecessary, since it'll
+                // always be a positive sign after the shift
+                letsgo!(assembler
+                    ;   mov cl, BYTE [r_gpr + (self.inst.rs * 8) as i32]        // put shift amount into cl
+                    ;   and cl, BYTE 0x1F as _                                  // mod with 31
+                    ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]    // take 64-bit value to shift into v_tmp
+                    ;   shr v_tmp, cl                                           // 64-bit unsigned shift right
+                    ;   movsxd v_tmp2, v_tmp_32                                 // sign-extend 32-bit value
+                    ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp2   // save in rd
+                );
+            }
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_srl(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = (((self.gpr[self.inst.rt] as u32) >> self.inst.sa) as i32) as u64;
