@@ -190,7 +190,8 @@ const s_cycle_count: i32 = 0x08;  // number of r4300 instructions executed (32-b
 const _s_unused: i32 = 0x0C;
 const s_lo         : i32 = 0x10;  // self.hi (64-bit)
 const s_hi         : i32 = 0x18;  // self.lo (64-bit)
-const _s_next: i32 = 0x20; // next stack offset (dont forget to increase stack space)
+const s_tmp0       : i32 = 0x20;  // temp storage (64-bit)
+const _s_next: i32 = 0x28; // next stack offset (dont forget to increase stack space)
 
 // trigger a debugger breakpoint
 #[allow(unused_macros)]
@@ -294,6 +295,78 @@ macro_rules! letsoffset {
                                          // and 64-bit destination regs
             );
         }
+    }
+}
+
+// calls the exception bridge function after setting up is_delay_slot and current_instruction_pc,
+// which are required for exception() to work properly.  after, a jump to the epilog is executed.
+// be sure to set up function arguments in rdx, r8, and r9 before calling letsexcept, which in
+// turn calls letscall.
+macro_rules! letsexcept {
+    ($self:ident, $ops:ident, $exception_bridge:expr) => {
+        letsgo!($ops
+            ;   mov rax, QWORD &mut $self.is_delay_slot as *mut bool as _
+            ;   mov BYTE [rax], BYTE $self.is_delay_slot as _
+            ;   mov rax, QWORD &mut $self.current_instruction_pc as *mut u64 as _
+        );
+
+        if ($self.current_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!($ops
+                ;   mov QWORD [rax], DWORD $self.current_instruction_pc as _
+            );
+        } else {
+            letsgo!($ops
+                ;   mov v_tmp2, QWORD $self.current_instruction_pc as _
+                ;   mov QWORD [rax], v_tmp2
+            );
+        }
+
+        // this will call prefetch(), so we need to jump to the block epilog now.
+        letscall!($ops, $exception_bridge);
+
+        letsgo!($ops
+            ;   jmp >epilog     // we lose one instruction count by skipping the instruction epilog
+        );
+
+    }
+}
+
+// check the jit_exception flag after a call to read/write_u8/16/32/64
+// calls various exception handlers depending on the exception that occurred during the rw op
+// if an exception occurs, the code jumps to the epilog of the current block
+// expects:
+//      0) exception code in rax (return value from the rw call)
+//      1) a copy of the virtual address used for the rw function placed in [rsp+s_tmp0]
+macro_rules! letscheckrw {
+    ($self:ident, $ops:ident, $is_write:expr, $err_code:expr) => {
+        // check if there was an exception while calling read_u32
+        letsgo!($ops
+            ;   mov v_tmp, QWORD &$self.jit_exception as *const bool as _
+            ;   cmp BYTE [v_tmp], BYTE 0u8 as _
+            ;   je >no_exception
+            // determine exception. exception code in eax
+            ;   cmp eax, DWORD IN_JIT_ADDRESS_EXCEPTION as _    // check most common exception first
+            ;   jne >not_ae
+            // setup call to address_exception_bridge
+            ;   mov rdx, QWORD [rsp+s_tmp0]  // restore virtual address
+            ;   xor r8d, r8d                 // is_write = false
+        );
+
+        if $is_write {
+            letsgo!($ops
+                ;   inc r8d
+            );
+        }
+
+        // call the address exception handler
+        letsexcept!($self, $ops, Cpu::address_exception_bridge);
+
+        letsgo!($ops
+            ;not_ae:
+            ;   mov rax, QWORD $err_code as _
+            ;   int3
+            ;no_exception:
+        );
     }
 }
 
@@ -484,6 +557,8 @@ pub struct Cpu {
     jit_jump_no_delay: bool, // true when a jump happens without a delay slot
     jit_conditional_branch: Option<(i64, bool)>, // branch_offset, is_branch_likely
     jit_current_assembler_offset: usize,
+    jit_executing: bool, // true when inside run_block()
+    jit_exception: bool, // true when an exception() occurs inside a bridged function call
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -498,6 +573,7 @@ pub enum InstructionFault {
     CoprocessorUnusable,
     FloatingPointException,
     ReadWrite(ReadWriteFault),
+    ExceptionInJit(InJitException),
 }
 
 impl From<ReadWriteFault> for InstructionFault {
@@ -506,6 +582,8 @@ impl From<ReadWriteFault> for InstructionFault {
     }
 }
 
+type InJitException = u32;
+const IN_JIT_ADDRESS_EXCEPTION: InJitException = 0;
 
 type CpuInstruction = fn(&mut Cpu) -> Result<(), InstructionFault>;
 
@@ -620,6 +698,8 @@ impl Cpu {
             jit_jump_no_delay: false,
             jit_conditional_branch: None,
             jit_current_assembler_offset: 0,
+            jit_executing: false,
+            jit_exception: false,
         };
         
         let _ = cpu.reset(false);
@@ -773,6 +853,12 @@ impl Cpu {
         let cpu = { &mut *cpu };
         match cpu.read_u32(virtual_address as usize) {
             Ok(value) => value,
+
+            Err(InstructionFault::ExceptionInJit(exception_code)) => {
+                cpu.jit_exception = true;
+                exception_code
+            },
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in read_u32_bridge: {:?}", e);
@@ -905,12 +991,18 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
+    unsafe extern "win64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> u32 {
         trace!(target: "JIT", "write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.write_u32(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
+
+            Err(InstructionFault::ExceptionInJit(exception_code)) => {
+                cpu.jit_exception = true;
+                exception_code
+            },
+
             Err(e) => {
                 // TODO handle errors better
                 error!("error in write_u32_bridge: {:?}", e);
@@ -1048,6 +1140,11 @@ impl Cpu {
 
     unsafe extern "win64" fn address_exception_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> i64 {
         let cpu = { &mut *cpu };
+
+        // if we get here due to a InJitException, clear it
+        cpu.jit_exception = false;
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.address_exception(virtual_address, is_write) {
             Ok(_) => 0,
 
@@ -1292,7 +1389,11 @@ impl Cpu {
             };
         } else {
             if (virtual_address & 0x8000_0000) != 0 && ((virtual_address >> 32) as i32) != -1 && generate_exceptions {
-                self.address_exception(virtual_address, is_write)?;
+                if self.jit_executing {
+                    return Err(InstructionFault::ExceptionInJit(IN_JIT_ADDRESS_EXCEPTION));
+                } else {
+                    self.address_exception(virtual_address, is_write)?;
+                }
                 return Ok(None);
             }
 
@@ -1575,8 +1676,9 @@ impl Cpu {
 
         // TODO: prologue
         // Save r_ registers, and load values into s_ storage
-        // currently 0x10 bytes are reserved but we only use 0x04
-        // an extra 0x08 is added for alignment for function calls
+        // the last digit of the rsp allocation needs to be 8
+        // so right now 0x28 bytes are used, if even 1 extra byte is used, increase the number to 0x38
+        // be sure to adjust the epilog as well
         letsgo!(assembler
             ;   push r_gpr
             ;   push r_cp0gpr
@@ -1586,8 +1688,8 @@ impl Cpu {
             ;   mov r_gpr, QWORD self.gpr.as_mut_ptr() as _
             ;   mov r_cp0gpr, QWORD self.cp0gpr.as_mut_ptr() as _
             ;   sub rsp, BYTE 0x28 // setup the stack so function calls are aligned
-                                   // 0x20 bytes is enough room for the s_* variables
-                                   // since we pushed 0x20 bytes rsp should be 0x10 aligned now
+                                   // 0x28 bytes is enough room for the s_* variables
+                                   // since we pushed 0x28 bytes rsp should be 0x10 aligned now
             ;   mov DWORD [rsp+s_cycle_count], ecx
                 // copy self.lo to the stack
             ;   mov rax, QWORD &self.lo as *const u64 as _
@@ -1942,14 +2044,21 @@ impl Cpu {
     fn run_block(&mut self, compiled_block: &CompiledBlock, run_limit: u64) -> Result<u64, InstructionFault> {
         // place &self into rax
         let call_block: extern "win64" fn(u64) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
-        // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything
-        // else negative is an error
-        match call_block(run_limit) {
+
+        self.jit_executing = true;
+
+        let res = match call_block(run_limit) {
+            // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
             i if i >= -2147483648 => Ok((run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
+
             i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
                 todo!("execution error code: {}", i as u32);
             },
-        }
+        };
+
+        self.jit_executing = false;
+
+        res
     }
 
     #[inline]
@@ -3065,9 +3174,9 @@ impl Cpu {
                         println!("${:08X}[{:5}]: eret", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
                         assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
 
-                        //// If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
-                        //// ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
                         letsgo!(assembler
+                            // If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
+                            // ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
                             ;   mov rax, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
                             ;   mov v_tmp, QWORD [rax]
                             ;   and v_tmp, BYTE 0x04
@@ -3084,24 +3193,13 @@ impl Cpu {
                             ;   mov v_tmp_32, DWORD 0x0000_0002u32 as _  // zero-extend v_tmp
                             ;   not v_tmp                                // invert 64-bit value
                             ;   and QWORD [rax], v_tmp                   // clear bit
-                            // set llbit to false
+                            // set llbit to false so SC instructions fail
                             ;   mov rax, QWORD &mut self.llbit as *mut bool as _
                             ;   mov BYTE [rax], BYTE 0x00u8 as _
                         );
 
                         self.jit_jump_no_delay = true;
 
-                        //if (self.cp0gpr[Cop0_Status] & 0x04) != 0 {
-                        //    panic!("COP0: error bit set"); // TODO
-                        //} else {
-                        //    self.pc = self.cp0gpr[Cop0_EPC];
-                        //    self.cp0gpr[Cop0_Status] &= !0x02;
-                        //}
-
-                        //self.prefetch()?;
-
-                        //// clear LLbit so that SC writes fail
-                        //self.llbit = false;
                         CompileInstructionResult::Continue
                     },
 
@@ -3857,44 +3955,27 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         letsgo!(assembler
-            ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
-            ; and v_tmp, BYTE 0x03       // .
-            ; jz >valid                  // .
-            // call address_exception
-            ; xor r8d, r8d    // is_write argument is false
+            ;   mov QWORD [rsp+s_tmp0], rdx  // save a copy of the virtual address for the exception code
+            ;   mov v_tmp, rdx               // check if address is valid (low two bits 00)
+            ;   and v_tmp, BYTE 0x03         // .
+            ;   jz >valid                    // .
+            // setup call to address_exception_bridge
+            ;   xor r8d, r8d    // is_write argument is false
         );
 
-        // an address_exception occurred. rcx will get 'self', rdx already contains the
-        // virtual address. we just set r8 to 1 for writes, 0 for loads (above). Cpu::exception() also
-        // needs self.is_delay_slot and self.current_instruction_pc
-        letsgo!(assembler
-            ;   mov rax, QWORD &mut self.is_delay_slot as *mut bool as _
-            ;   mov BYTE [rax], BYTE self.is_delay_slot as _
-            ;   mov rax, QWORD &mut self.current_instruction_pc as *mut u64 as _
-        );
-
-        if (self.current_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-            letsgo!(assembler
-                ;   mov QWORD [rax], DWORD self.current_instruction_pc as _
-            );
-        } else {
-            letsgo!(assembler
-                ;   mov v_tmp2, QWORD self.current_instruction_pc as _
-                ;   mov QWORD [rax], v_tmp2
-            );
-        }
-
-        // this will call prefetch(), so we need to jump to the block epilog now.
-        letscall!(assembler, Cpu::address_exception_bridge);
-        letsgo!(assembler
-            ;   jmp >epilog     // we lose one cycle count by skipping the instruction epilog
-        );
+        // an address_exception occurred. rcx will get 'self', rdx already has the virtual address
+        // that caused the exception. we just set r8 to 1 for writes, 0 for loads (above).
+        // this will call prefetch(), and jump to the epilog of the block
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
 
         // rdx contains address
         letsgo!(assembler
             ;valid:
         );
         letscall!(assembler, Cpu::read_u32_bridge);
+
+        // check the jit_exception flag after call to read_u32_bridge
+        letscheckrw!(self, assembler, false, 0xAFAF_FEFE_CDCD_1234u64);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4650,11 +4731,11 @@ impl Cpu {
         // value to write in 2nd argument (edx)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ; xor rdx, rdx
+                ;   xor rdx, rdx
             );
         } else {
             letsgo!(assembler
-                ; mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
             );
         }
 
@@ -4662,12 +4743,14 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
 
         letsgo!(assembler
-            ; mov v_tmp, r8              // check if address is valid (low two bits 00)
-            ; and v_tmp, BYTE 0x03       // .
-            ; jz >valid                  // .
-            ; int3           // call self.address_exception
-            ; int3           // end current run_block
-            ;valid:
+            ;   mov QWORD [rsp+s_tmp0], r8  // save a copy of the virtual address for letscheckrw
+            ;   mov v_tmp, r8               // check if address is valid (low two bits 00)
+            ;   and v_tmp, BYTE 0x03        // .
+            ;   jz >valid                   // .
+            // setup call to address_exception_bridge
+            ;   mov rdx, r8       // move virtual address to rdx
+            ;   xor r8d, r8d
+            ;   inc r8d           // is_write argument is true
         );
 
         // break if address==DBG A:$807FFD9C V:$807FFDF8 
@@ -4693,8 +4776,19 @@ impl Cpu {
         //    ;skip:
         //);
 
+        // an address_exception occurred. rcx will get 'self', rdx has the virtual address
+        // that caused the exception. we just set r8 to 1 for writes (above)
+        // this will call prefetch(), and jump to the epilog of the block
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
+
         // edx has 32-bit value to write, r8 contains address
+        letsgo!(assembler
+            ;valid:
+        );
         letscall!(assembler, Cpu::write_u32_bridge);
+
+        // check the jit_exception flag after call to write_u32_bridge
+        letscheckrw!(self, assembler, true, 0xBEBE_ECEC_0000_1221u64);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
