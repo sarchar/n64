@@ -337,7 +337,8 @@ macro_rules! letsexcept {
 // expects:
 //      0) exception code in rax (return value from the rw call)
 //      1) a copy of the virtual address used for the rw function placed in [rsp+s_tmp0]
-macro_rules! letscheckrw {
+//          * if you know address exceptions are possible
+macro_rules! letscheck {
     ($self:ident, $ops:ident, $is_write:expr, $err_code:expr) => {
         // check if there was an exception while calling read_u32
         letsgo!($ops
@@ -361,8 +362,20 @@ macro_rules! letscheckrw {
         // call the address exception handler
         letsexcept!($self, $ops, Cpu::address_exception_bridge);
 
+        // continue checking exceptions
         letsgo!($ops
             ;not_ae:
+            ;   cmp eax, DWORD IN_JIT_COP2_UNUSABLE as _    // check Cop2 unusable
+            ;   jne >not_cu2
+            ;   mov edx, DWORD 0x02u32 as _ // processor number
+        );
+
+        // call Cop2 unusable handler
+        letsexcept!($self, $ops, Cpu::coprocessor_unusable_exception_bridge);
+
+        // continue checking exceptions
+        letsgo!($ops
+            ;not_cu2:
             ;   mov rax, QWORD $err_code as _
             ;   int3
             ;no_exception:
@@ -460,50 +473,6 @@ macro_rules! build_branch {
     }
 }
 
-macro_rules! build_trap {
-    ($self:ident, $ops:ident, $rs:expr, $rt:expr, $trap_string:literal, $not_cond:ident, $trap_on_zero_zero:expr) => {
-        println!("${:08X}[{:5}]: {} r{}, r{}", $self.current_instruction_pc as u32, $self.jit_current_assembler_offset, $trap_string, $rs, $rt);
-        if $rs == 0 && $rt == 0 {
-            if $trap_on_zero_zero {
-                // guaranteed trap, no need to compare
-                todo!();
-            } else {
-                // no emitted code
-            }
-        } else {
-            // load rs into v_tmp
-            if $rs == 0 {
-                letsgo!($ops
-                    ;   xor v_tmp, v_tmp
-                );
-            } else {
-                letsgo!($ops
-                    ;   mov v_tmp, QWORD [r_gpr + ($rs * 8) as i32]
-                );
-            }
-
-            // compare v_tmp to rt
-            if $rt == 0 {
-                letsgo!($ops
-                    ;   cmp v_tmp, BYTE 0i8 as _
-                );
-            } else {
-                letsgo!($ops
-                    ;   cmp v_tmp, QWORD [r_gpr + ($rs * 8) as i32]
-                );
-            }
-
-            // trap if condition is met
-            letsgo!($ops
-                ;   $not_cond >no_trap
-                ;   mov rax, QWORD 0xFEFE_A5A5_0000_1111u64 as _
-                ;   int3    // call self.trap_exception()
-                ;no_trap:
-            );
-        }
-    }
-}
-
 pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u64,                     // lookahead PC
@@ -584,6 +553,8 @@ impl From<ReadWriteFault> for InstructionFault {
 
 type InJitException = u32;
 const IN_JIT_ADDRESS_EXCEPTION: InJitException = 0;
+//...
+const IN_JIT_COP2_UNUSABLE    : InJitException = 20;
 
 type CpuInstruction = fn(&mut Cpu) -> Result<(), InstructionFault>;
 
@@ -680,16 +651,16 @@ impl Cpu {
     /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
     /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor   ,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
-    /* 110_ */  Cpu::build_inst_unknown, Cpu::build_special_tgeu , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_unknown  ,
+    /* 110_ */  Cpu::build_special_tge , Cpu::build_special_tgeu , Cpu::build_special_tlt , Cpu::build_special_tltu, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_special_tne   , Cpu::build_inst_unknown  ,
     /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32, Cpu::build_inst_unknown , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
             ],
 
             jit_regimm_table: [ 
                // _000                     _001                      _010                     _011                     _100                     _101                     _110                     _111
-    /* 00_ */  Cpu::build_regimm_bltz , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
-    /* 01_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
-    /* 10_ */  Cpu::build_inst_unknown, Cpu::build_regimm_bgezal, Cpu::build_inst_unknown, Cpu::build_regimm_bgezall, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_reserved,
-    /* 11_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 00_ */  Cpu::build_regimm_bltz  , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 01_ */  Cpu::build_regimm_tgei  , Cpu::build_regimm_tgeiu , Cpu::build_regimm_tlti , Cpu::build_regimm_tltiu  , Cpu::build_regimm_teqi , Cpu::build_inst_unknown, Cpu::build_regimm_tnei , Cpu::build_inst_unknown ,
+    /* 10_ */  Cpu::build_inst_unknown , Cpu::build_regimm_bgezal, Cpu::build_inst_unknown, Cpu::build_regimm_bgezall, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_reserved,
+    /* 11_ */  Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
             ],
 
 
@@ -1225,6 +1196,25 @@ impl Cpu {
         self.exception(ExceptionCode_Tr, false)
     }
 
+    unsafe extern "win64" fn trap_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // if we get here due to a InJitException, clear it
+        cpu.jit_exception = false;
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.trap_exception() {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("trap_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+
     fn floating_point_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_FPE, false)
@@ -1234,6 +1224,25 @@ impl Cpu {
         //info!("CPU: coprocessor unusable exception (Cop0_Status = ${:08X})!", self.cp0gpr[Cop0_Status]);
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_CpU, false)
+    }
+
+    unsafe extern "win64" fn coprocessor_unusable_exception_bridge(cpu: *mut Cpu, coprocessor_number: u32) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // if we get here due to a InJitException, clear it
+        cpu.jit_exception = false;
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.coprocessor_unusable_exception(coprocessor_number as u64) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("coprocessor_unusable_exception_bridge error = {:?}", err);
+            }
+        }
     }
 
     pub fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
@@ -3214,13 +3223,21 @@ impl Cpu {
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
         // if the co-processor isn't enabled, generate an exception
         if (self.cp0gpr[Cop0_Status] & 0x4000_0000) == 0 {
-            self.coprocessor_unusable_exception(2)?;
+            if self.jit_executing {
+                return Err(InstructionFault::ExceptionInJit(IN_JIT_COP2_UNUSABLE));
+            } else {
+                self.coprocessor_unusable_exception(2)?;
+            }
             return Ok(());
         }
 
         if (self.inst.v & (1 << 25)) != 0 {
             // no special functions on COP2
-            self.coprocessor_unusable_exception(2)?;
+            if self.jit_executing {
+                return Err(InstructionFault::ExceptionInJit(IN_JIT_COP2_UNUSABLE));
+            } else {
+                self.coprocessor_unusable_exception(2)?;
+            }
             Ok(())
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
@@ -3272,13 +3289,19 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn inst_cop2_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
+    unsafe extern "win64" fn inst_cop2_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
         // we're running inside a compiled block so self.inst isn't being used, we
         // can safely destroy it and call into rust code
         cpu.decode_instruction(inst);
         match cpu.inst_cop2() {
             Ok(_) => 0,
+
+            Err(InstructionFault::ExceptionInJit(exception_code)) => {
+                cpu.jit_exception = true;
+                exception_code
+            },
+
             Err(err) => {
                 // TODO handle rrors
                 todo!("inst_cop2 error = {:?}", err);
@@ -3296,6 +3319,9 @@ impl Cpu {
 
         // call self.inst_cop2_bridge(Cpu, inst)
         letscall!(assembler, Cpu::inst_cop2_bridge);
+
+        // check exceptions
+        letscheck!(self, assembler, false, 0x0000_1010_0101_AAAAu64);
 
         CompileInstructionResult::Continue
     }
@@ -3975,7 +4001,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check the jit_exception flag after call to read_u32_bridge
-        letscheckrw!(self, assembler, false, 0xAFAF_FEFE_CDCD_1234u64);
+        letscheck!(self, assembler, false, 0xAFAF_FEFE_CDCD_1234u64);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4731,7 +4757,7 @@ impl Cpu {
         // value to write in 2nd argument (edx)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor rdx, rdx
+                ;   xor edx, edx
             );
         } else {
             letsgo!(assembler
@@ -4743,9 +4769,8 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
 
         letsgo!(assembler
-            ;   mov QWORD [rsp+s_tmp0], r8  // save a copy of the virtual address for letscheckrw
-            ;   mov v_tmp, r8               // check if address is valid (low two bits 00)
-            ;   and v_tmp, BYTE 0x03        // .
+            ;   mov QWORD [rsp+s_tmp0], r8  // save a copy of the virtual address for letscheck
+            ;   test r8b, BYTE 0x03         // check if address is valid (low two bits 00)
             ;   jz >valid                   // .
             // setup call to address_exception_bridge
             ;   mov rdx, r8       // move virtual address to rdx
@@ -4788,7 +4813,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check the jit_exception flag after call to write_u32_bridge
-        letscheckrw!(self, assembler, true, 0xBEBE_ECEC_0000_1221u64);
+        letscheck!(self, assembler, true, 0xBEBE_ECEC_0000_1221u64);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
@@ -6282,7 +6307,18 @@ impl Cpu {
     }
 
     fn build_special_teq(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        build_trap!(self, assembler, self.inst.rs, self.inst.rt, "teq", jne, true);
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jne >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
         CompileInstructionResult::Continue
     }
 
@@ -6293,12 +6329,46 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_regimm_teqi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, DWORD self.inst.signed_imm as _
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jne >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_tge(&mut self) -> Result<(), InstructionFault> {
         if (self.gpr[self.inst.rs] as i64) >= (self.gpr[self.inst.rt] as i64) {
             self.trap_exception()?;
         }
         Ok(())
     }
+
+    fn build_special_tge(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jl >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn regimm_tgei(&mut self) -> Result<(), InstructionFault> {
         if (self.gpr[self.inst.rs] as i64) >= (self.inst.signed_imm as i64) {
@@ -6307,6 +6377,23 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_regimm_tgei(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, DWORD self.inst.signed_imm as _
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jl >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_tgeu(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] >= self.gpr[self.inst.rt] {
             self.trap_exception()?;
@@ -6314,13 +6401,22 @@ impl Cpu {
         Ok(())
     }
 
-    fn build_special_tgeu(&mut self, _: &mut Assembler) -> CompileInstructionResult {
-        if self.inst.rt == 0 { // trap will always be true if rt is r0
-            todo!();
-        } else {
-            //letsgo!(assembler
-            todo!();
+    fn build_special_tgeu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        // trap will always be happen if rt is r0, otherwise check the condition
+        if self.inst.rt != 0 { 
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+                ;   jb >no_trap
+            );
         }
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
         CompileInstructionResult::Continue
     }
 
@@ -6331,11 +6427,47 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_regimm_tgeiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        if self.inst.signed_imm != 0 {
+            letsgo!(assembler
+                ;   mov v_tmp, DWORD self.inst.signed_imm as _
+                ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+                ;   jb >no_trap
+            );
+        }
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
+
     fn special_tlt(&mut self) -> Result<(), InstructionFault> {
         if (self.gpr[self.inst.rs] as i64) < (self.gpr[self.inst.rt] as i64) {
             self.trap_exception()?;
         }
         Ok(())
+    }
+
+    fn build_special_tlt(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jge >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
     }
 
     fn regimm_tlti(&mut self) -> Result<(), InstructionFault> {
@@ -6345,12 +6477,46 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_regimm_tlti(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, DWORD self.inst.signed_imm as _
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jge >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_tltu(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] < self.gpr[self.inst.rt] {
             self.trap_exception()?;
         }
         Ok(())
     }
+
+    fn build_special_tltu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jae >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn regimm_tltiu(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] < (self.inst.signed_imm as u64) {
@@ -6359,6 +6525,23 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_regimm_tltiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, DWORD self.inst.signed_imm as _
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   jae >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn special_tne(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] != self.gpr[self.inst.rt] {
             self.trap_exception()?;
@@ -6366,11 +6549,44 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_tne(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   je >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
+    }
+
+
     fn regimm_tnei(&mut self) -> Result<(), InstructionFault> {
         if self.gpr[self.inst.rs] != (self.inst.signed_imm as u64) {
             self.trap_exception()?;
         }
         Ok(())
+    }
+
+    fn build_regimm_tnei(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        letsgo!(assembler
+            ;   mov v_tmp, DWORD self.inst.signed_imm as _
+            ;   cmp QWORD [r_gpr + (self.inst.rs * 8) as i32], v_tmp
+            ;   je >no_trap
+        );
+
+        // no arguments to trap_exception_bridge
+        letsexcept!(self, assembler, Cpu::trap_exception_bridge);
+        letsgo!(assembler
+            ;no_trap:
+        );
+
+        CompileInstructionResult::Continue
     }
 
     fn special_sll(&mut self) -> Result<(), InstructionFault> {
