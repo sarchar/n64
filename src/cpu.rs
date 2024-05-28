@@ -481,6 +481,7 @@ pub struct Cpu {
     jit_regimm_table: [CpuInstructionBuilder; 32],
     jit_block_start_pc: u64,
     jit_jump: bool, // true when a jump is happening
+    jit_jump_no_delay: bool, // true when a jump happens without a delay slot
     jit_conditional_branch: Option<(i64, bool)>, // branch_offset, is_branch_likely
     jit_current_assembler_offset: usize,
 }
@@ -585,7 +586,7 @@ impl Cpu {
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
     /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_bgtz   ,
     /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu  , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
-    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_cop2   , Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_lwr    , Cpu::build_inst_lwu    ,
     /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_swr    , Cpu::build_inst_cache  ,
@@ -597,7 +598,7 @@ impl Cpu {
                //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
     /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
     /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break, Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_inst_unknown , Cpu::build_special_mflo, Cpu::build_inst_unknown, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_special_mthi , Cpu::build_special_mflo, Cpu::build_special_mtlo, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
     /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
     /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor   ,
     /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
@@ -616,6 +617,7 @@ impl Cpu {
 
             jit_block_start_pc: 0,
             jit_jump: false,
+            jit_jump_no_delay: false,
             jit_conditional_branch: None,
             jit_current_assembler_offset: 0,
         };
@@ -708,11 +710,11 @@ impl Cpu {
             Ok(0)
         };
 
-        print!("DBG RD8 A:${:08X} V:${:08X} ", virtual_address as u32, value.as_ref().unwrap());
-        for i in 0..32 {
-            print!("R{}:${:08X} ", i, self.gpr[i]);
-        }
-        println!();
+        //print!("DBG RD8 A:${:08X} V:${:08X} ", virtual_address as u32, value.as_ref().unwrap());
+        //for i in 0..32 {
+        //    print!("R{}:${:08X} ", i, self.gpr[i]);
+        //}
+        //println!();
 
         value
     }
@@ -823,11 +825,11 @@ impl Cpu {
 
     #[inline(always)]
     fn write_u8(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
-        print!("DBG WR8 A:${:08X} V:${:08X} ", virtual_address as u32, value);
-        for i in 0..32 {
-            print!("R{}:${:08X} ", i, self.gpr[i]);
-        }
-        println!();
+        //print!("DBG WR8 A:${:08X} V:${:08X} ", virtual_address as u32, value);
+        //for i in 0..32 {
+        //    print!("R{}:${:08X} ", i, self.gpr[i]);
+        //}
+        //println!();
 
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
             self.write_u8_phys(value, address)
@@ -878,13 +880,24 @@ impl Cpu {
         //if (virtual_address as u32) == 0xA4001F9C && value == 0x0E468AD3 {
         //    println!("DBG current_instruction_pc=${:08X}", self.current_instruction_pc);
         //}
-        print!("DBG WR32 A:${:08X} V:${:08X} ", virtual_address as u32, value);
-        for i in 0..32 {
-            print!("R{}:${:08X} ", i, self.gpr[i]);
-        }
-        println!();
+        //print!("DBG WR32 A:${:08X} V:${:08X} ", virtual_address as u32, value);
+        //for i in 0..32 {
+        //    print!("R{}:${:08X} ", i, self.gpr[i]);
+        //}
+        //println!();
 
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            // invalidate RDRAM blocks
+            if (address.physical_address & 0xFF000000) == 0 {
+                // assert!((address & 0x800000) == 0, "need to handle writes here"); // rdram.rs will panic on this situation, but we may need to handle it someday
+                let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
+                // just invalidate the cached_block_map without clearing self.cached_blocks
+                // 1) if something else uses this address, then the old cached_blocks address will
+                //    be freed.
+                // 2) it doesn't really matter if that memory hangs around anyway.
+                self.cached_block_map[offs] = None;
+            }
+
             self.write_u32_phys(value, address)
         } else {
             // invalid TLB translation, no physical address present to read
@@ -1032,6 +1045,21 @@ impl Cpu {
         let exception_code = if is_write { ExceptionCode_AdES } else { ExceptionCode_AdEL };
         self.exception(exception_code, false)
     }
+
+    unsafe extern "win64" fn address_exception_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> i64 {
+        let cpu = { &mut *cpu };
+        match cpu.address_exception(virtual_address, is_write) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("address_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+
 
     fn tlb_miss(&mut self, address: Address, is_write: bool) -> Result<(), InstructionFault> {
         //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", address.virtual_address, is_write, !self.kernel_64bit_addressing);
@@ -1536,6 +1564,7 @@ impl Cpu {
 
         // reset state that belongs to this block
         self.jit_jump = false;
+        self.jit_jump_no_delay = false;
         self.jit_conditional_branch = None;
 
         let block_id = self.next_block_id;
@@ -1681,7 +1710,10 @@ impl Cpu {
                 ;   dec DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
             );
 
-            if jit_jump {
+            if jit_jump || self.jit_jump_no_delay {
+                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // TODO delay slot also a branch
+                self.jit_jump_no_delay = false;
+
                 println!("** performing jump");
 
                 // move jump target value into self.pc, call self.prefetch and gtfo
@@ -1704,7 +1736,7 @@ impl Cpu {
                 //done_compiling = true;
             } else if let Some((branch_offset, is_branch_likely)) = jit_conditional_branch {
                 // TODO for now, catch if there's a branch in the delay slot, later I'll need to figure that out.
-                assert!(self.jit_conditional_branch.is_none()); // TODO delay slot set jit_conditional_branch
+                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // TODO delay slot also a branch
 
                 // TODO we can actually return from block execution here if branch_offset is
                 // guaranteed to be outside of the block:
@@ -2933,8 +2965,6 @@ impl Cpu {
                 // call self.inst_cop0_bridge(Cpu, inst)
                 letscall!(assembler, Cpu::inst_cop0_bridge);
 
-                return CompileInstructionResult::Continue;
-
                 //.// Two options: we can keep r_cpu (self) in a register or we can skip
                 //.// that can use an extra instruction. TODO: what's better?
                 //.// We use a register (r_cpu) for access that may be generally uncommon
@@ -2956,16 +2986,23 @@ impl Cpu {
                 //.letsgo!(assembler
                 //.    ; mov QWORD [r_cp0gpr + (self.inst.rd*8) as i32], v_tmp
                 //.);
+
+                CompileInstructionResult::Continue
             },
 
             0b00_101 => { // DMTC
-                //let val = self.gpr[self.inst.rt];
+                println!("${:08X}[{:5}]: dmtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                         self.inst.rd, self.inst.rt);
 
-                //// save write value for unused register reads
-                //self.cp0gpr_latch = val;
+                // opcode in arg 2
+                letsgo!(assembler
+                    ; mov edx, DWORD self.inst.v as _
+                );
 
-                //self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
-                todo!()
+                // call self.inst_cop0_bridge(Cpu, inst)
+                letscall!(assembler, Cpu::inst_cop0_bridge);
+
+                CompileInstructionResult::Continue
             },
 
             0b10_000..=0b11_111 => {
@@ -3025,10 +3062,35 @@ impl Cpu {
                     },
 
                     0b011_000 => { // eret
-                        //assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
+                        println!("${:08X}[{:5}]: eret", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+                        assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
 
                         //// If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
                         //// ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
+                        letsgo!(assembler
+                            ;   mov rax, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
+                            ;   mov v_tmp, QWORD [rax]
+                            ;   and v_tmp, BYTE 0x04
+                            ;   jz >no_erl
+                            ;   mov rax, QWORD 0x1111_5414_0000_AAAAu64 as _
+                            ;   int3
+                            ;no_erl:
+                            // copy Cop0_EPC to the jump target
+                            ;   mov rax, QWORD &self.cp0gpr[Cop0_EPC] as *const u64 as _
+                            ;   mov v_tmp, QWORD [rax]
+                            ;   mov QWORD [rsp+s_jump_target], v_tmp
+                            // clear bit 0x02 of Cop0_Status
+                            ;   mov rax, QWORD &mut self.cp0gpr[Cop0_Status] as *mut u64 as _
+                            ;   mov v_tmp_32, DWORD 0x0000_0002u32 as _  // zero-extend v_tmp
+                            ;   not v_tmp                                // invert 64-bit value
+                            ;   and QWORD [rax], v_tmp                   // clear bit
+                            // set llbit to false
+                            ;   mov rax, QWORD &mut self.llbit as *mut bool as _
+                            ;   mov BYTE [rax], BYTE 0x00u8 as _
+                        );
+
+                        self.jit_jump_no_delay = true;
+
                         //if (self.cp0gpr[Cop0_Status] & 0x04) != 0 {
                         //    panic!("COP0: error bit set"); // TODO
                         //} else {
@@ -3040,7 +3102,7 @@ impl Cpu {
 
                         //// clear LLbit so that SC writes fail
                         //self.llbit = false;
-                        todo!()
+                        CompileInstructionResult::Continue
                     },
 
                     _ => panic!("COP0: unknown cp0 function 0b{:03b}_{:03b}", special >> 3, special & 0x07),
@@ -3110,6 +3172,34 @@ impl Cpu {
                 _ => panic!("CPU: unknown cop2 function 0b{:02b}_{:03b}", func >> 3, func & 7),
             }
         }
+    }
+
+    unsafe extern "win64" fn inst_cop2_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
+        let cpu = { &mut *cpu };
+        // we're running inside a compiled block so self.inst isn't being used, we
+        // can safely destroy it and call into rust code
+        cpu.decode_instruction(inst);
+        match cpu.inst_cop2() {
+            Ok(_) => 0,
+            Err(err) => {
+                // TODO handle rrors
+                todo!("inst_cop2 error = {:?}", err);
+            }
+        }
+    }
+
+    fn build_inst_cop2(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: cop2", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+
+        // opcode in arg 2
+        letsgo!(assembler
+            ; mov edx, DWORD self.inst.v as _
+        );
+
+        // call self.inst_cop2_bridge(Cpu, inst)
+        letscall!(assembler, Cpu::inst_cop2_bridge);
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_beq(&mut self) -> Result<(), InstructionFault> {
@@ -3770,12 +3860,40 @@ impl Cpu {
             ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
             ; and v_tmp, BYTE 0x03       // .
             ; jz >valid                  // .
-            ; int3           // call self.address_exception
-            ; int3           // end current run_block
-            ;valid:
+            // call address_exception
+            ; xor r8d, r8d    // is_write argument is false
+        );
+
+        // an address_exception occurred. rcx will get 'self', rdx already contains the
+        // virtual address. we just set r8 to 1 for writes, 0 for loads (above). Cpu::exception() also
+        // needs self.is_delay_slot and self.current_instruction_pc
+        letsgo!(assembler
+            ;   mov rax, QWORD &mut self.is_delay_slot as *mut bool as _
+            ;   mov BYTE [rax], BYTE self.is_delay_slot as _
+            ;   mov rax, QWORD &mut self.current_instruction_pc as *mut u64 as _
+        );
+
+        if (self.current_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+            letsgo!(assembler
+                ;   mov QWORD [rax], DWORD self.current_instruction_pc as _
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp2, QWORD self.current_instruction_pc as _
+                ;   mov QWORD [rax], v_tmp2
+            );
+        }
+
+        // this will call prefetch(), so we need to jump to the block epilog now.
+        letscall!(assembler, Cpu::address_exception_bridge);
+        letsgo!(assembler
+            ;   jmp >epilog     // we lose one cycle count by skipping the instruction epilog
         );
 
         // rdx contains address
+        letsgo!(assembler
+            ;valid:
+        );
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -3808,11 +3926,11 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         letsgo!(assembler
-            ; mov v_tmp, rdx             // check if address is valid (low two bits 00)
-            ; and v_tmp, BYTE 0x03       // .
-            ; jz >valid                  // .
-            ; int3           // call self.address_exception
-            ; int3           // end current run_block
+            ;   mov v_tmp, rdx             // check if address is valid (low two bits 00)
+            ;   and v_tmp, BYTE 0x03       // .
+            ;   jz >valid                  // .
+            ;   int3           // call self.address_exception
+            ;   int3           // end current run_block
             ;valid:
         );
 
@@ -5870,10 +5988,45 @@ impl Cpu {
         Ok(())
     }
 
+    fn build_special_mthi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: mthi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+
+        if self.inst.rd == 0 {
+            letsgo!(assembler
+                ;   mov QWORD [rsp + s_hi], DWORD 0u32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rd * 8) as i32]
+                ;   mov QWORD [rsp + s_hi], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
     fn special_mtlo(&mut self) -> Result<(), InstructionFault> {
         self.lo = self.gpr[self.inst.rd];
         Ok(())
     }
+
+    fn build_special_mtlo(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: mtlo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+
+        if self.inst.rd == 0 {
+            letsgo!(assembler
+                ;   mov QWORD [rsp + s_lo], DWORD 0u32 as _
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov v_tmp, QWORD [r_gpr + (self.inst.rd * 8) as i32]
+                ;   mov QWORD [rsp + s_lo], v_tmp
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
 
     fn special_mult(&mut self) -> Result<(), InstructionFault> {
         // must be 32-bit sign extended values
