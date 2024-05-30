@@ -645,22 +645,22 @@ impl Cpu {
 
             jit_special_table: [ 
                //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
-    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break, Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_special_mthi , Cpu::build_special_mflo, Cpu::build_special_mtlo, Cpu::build_special_dsllv , Cpu::build_inst_unknown , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
-    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_inst_unknown , Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or   , Cpu::build_special_xor   , Cpu::build_special_nor   ,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu, Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
-    /* 110_ */  Cpu::build_special_tge , Cpu::build_special_tgeu , Cpu::build_special_tlt , Cpu::build_special_tltu, Cpu::build_special_teq   , Cpu::build_inst_unknown , Cpu::build_special_tne   , Cpu::build_inst_unknown  ,
-    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32, Cpu::build_inst_unknown , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown  , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
+    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break , Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_special_mthi , Cpu::build_special_mflo, Cpu::build_special_mtlo, Cpu::build_special_dsllv , Cpu::build_inst_unknown  , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
+    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_special_dmultu, Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or    , Cpu::build_special_xor   , Cpu::build_special_nor   ,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu , Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
+    /* 110_ */  Cpu::build_special_tge , Cpu::build_special_tgeu , Cpu::build_special_tlt , Cpu::build_special_tltu, Cpu::build_special_teq   , Cpu::build_inst_unknown  , Cpu::build_special_tne   , Cpu::build_inst_unknown  ,
+    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32, Cpu::build_inst_unknown  , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
             ],
 
             jit_regimm_table: [ 
                // _000                     _001                      _010                     _011                     _100                     _101                     _110                     _111
-    /* 00_ */  Cpu::build_regimm_bltz  , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
-    /* 01_ */  Cpu::build_regimm_tgei  , Cpu::build_regimm_tgeiu , Cpu::build_regimm_tlti , Cpu::build_regimm_tltiu  , Cpu::build_regimm_teqi , Cpu::build_inst_unknown, Cpu::build_regimm_tnei , Cpu::build_inst_unknown ,
-    /* 10_ */  Cpu::build_inst_unknown , Cpu::build_regimm_bgezal, Cpu::build_inst_unknown, Cpu::build_regimm_bgezall, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_reserved,
-    /* 11_ */  Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown ,
+    /* 00_ */  Cpu::build_regimm_bltz  , Cpu::build_regimm_bgez  , Cpu::build_inst_unknown , Cpu::build_inst_unknown  , Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved,
+    /* 01_ */  Cpu::build_regimm_tgei  , Cpu::build_regimm_tgeiu , Cpu::build_regimm_tlti  , Cpu::build_regimm_tltiu  , Cpu::build_regimm_teqi  , Cpu::build_inst_reserved, Cpu::build_regimm_tnei  , Cpu::build_inst_reserved,
+    /* 10_ */  Cpu::build_inst_unknown , Cpu::build_regimm_bgezal, Cpu::build_inst_unknown , Cpu::build_regimm_bgezall, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved,
+    /* 11_ */  Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved , Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved,
             ],
 
 
@@ -1626,6 +1626,14 @@ impl Cpu {
         let steps_start = self.num_steps;
         // const MIN_STEPS_TO_BE_WORTH_IT: u64 = 8; // TODO does this "optimization" make sense?
         while self.num_steps < (steps_start + max_cycles) {
+            // if the PC address is unaligned, just run Cpu::step() for the exception handler
+            if (self.next_instruction_pc & 0x03) != 0 {
+                self.pc -= 4; // the JIT code is one instruction ahead due to the call to prefetch().
+                self.step()?;
+                self.num_steps += 1;
+                continue;
+            }
+
             let run_limit = (steps_start + max_cycles) - self.num_steps;
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
@@ -1741,6 +1749,9 @@ impl Cpu {
                 assert!(!self.next_is_delay_slot);
                 break;
             }
+
+            // if the current instruction address is unaligned, we can't decode or run anything and
+            // just need to make an address exception block
 
             // setup self.inst
             self.decode_instruction(self.next_instruction);
@@ -1875,7 +1886,9 @@ impl Cpu {
                         ;   mov rax, QWORD branch_target as u64 as _        // PC address we need to jump to
                         ;   mov QWORD [v_tmp], rax                          // .
                     );
+
                     letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
+
                     letsgo!(assembler
                         ;   jmp >epilog                                     // exit the block
                         ;no_branch:
@@ -1885,12 +1898,16 @@ impl Cpu {
                         ;   mov rax, QWORD self.next_instruction_pc as u64 as _  // .
                         ;   mov QWORD [v_tmp], rax                               // .
                     );
+
                     letscall!(assembler, Cpu::prefetch_bridge);            // setup next_instruction_pc
+
                     letsgo!(assembler
+                        ;   jmp >epilog                                    // exit the block
                         ;no_break_out:
                     );
                 } else {
                     println!("** checking normal branch condition:");
+
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
                         ;   jg >no_break_out
@@ -1903,7 +1920,9 @@ impl Cpu {
                         ;skip_set:
                         ;   mov QWORD [v_tmp], rax                          // store branch dest in self.pc
                     );
+
                     letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
+
                     letsgo!(assembler
                         ;   jmp >epilog                                     // exit the block
                         ;no_break_out:
@@ -5607,7 +5626,7 @@ impl Cpu {
 
 
     fn special_dmultu(&mut self) -> Result<(), InstructionFault> {
-        // must be 32-bit unsigned numbers
+        // must be 128-bit unsigned numbers in order to get the full multiply
         let result = (self.gpr[self.inst.rs] as u128) * (self.gpr[self.inst.rt] as u128);
 
         // multu results are available in the next instruction since the multiply
@@ -5618,7 +5637,31 @@ impl Cpu {
         Ok(())
     }
 
+     fn build_special_dmultu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: dmultu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rs, self.inst.rt);
 
+        if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
+            letsgo!(assembler
+                ;   xor v_tmp, v_tmp
+                ;   mov QWORD [rsp + s_lo], v_tmp
+                ;   mov QWORD [rsp + s_hi], v_tmp
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rax, QWORD [r_gpr + (self.inst.rs * 8) as i32]   // first operand in rax
+                ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]   // second operand in rdx
+                ;   mul rdx            // 64-bit multiply
+                                       // 128-bit result in rdx:rax (both are caller saved)
+                ;   mov QWORD [rsp + s_lo], rax    // low 64-bits from rax
+                ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits from rdx
+            );
+        }
+
+        CompileInstructionResult::Continue
+    }
+
+ 
     fn special_dsll(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rd] = self.gpr[self.inst.rt] << self.inst.sa;
         Ok(())
