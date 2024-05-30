@@ -610,14 +610,14 @@ impl Cpu {
 
             jit_special_table: [ 
                //  _000                     _001                      _010                     _011                     _100                       _101                     _110                     _111
-    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv  , Cpu::build_inst_unknown  , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
-    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown  , Cpu::build_special_break , Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
-    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_special_mthi , Cpu::build_special_mflo, Cpu::build_special_mtlo, Cpu::build_special_dsllv , Cpu::build_inst_unknown  , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
-    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult , Cpu::build_special_dmultu, Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
-    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and   , Cpu::build_special_or    , Cpu::build_special_xor   , Cpu::build_special_nor   ,
-    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd  , Cpu::build_special_daddu , Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
-    /* 110_ */  Cpu::build_special_tge , Cpu::build_special_tgeu , Cpu::build_special_tlt , Cpu::build_special_tltu, Cpu::build_special_teq   , Cpu::build_inst_unknown  , Cpu::build_special_tne   , Cpu::build_inst_unknown  ,
-    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32, Cpu::build_inst_unknown  , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
+    /* 000_ */  Cpu::build_special_sll , Cpu::build_inst_unknown , Cpu::build_special_srl , Cpu::build_special_sra , Cpu::build_special_sllv   , Cpu::build_inst_unknown  , Cpu::build_special_srlv  , Cpu::build_special_srav  ,
+    /* 001_ */  Cpu::build_special_jr  , Cpu::build_special_jalr , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_special_syscall, Cpu::build_special_break , Cpu::build_inst_unknown  , Cpu::build_special_sync  ,
+    /* 010_ */  Cpu::build_special_mfhi, Cpu::build_special_mthi , Cpu::build_special_mflo, Cpu::build_special_mtlo, Cpu::build_special_dsllv  , Cpu::build_inst_unknown  , Cpu::build_special_dsrlv , Cpu::build_special_dsrav ,
+    /* 011_ */  Cpu::build_special_mult, Cpu::build_special_multu, Cpu::build_special_div , Cpu::build_special_divu, Cpu::build_special_dmult  , Cpu::build_special_dmultu, Cpu::build_special_ddiv  , Cpu::build_special_ddivu ,
+    /* 100_ */  Cpu::build_special_add , Cpu::build_special_addu , Cpu::build_special_sub , Cpu::build_special_subu, Cpu::build_special_and    , Cpu::build_special_or    , Cpu::build_special_xor   , Cpu::build_special_nor   ,
+    /* 101_ */  Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_special_slt , Cpu::build_special_sltu, Cpu::build_special_dadd   , Cpu::build_special_daddu , Cpu::build_special_dsub  , Cpu::build_special_dsubu ,
+    /* 110_ */  Cpu::build_special_tge , Cpu::build_special_tgeu , Cpu::build_special_tlt , Cpu::build_special_tltu, Cpu::build_special_teq    , Cpu::build_inst_unknown  , Cpu::build_special_tne   , Cpu::build_inst_unknown  ,
+    /* 111_ */  Cpu::build_special_dsll, Cpu::build_inst_unknown , Cpu::build_special_dsrl, Cpu::build_special_dsra, Cpu::build_special_dsll32 , Cpu::build_inst_unknown  , Cpu::build_special_dsrl32, Cpu::build_special_dsra32,
             ],
 
             jit_regimm_table: [ 
@@ -1143,6 +1143,25 @@ impl Cpu {
         self.exception(ExceptionCode_Bp, false)
     }
 
+    unsafe extern "win64" fn breakpoint_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.breakpoint_exception() {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("reserved_instruction_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+
     fn overflow_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Ov, false)
@@ -1175,6 +1194,25 @@ impl Cpu {
     fn syscall_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Sys, false)
+    }
+
+    unsafe extern "win64" fn syscall_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.syscall_exception() {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("reserved_instruction_exception_bridge error = {:?}", err);
+            }
+        }
     }
 
     fn trap_exception(&mut self) -> Result<(), InstructionFault> {
@@ -5296,11 +5334,11 @@ impl Cpu {
 
     fn build_special_break(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("${:08X}[{:5}]: break", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
-        letsgo!(assembler
-            ;   mov rax, QWORD 0xFF00_00FF_FF00_1111u64 as _ // search code
-            ;   int3    // call self.breakpoint_exception()
-        );
-        CompileInstructionResult::Continue
+
+        letsexcept!(self, assembler, Cpu::breakpoint_exception_bridge);
+
+        // TODO Kinda unsure whether we should keep compiling or not...
+        CompileInstructionResult::Stop
     }
 
     fn special_dadd(&mut self) -> Result<(), InstructionFault> {
@@ -7111,6 +7149,14 @@ impl Cpu {
     fn special_syscall(&mut self) -> Result<(), InstructionFault> {
         self.syscall_exception()?;
         Ok(())
+    }
+
+    fn build_special_syscall(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        println!("${:08X}[{:5}]: syscall", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+       
+        letsexcept!(self, assembler, Cpu::syscall_exception_bridge);
+
+        CompileInstructionResult::Continue
     }
 
     fn special_sync(&mut self) -> Result<(), InstructionFault> {
