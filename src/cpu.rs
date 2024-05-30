@@ -178,7 +178,7 @@ macro_rules! letsgo {
             ; .alias v_tmp2, r11
             $($t)*
         );
-        println!("\t{}", stringify!($($t)*).replace("\n", " ").replace("\r", "").replace(";", "\n\t;").trim());
+        //println!("\t{}", stringify!($($t)*).replace("\n", " ").replace("\r", "").replace(";", "\n\t;").trim());
     }
 }
 
@@ -298,12 +298,9 @@ macro_rules! letsoffset {
     }
 }
 
-// calls the exception bridge function after setting up is_delay_slot and current_instruction_pc,
-// which are required for exception() to work properly.  after, a jump to the epilog is executed.
-// be sure to set up function arguments in rdx, r8, and r9 before calling letsexcept, which in
-// turn calls letscall.
-macro_rules! letsexcept {
-    ($self:ident, $ops:ident, $exception_bridge:expr) => {
+// prepares all variables needed for fn exception() to work properly
+macro_rules! letssetupexcept {
+    ($self:ident, $ops:ident) => {
         letsgo!($ops
             ;   mov rax, QWORD &mut $self.is_delay_slot as *mut bool as _
             ;   mov BYTE [rax], BYTE $self.is_delay_slot as _
@@ -320,6 +317,15 @@ macro_rules! letsexcept {
                 ;   mov QWORD [rax], v_tmp2
             );
         }
+    }
+}
+// calls the exception bridge function after setting up is_delay_slot and current_instruction_pc,
+// which are required for exception() to work properly.  after, a jump to the epilog is executed.
+// be sure to set up function arguments in rdx, r8, and r9 before calling letsexcept, which in
+// turn calls letscall.
+macro_rules! letsexcept {
+    ($self:ident, $ops:ident, $exception_bridge:expr) => {
+        letssetupexcept!($self, $ops);
 
         // this will call prefetch(), so we need to jump to the block epilog now.
         letscall!($ops, $exception_bridge);
@@ -327,59 +333,24 @@ macro_rules! letsexcept {
         letsgo!($ops
             ;   jmp >epilog     // we lose one instruction count by skipping the instruction epilog
         );
-
     }
 }
 
-// check the jit_exception flag after a call to read/write_u8/16/32/64
-// calls various exception handlers depending on the exception that occurred during the rw op
-// if an exception occurs, the code jumps to the epilog of the current block
+// check the jit_other_exception flag after a bridged call that could generate exceptions
+// if an exception occurred, the code jumps to the epilog of the current block
 // expects:
-//      0) exception code in rax (return value from the rw call)
-//      1) a copy of the virtual address used for the rw function placed in [rsp+s_tmp0]
-//          * if you know address exceptions are possible
+//      0) jit_other_exception to be set if an exception was triggered
+//      1) exception code in rax (return value from the rw call)
 macro_rules! letscheck {
-    ($self:ident, $ops:ident, $is_write:expr, $err_code:expr) => {
+    ($self:ident, $ops:ident) => {
         // check if there was an exception while calling read_u32
         letsgo!($ops
-            ;   mov v_tmp, QWORD &$self.jit_exception as *const bool as _
+            ;   mov v_tmp, QWORD &$self.jit_other_exception as *const bool as _
             ;   cmp BYTE [v_tmp], BYTE 0u8 as _
-            ;   je >no_exception
-            // determine exception. exception code in eax
-            ;   cmp eax, DWORD IN_JIT_ADDRESS_EXCEPTION as _    // check most common exception first
-            ;   jne >not_ae
-            // setup call to address_exception_bridge
-            ;   mov rdx, QWORD [rsp+s_tmp0]  // restore virtual address
-            ;   xor r8d, r8d                 // is_write = false
+            ;   jne >epilog
         );
 
-        if $is_write {
-            letsgo!($ops
-                ;   inc r8d
-            );
-        }
-
-        // call the address exception handler
-        letsexcept!($self, $ops, Cpu::address_exception_bridge);
-
-        // continue checking exceptions
-        letsgo!($ops
-            ;not_ae:
-            ;   cmp eax, DWORD IN_JIT_COP2_UNUSABLE as _    // check Cop2 unusable
-            ;   jne >not_cu2
-            ;   mov edx, DWORD 0x02u32 as _ // processor number
-        );
-
-        // call Cop2 unusable handler
-        letsexcept!($self, $ops, Cpu::coprocessor_unusable_exception_bridge);
-
-        // continue checking exceptions
-        letsgo!($ops
-            ;not_cu2:
-            ;   mov rax, QWORD $err_code as _
-            ;   int3
-            ;no_exception:
-        );
+        // TODO: we could save and return an error code
     }
 }
 
@@ -527,7 +498,7 @@ pub struct Cpu {
     jit_conditional_branch: Option<(i64, bool)>, // branch_offset, is_branch_likely
     jit_current_assembler_offset: usize,
     jit_executing: bool, // true when inside run_block()
-    jit_exception: bool, // true when an exception() occurs inside a bridged function call
+    jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -542,7 +513,6 @@ pub enum InstructionFault {
     CoprocessorUnusable,
     FloatingPointException,
     ReadWrite(ReadWriteFault),
-    ExceptionInJit(InJitException),
 }
 
 impl From<ReadWriteFault> for InstructionFault {
@@ -550,11 +520,6 @@ impl From<ReadWriteFault> for InstructionFault {
         InstructionFault::ReadWrite(value)
     }
 }
-
-type InJitException = u32;
-const IN_JIT_ADDRESS_EXCEPTION: InJitException = 0;
-//...
-const IN_JIT_COP2_UNUSABLE    : InJitException = 20;
 
 type CpuInstruction = fn(&mut Cpu) -> Result<(), InstructionFault>;
 
@@ -633,14 +598,14 @@ impl Cpu {
 
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal    , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_bgtz   ,
-    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu  , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
-    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_cop2   , Cpu::build_inst_unknown, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr    , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw     , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_lwr    , Cpu::build_inst_lwu    ,
-    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw     , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_swr    , Cpu::build_inst_cache  ,
-    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_ldc1   , Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
-    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_sdc1   , Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal     , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_bgtz   ,
+    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu   , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_cop2   , Cpu::build_inst_reserved, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
+    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw      , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_lwr    , Cpu::build_inst_lwu    ,
+    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw      , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_swr    , Cpu::build_inst_cache  ,
+    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_ldc1   , Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
+    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_sdc1   , Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
             ],
 
             jit_special_table: [ 
@@ -670,7 +635,7 @@ impl Cpu {
             jit_conditional_branch: None,
             jit_current_assembler_offset: 0,
             jit_executing: false,
-            jit_exception: false,
+            jit_other_exception: false,
         };
         
         let _ = cpu.reset(false);
@@ -825,9 +790,10 @@ impl Cpu {
         match cpu.read_u32(virtual_address as usize) {
             Ok(value) => value,
 
-            Err(InstructionFault::ExceptionInJit(exception_code)) => {
-                cpu.jit_exception = true;
-                exception_code
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_AdEL || exception_code == ExceptionCode_TLBL); // only valid exceptions here
+                cpu.jit_other_exception = true;
+                exception_code as u32
             },
 
             Err(e) => {
@@ -969,9 +935,10 @@ impl Cpu {
         match cpu.write_u32(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
 
-            Err(InstructionFault::ExceptionInJit(exception_code)) => {
-                cpu.jit_exception = true;
-                exception_code
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_AdES || exception_code == ExceptionCode_TLBS || exception_code == ExceptionCode_Mod);
+                cpu.jit_other_exception = true;
+                exception_code as u32
             },
 
             Err(e) => {
@@ -1112,14 +1079,14 @@ impl Cpu {
     unsafe extern "win64" fn address_exception_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> i64 {
         let cpu = { &mut *cpu };
 
-        // if we get here due to a InJitException, clear it
-        cpu.jit_exception = false;
-
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.address_exception(virtual_address, is_write) {
             Ok(_) => 0,
 
-            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
 
             Err(err) => {
                 // TODO handle rrors
@@ -1199,14 +1166,14 @@ impl Cpu {
     unsafe extern "win64" fn trap_exception_bridge(cpu: *mut Cpu) -> i64 {
         let cpu = { &mut *cpu };
 
-        // if we get here due to a InJitException, clear it
-        cpu.jit_exception = false;
-
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.trap_exception() {
             Ok(_) => 0,
 
-            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
 
             Err(err) => {
                 // TODO handle rrors
@@ -1226,21 +1193,47 @@ impl Cpu {
         self.exception(ExceptionCode_CpU, false)
     }
 
-    unsafe extern "win64" fn coprocessor_unusable_exception_bridge(cpu: *mut Cpu, coprocessor_number: u32) -> i64 {
+    unsafe extern "win64" fn coprocessor_unusable_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
         let cpu = { &mut *cpu };
 
-        // if we get here due to a InJitException, clear it
-        cpu.jit_exception = false;
-
         // do the actual exception, setting self.pc, and Cop0 state, etc
-        match cpu.coprocessor_unusable_exception(coprocessor_number as u64) {
+        match cpu.coprocessor_unusable_exception(coprocessor_number) {
             Ok(_) => 0,
 
-            Err(InstructionFault::OtherException(exception_code)) => -(exception_code as i64),
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
 
             Err(err) => {
                 // TODO handle rrors
-                todo!("coprocessor_unusable_exception_bridge error = {:?}", err);
+                todo!("trap_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+    
+    unsafe extern "win64" fn cop1_unimplemented_instruction_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1) -> i64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cop1.unimplemented_instruction() {
+            Ok(_) => 0,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as i64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle errors
+                todo!("cop1_unimplemented_instruction_bridge error = {:?}", err);
             }
         }
     }
@@ -1398,11 +1391,7 @@ impl Cpu {
             };
         } else {
             if (virtual_address & 0x8000_0000) != 0 && ((virtual_address >> 32) as i32) != -1 && generate_exceptions {
-                if self.jit_executing {
-                    return Err(InstructionFault::ExceptionInJit(IN_JIT_ADDRESS_EXCEPTION));
-                } else {
-                    self.address_exception(virtual_address, is_write)?;
-                }
+                self.address_exception(virtual_address, is_write)?;
                 return Ok(None);
             }
 
@@ -2086,6 +2075,10 @@ impl Cpu {
 
         self.jit_executing = false;
 
+        // TODO: return instruction fault?
+        // if self.jit_other_exception { ... // if an exception occurred that caused the block to exit... 
+        self.jit_other_exception = false;
+
         res
     }
 
@@ -2301,9 +2294,8 @@ impl Cpu {
         Ok(())
     }
 
-    // TODO
     fn build_inst_reserved(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        warn!(target: "CPU", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        warn!(target: "JIT", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
         // TODO self.reserved_instruction_exception(0)?;
         letsgo!(assembler
             ;   mov rax, QWORD 0x8888_8888_1111_1111u64 as _
@@ -2650,8 +2642,14 @@ impl Cpu {
             0 => panic!("TODO"),
             1 => &mut self.cop1,
             _ => {
-                todo!(); //self.coprocessor_unusable_exception(copno)?;
-                //return Ok(());
+                // coprocessor_number in rdx
+                letsgo!(assembler
+                    ;   mov edx, DWORD copno as _
+                );
+
+                letsexcept!(self, assembler, Cpu::coprocessor_unusable_exception_bridge);
+
+                return CompileInstructionResult::Continue;
             },
         };
 
@@ -2660,10 +2658,18 @@ impl Cpu {
             ;   mov v_tmp, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
             ;   mov eax, DWORD [v_tmp]
             ;   and eax, DWORD (0x1000_0000 << copno) as _
-            ;   jnz >skip
-            ;   mov rax, QWORD 0x1234_5555_0101_0000u64 as _ // error code to find this msg
-            ;   int3 // TODO call self.coprocessor_unusable_exception()
-            ;skip:
+            ;   jnz >no_exception
+        );
+
+        // coprocessor_number in rdx
+        letsgo!(assembler
+            ;   mov edx, DWORD copno as _
+        );
+
+        letsexcept!(self, assembler, Cpu::coprocessor_unusable_exception_bridge);
+
+        letsgo!(assembler
+            ;no_exception:
         );
 
         if (self.inst.v & (1 << 25)) != 0 {
@@ -2740,7 +2746,15 @@ impl Cpu {
                             ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
                         );
                     }
-                    return CompileInstructionResult::Stop;
+                },
+
+                0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
+                    // set cop pointer to rdx
+                    letsgo!(assembler
+                        ;   mov rdx, QWORD cop as *mut cop1::Cop1 as _
+                    );
+
+                    letsexcept!(self, assembler, Cpu::cop1_unimplemented_instruction_bridge);
                 },
 
                 0b00_100 => { // MTC
@@ -3242,21 +3256,13 @@ impl Cpu {
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
         // if the co-processor isn't enabled, generate an exception
         if (self.cp0gpr[Cop0_Status] & 0x4000_0000) == 0 {
-            if self.jit_executing {
-                return Err(InstructionFault::ExceptionInJit(IN_JIT_COP2_UNUSABLE));
-            } else {
-                self.coprocessor_unusable_exception(2)?;
-            }
+            self.coprocessor_unusable_exception(2)?;
             return Ok(());
         }
 
         if (self.inst.v & (1 << 25)) != 0 {
             // no special functions on COP2
-            if self.jit_executing {
-                return Err(InstructionFault::ExceptionInJit(IN_JIT_COP2_UNUSABLE));
-            } else {
-                self.coprocessor_unusable_exception(2)?;
-            }
+            self.coprocessor_unusable_exception(2)?;
             Ok(())
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
@@ -3316,9 +3322,10 @@ impl Cpu {
         match cpu.inst_cop2() {
             Ok(_) => 0,
 
-            Err(InstructionFault::ExceptionInJit(exception_code)) => {
-                cpu.jit_exception = true;
-                exception_code
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_CpU || exception_code == ExceptionCode_RI);
+                cpu.jit_other_exception = true;
+                exception_code as u32
             },
 
             Err(err) => {
@@ -3331,6 +3338,9 @@ impl Cpu {
     fn build_inst_cop2(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         println!("${:08X}[{:5}]: cop2", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
+        // setup for exceptions
+        letssetupexcept!(self, assembler);
+
         // opcode in arg 2
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -3340,7 +3350,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_cop2_bridge);
 
         // check exceptions
-        letscheck!(self, assembler, false, 0x0000_1010_0101_AAAAu64);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4000,7 +4010,6 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         letsgo!(assembler
-            ;   mov QWORD [rsp+s_tmp0], rdx  // save a copy of the virtual address for the exception code
             ;   mov v_tmp, rdx               // check if address is valid (low two bits 00)
             ;   and v_tmp, BYTE 0x03         // .
             ;   jz >valid                    // .
@@ -4017,10 +4026,15 @@ impl Cpu {
         letsgo!(assembler
             ;valid:
         );
+
+        // setup variables necessary for exceptions
+        letssetupexcept!(self, assembler);
+
+        // make the bridge call
         letscall!(assembler, Cpu::read_u32_bridge);
 
-        // check the jit_exception flag after call to read_u32_bridge
-        letscheck!(self, assembler, false, 0xAFAF_FEFE_CDCD_1234u64);
+        // check the jit_other_exception flag after call to read_u32_bridge
+        letscheck!(self, assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4181,11 +4195,18 @@ impl Cpu {
         self.cop1.ldc(self.inst.rt, value)
     }
 
-    unsafe extern "win64" fn inst_ldc1_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_ldc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_ldc1() {
             Ok(_) => 0,
+            
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_CpU || exception_code == ExceptionCode_AdEL || exception_code == ExceptionCode_TLBL);
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            },
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_ldc1_bridge: {:?}", e);
@@ -4197,12 +4218,19 @@ impl Cpu {
         println!("${:08X}[{:5}]: ldc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup for exception
+        letssetupexcept!(self, assembler);
+
         // opcode in rdx (2nd arg)
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
 
+        // do the call
         letscall!(assembler, Cpu::inst_ldc1_bridge);
+
+        // check for exceptions
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4225,11 +4253,18 @@ impl Cpu {
         self.cop1.lwc(self.inst.rt, value)
     }
 
-    unsafe extern "win64" fn inst_lwc1_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_lwc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_lwc1() {
             Ok(_) => 0,
+
+            // return exceptions as negative values
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            }
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_lwc1_bridge: {:?}", e);
@@ -4241,12 +4276,18 @@ impl Cpu {
         println!("${:08X}[{:5}]: lwc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup values needed for exceptions in LWC1
+        letssetupexcept!(self, assembler);
+
         // opcode in rdx (2nd arg)
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_lwc1_bridge);
+
+        // check for exceptions
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4464,11 +4505,18 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_sdc1_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_sdc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_sdc1() {
             Ok(_) => 0,
+
+            // return exceptions as negative values
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            }
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_sdc1_bridge: {:?}", e);
@@ -4480,12 +4528,18 @@ impl Cpu {
         println!("${:08X}[{:5}]: sdc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup values needed for exceptions in LWC1
+        letssetupexcept!(self, assembler);
+
         // opcode in rdx (2nd arg)
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_sdc1_bridge);
+
+        // check for exceptions
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4509,11 +4563,18 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_swc1_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_swc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_swc1() {
             Ok(_) => 0,
+
+            // return exceptions as negative values
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            }
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_swc1_bridge: {:?}", e);
@@ -4525,12 +4586,18 @@ impl Cpu {
         println!("${:08X}[{:5}]: swc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup values needed for exceptions in LWC1
+        letssetupexcept!(self, assembler);
+        
         // opcode in rdx (2nd arg)
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_swc1_bridge);
+
+        // check for exceptions
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4788,7 +4855,6 @@ impl Cpu {
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
 
         letsgo!(assembler
-            ;   mov QWORD [rsp+s_tmp0], r8  // save a copy of the virtual address for letscheck
             ;   test r8b, BYTE 0x03         // check if address is valid (low two bits 00)
             ;   jz >valid                   // .
             // setup call to address_exception_bridge
@@ -4829,10 +4895,15 @@ impl Cpu {
         letsgo!(assembler
             ;valid:
         );
+
+        // setup for exceptions
+        letssetupexcept!(self, assembler);
+
+        // make the call
         letscall!(assembler, Cpu::write_u32_bridge);
 
-        // check the jit_exception flag after call to write_u32_bridge
-        letscheck!(self, assembler, true, 0xBEBE_ECEC_0000_1221u64);
+        // check the jit_other_exception flag after call to write_u32_bridge
+        letscheck!(self, assembler);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
