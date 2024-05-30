@@ -1153,6 +1153,25 @@ impl Cpu {
         self.exception(ExceptionCode_RI, false)
     }
 
+    unsafe extern "win64" fn reserved_instruction_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.reserved_instruction_exception(coprocessor_number) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("reserved_instruction_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+
     fn syscall_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Sys, false)
@@ -2296,11 +2315,14 @@ impl Cpu {
 
     fn build_inst_reserved(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         warn!(target: "JIT", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
-        // TODO self.reserved_instruction_exception(0)?;
+
+        // pass 0 as coprocessor_number
         letsgo!(assembler
-            ;   mov rax, QWORD 0x8888_8888_1111_1111u64 as _
-            ;   int3
+            ;   xor edx, edx
         );
+
+        letsexcept!(self, assembler, Cpu::reserved_instruction_exception_bridge);
+
         // Stop decomp, at this point nothing makes sense any more
         CompileInstructionResult::Stop
     }
