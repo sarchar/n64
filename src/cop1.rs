@@ -287,17 +287,6 @@ impl Cop1 {
         }
     }
 
-    pub unsafe extern "win64" fn cfc_bridge(cop1: *mut Cop1, rd: u64) -> u32 {
-        let cop1 = { &mut *cop1 };
-        match cop1.cfc(rd as usize) {
-            Ok(v) => v,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("cfc_bridge error = {:?}", err);
-            }
-        }
-    }
-
     // Move Control Word to Coprocessor
     #[inline]
     pub fn ctc(&mut self, value: u64, rd: usize) -> Result<(), InstructionFault> {
@@ -323,18 +312,6 @@ impl Cop1 {
         }
     }
 
-    pub unsafe extern "win64" fn ctc_bridge(cop1: *mut Cop1, rt_value: u64, rd: u64) -> i64 {
-        let cop1 = { &mut *cop1 };
-        // we're running inside a compiled block so self.inst isn't being used, we
-        // can safely destroy it and call into rust code
-        match cop1.ctc(rt_value, rd as usize) {
-            Ok(_) => 0,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("ctc_bridge error = {:?}", err);
-            }
-        }
-    }
 
 
     // Move (general purpose value) from Coprocessor
@@ -348,16 +325,6 @@ impl Cop1 {
         }
     }
 
-    pub unsafe extern "win64" fn mfc_bridge(cop1: *mut Cop1, rd: u64) -> u32 {
-        let cop1 = { &mut *cop1 };
-        match cop1.mfc(rd as usize) {
-            Ok(v) => v,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("mfc_bridge error = {:?}", err);
-            }
-        }
-    }
 
     // Move (general purpose value) to Coprocessor
     pub fn mtc(&mut self, value: u32, rd: usize) -> Result<(), InstructionFault> {
@@ -376,33 +343,11 @@ impl Cop1 {
         Ok(())
     }
 
-    pub unsafe extern "win64" fn mtc_bridge(cop1: *mut Cop1, rt_value: u32, rd: u64) -> i64 {
-        let cop1 = { &mut *cop1 };
-        match cop1.mtc(rt_value, rd as usize) {
-            Ok(_) => 0,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("mtc_bridge error = {:?}", err);
-            }
-        }
-    }
-
     pub fn dmfc(&mut self, rd: usize) -> Result<u64, InstructionFault> {
         // only even registers available if FR bit is not set
         let rd = if self.fr_bit { rd } else { rd & !0x01 };
 
         Ok(unsafe {self.fgr[rd].as_u64})
-    }
-
-    pub unsafe extern "win64" fn dmfc_bridge(cop1: *mut Cop1, rd: u64) -> u64 {
-        let cop1 = { &mut *cop1 };
-        match cop1.dmfc(rd as usize) {
-            Ok(v) => v,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("dmfc_bridge error = {:?}", err);
-            }
-        }
     }
 
     pub fn dmtc(&mut self, value: u64, rd: usize) -> Result<(), InstructionFault> {
@@ -414,17 +359,6 @@ impl Cop1 {
         };
 
         Ok(())
-    }
-
-    pub unsafe extern "win64" fn dmtc_bridge(cop1: *mut Cop1, rt_value: u64, rd: u64) -> i64 {
-        let cop1 = { &mut *cop1 };
-        match cop1.dmtc(rt_value, rd as usize) {
-            Ok(_) => 0,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("dmtc_bridge error = {:?}", err);
-            }
-        }
     }
 
     fn begin_fpu_op(&mut self) {
@@ -1102,16 +1036,5 @@ impl Cop1 {
         }
 
         self.function_table[self.inst.special as usize](self)
-    }
-
-    pub unsafe extern "win64" fn special_bridge(cop1: *mut Cop1, inst: u32) -> i64 {
-        let cop1 = { &mut *cop1 };
-        match cop1.special(inst) {
-            Ok(_) => 0,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("special_bridge error = {:?}", err);
-            }
-        }
     }
 }

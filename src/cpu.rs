@@ -219,12 +219,13 @@ macro_rules! letscall {
 }
 
 // use letscop! to call external "win64" functions on other objects
-// this call uses the first two parameters (Cpu, instruction) for all calls
-// you can setup arguments before calling letscall!() in r8, r9, and the rest in stack
+// this call uses the first two parameters (Cpu, Cop1) for all calls
+// you can setup arguments before calling letscop!() in r8, r9, and the rest in stack
 macro_rules! letscop {
-    ($ops:ident, $obj:expr, $target:expr) => {
+    ($ops:ident, $cop:expr, $target:expr) => {
         letsgo!($ops
-            ; mov rcx, QWORD $obj as *mut _ as _        // arg0 *mut T
+            ; mov rcx, r_cpu                            // arg0 *mut Cpu
+            ; mov rdx, QWORD $cop as *mut _ as _        // arg1 *mut Cop1
             ; mov rax, QWORD $target as _               // function pointer
             ; sub rsp, BYTE 0x20                        // fixup stack for function call
             ; call rax                                  // make the call
@@ -598,14 +599,14 @@ impl Cpu {
 
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
-    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal     , Cpu::build_inst_beq    , Cpu::build_inst_bne    , Cpu::build_inst_blez   , Cpu::build_inst_bgtz   ,
-    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu   , Cpu::build_inst_andi   , Cpu::build_inst_ori    , Cpu::build_inst_xori   , Cpu::build_inst_lui    ,
-    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_cop2   , Cpu::build_inst_reserved, Cpu::build_inst_beql   , Cpu::build_inst_bnel   , Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr     , Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown, Cpu::build_inst_unknown,
-    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw      , Cpu::build_inst_lbu    , Cpu::build_inst_lhu    , Cpu::build_inst_lwr    , Cpu::build_inst_lwu    ,
-    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw      , Cpu::build_inst_sdl    , Cpu::build_inst_sdr    , Cpu::build_inst_swr    , Cpu::build_inst_cache  ,
-    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_ldc1   , Cpu::build_inst_unknown, Cpu::build_inst_ld     ,
-    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown, Cpu::build_inst_sdc1   , Cpu::build_inst_unknown, Cpu::build_inst_sd     ,
+    /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal     , Cpu::build_inst_beq     , Cpu::build_inst_bne     , Cpu::build_inst_blez    , Cpu::build_inst_bgtz    ,
+    /* 001_ */  Cpu::build_inst_addi   , Cpu::build_inst_addiu  , Cpu::build_inst_slti   , Cpu::build_inst_sltiu   , Cpu::build_inst_andi    , Cpu::build_inst_ori     , Cpu::build_inst_xori    , Cpu::build_inst_lui     ,
+    /* 010_ */  Cpu::build_inst_cop0   , Cpu::build_inst_cop    , Cpu::build_inst_cop2   , Cpu::build_inst_reserved, Cpu::build_inst_beql    , Cpu::build_inst_bnel    , Cpu::build_inst_unknown , Cpu::build_inst_unknown ,
+    /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr     , Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved,
+    /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw      , Cpu::build_inst_lbu     , Cpu::build_inst_lhu     , Cpu::build_inst_lwr     , Cpu::build_inst_lwu     ,
+    /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw      , Cpu::build_inst_sdl     , Cpu::build_inst_sdr     , Cpu::build_inst_swr     , Cpu::build_inst_cache   ,
+    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown , Cpu::build_inst_ldc1    , Cpu::build_inst_unknown , Cpu::build_inst_ld      ,
+    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown , Cpu::build_inst_sdc1    , Cpu::build_inst_unknown , Cpu::build_inst_sd      ,
             ],
 
             jit_special_table: [ 
@@ -1009,7 +1010,7 @@ impl Cpu {
             Ok(_) => 0,
             Err(err) => {
                 // TODO handle rrors
-                todo!("prefetch error = {:?}", err);
+                todo!("prefetch error = {:?} on address ${:16X}", err, cpu.pc as u64);
             }
         }
     }
@@ -1167,6 +1168,25 @@ impl Cpu {
         self.exception(ExceptionCode_Ov, false)
     }
 
+    unsafe extern "win64" fn overflow_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = { &mut *cpu };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.overflow_exception() {
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("overflow_exception_bridge error = {:?}", err);
+            }
+        }
+    }
+
     fn reserved_instruction_exception(&mut self, coprocessor_number: u64) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0x3000_0000) | (coprocessor_number << 28);
         self.exception(ExceptionCode_RI, false)
@@ -1291,6 +1311,181 @@ impl Cpu {
             Err(err) => {
                 // TODO handle errors
                 todo!("cop1_unimplemented_instruction_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_cfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.cfc(rd as usize) {
+            Ok(v) => v,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as u32
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("cfc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_ctc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.ctc(rt_value, rd as usize) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as i64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("ctc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_mfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.mfc(rd as usize) {
+            Ok(v) => v,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as u32
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("mfc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_mtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u32, rd: u64) -> i64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.mtc(rt_value, rd as usize) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as i64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("mtc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_dmfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.dmfc(rd as usize) {
+            Ok(v) => v,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as u64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("dmfc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_dmtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.dmtc(rt_value, rd as usize) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as i64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("dmtc_bridge error = {:?}", err);
+            }
+        }
+    }
+
+    pub unsafe extern "win64" fn cop1_special_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, inst: u32) -> i64 {
+        let cpu = { &mut *cpu };
+        let cop1 = { &mut *cop1 };
+
+        match cop1.special(inst) {
+            Ok(_) => 0,
+
+            Err(InstructionFault::FloatingPointException) => {
+                match cpu.floating_point_exception() {
+                    Err(InstructionFault::OtherException(exception_code)) => {
+                        cpu.jit_other_exception = true;
+                        exception_code as i64
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("special_bridge error = {:?}", err);
             }
         }
     }
@@ -2416,7 +2611,11 @@ impl Cpu {
                 letsgo!(assembler
                     ;   add v_tmp_32, DWORD self.inst.signed_imm as u32 as _
                     ;   jno >no_overflow
-                    ;   int3  // do self.overflow_exception()
+                );
+
+                letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+                letsgo!(assembler
                     ;no_overflow:
                 );
             }
@@ -2736,13 +2935,19 @@ impl Cpu {
             println!("${:08X}[{:5}]: cop1 special ${:03b}_{:03b}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                      (self.inst.v & 0x3F) >> 3, self.inst.v & 0x07);
 
-            // opcode in 2nd argument
+            // setup exception values for bridge
+            letssetupexcept!(self, assembler);
+
+            // opcode in 3nd argument
             letsgo!(assembler
-                ;   mov rdx, DWORD self.inst.v as _
+                ;   mov r8d, DWORD self.inst.v as _
             );
 
-            // TODO check return value for errors
-            letscop!(assembler, cop, cop1::Cop1::special_bridge);
+            // check return value for errors
+            letscop!(assembler, cop, Cpu::cop1_special_bridge);
+
+            // check for exceptions
+            letscheck!(self, assembler);
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
@@ -2750,13 +2955,19 @@ impl Cpu {
                     println!("${:08X}[{:5}]: mfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
-                    // register number rd in second argument
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // register number rd in 3rd argument
                     letsgo!(assembler
-                        ;   mov rdx, DWORD self.inst.rd as _
+                        ;   mov r8d, DWORD self.inst.rd as _
                     );
 
                     // result in eax
-                    letscop!(assembler, cop, cop1::Cop1::mfc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_mfc_bridge);
+
+                    // check exceptions
+                    letscheck!(self, assembler);
 
                     // store sign-extended result in rt
                     if self.inst.rt != 0 {
@@ -2771,13 +2982,19 @@ impl Cpu {
                     println!("${:08X}[{:5}]: dmfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
-                    // register number rd in second argument
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // register number rd in third argument
                     letsgo!(assembler
-                        ;   mov rdx, DWORD self.inst.rd as _
+                        ;   mov r8d, DWORD self.inst.rd as _
                     );
 
                     // result in rax
-                    letscop!(assembler, cop, cop1::Cop1::dmfc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_dmfc_bridge);
+
+                    // check exceptions
+                    letscheck!(self, assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -2791,13 +3008,19 @@ impl Cpu {
                     println!("${:08X}[{:5}]: cfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
-                    // register number rd in second argument
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // register number rd in third argument
                     letsgo!(assembler
-                        ;   mov rdx, DWORD self.inst.rd as _
+                        ;   mov r8d, DWORD self.inst.rd as _
                     );
 
                     // result in eax
-                    letscop!(assembler, cop, cop1::Cop1::cfc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_cfc_bridge);
+
+                    // check exceptions
+                    letscheck!(self, assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -2821,66 +3044,85 @@ impl Cpu {
                     println!("${:08X}[{:5}]: mtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
-                    // 32-bits of rt in second arg, register number rd in third
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // 32-bits of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor rdx, rdx
+                            ;   xor r8, r8
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
                     letsgo!(assembler
-                        ;   mov r8, DWORD self.inst.rd as _
+                        ;   mov r9d, DWORD self.inst.rd as _
                     );
 
-                    letscop!(assembler, cop, cop1::Cop1::mtc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_mtc_bridge);
+
+                    // check exceptions
+                    letscheck!(self, assembler);
                 },
   
                 0b00_101 => { // DMTC
                     println!("${:08X}[{:5}]: dmtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
-                    // contents of rt in second arg, register number rd in third
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // contents of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor rdx, rdx
+                            ;   xor r8, r8
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov r8, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
                     letsgo!(assembler
-                        ;   mov r8, DWORD self.inst.rd as _
+                        ;   mov r9d, DWORD self.inst.rd as _
                     );
 
-                    letscop!(assembler, cop, cop1::Cop1::dmtc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_dmtc_bridge);
+                    
+                    // check exceptions
+                    letscheck!(self, assembler);
                 },
 
                 0b00_110 => { // CTC
                     println!("${:08X}[{:5}]: ctc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
-                    // contents of rt in second arg, register number rd in third
+                    // setup exception values for bridge
+                    letssetupexcept!(self, assembler);
+
+                    // contents of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor rdx, rdx
+                            ;   xor r8, r8
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov r8, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
+                    // fgpr index in 4th argument
                     letsgo!(assembler
-                        ; mov r8, DWORD self.inst.rd as _
+                        ; mov r9d, DWORD self.inst.rd as _
                     );
 
-                    letscop!(assembler, cop, cop1::Cop1::ctc_bridge);
+                    letscop!(assembler, cop, Cpu::cop1_ctc_bridge);
+
+                    // check exceptions
+                    letscheck!(self, assembler);
                 },
 
                 0b01_000 => {
@@ -3539,7 +3781,11 @@ impl Cpu {
                 letsgo!(assembler
                     ;   add v_tmp, DWORD self.inst.signed_imm as u32 as _ // add sign-extended signed_imm to 64-bit v_tmp
                     ;   jno >no_overflow
-                    ;   int3  // do self.overflow_exception()
+                );
+
+                letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+                letsgo!(assembler
                     ;no_overflow:
                 );
             }
@@ -5238,8 +5484,11 @@ impl Cpu {
             letsgo!(assembler
                 ;   add v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
                 ;   jno >no_overflow
-                ;   mov rax, DWORD 0x0001_0001 as _  // TEMP error code to find where the int3 comes from
-                ;   int3  // do self.overflow_exception()
+            );
+
+            letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+            letsgo!(assembler
                 ;no_overflow:
             );
         }
@@ -5378,8 +5627,11 @@ impl Cpu {
             letsgo!(assembler
                 ;   add v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                 ;   jno >no_overflow
-                ;   mov rax, DWORD 0x0003_0003 as _  // TEMP error code to find where the int3 comes from
-                ;   int3  // do self.overflow_exception()
+            );
+
+            letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+            letsgo!(assembler
                 ;no_overflow:
             );
         }
@@ -6102,8 +6354,11 @@ impl Cpu {
             letsgo!(assembler
                 ;   sub v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                 ;   jno >no_overflow
-                ;   mov rax, DWORD 0x0C03_0C03 as _  // TEMP error code to find where the int3 comes from
-                ;   int3  // do self.overflow_exception()
+            );
+
+            letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+            letsgo!(assembler
                 ;no_overflow:
             );
         }
@@ -7083,8 +7338,11 @@ impl Cpu {
             letsgo!(assembler
                 ;   sub v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
                 ;   jno >no_overflow
-                ;   mov rax, DWORD 0x00E1_00E1 as _  // TEMP error code to find where the int3 comes from
-                ;   int3  // do self.overflow_exception()
+            );
+
+            letsexcept!(self, assembler, Cpu::overflow_exception_bridge);
+
+            letsgo!(assembler
                 ;no_overflow:
             );
         }
