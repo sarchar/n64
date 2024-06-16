@@ -278,7 +278,7 @@ impl PifRom {
         const JOYBUS_COMMAND_READ: u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
         const JOYBUS_COMMAND_READ_EEPROM: u8 = 0x04;
-        const _JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05; // TODO
+        const JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05;
         const JOYBUS_COMMAND_RESET: u8 = 0xFF;
 
         // copy over current ram with the joybus memory copy
@@ -414,6 +414,11 @@ impl PifRom {
                         JOYBUS_COMMAND_READ_EEPROM => { // read EEPROM block
                             let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
                             warn!(target: "JOY", "{}: JOYBUS_COMMAND_READ_EEPROM channel={}, block={}, res_addr={}", cmd_count - 1, channel, block, res_addr - 0x7C0);
+                        },
+
+                        JOYBUS_COMMAND_WRITE_EEPROM => { // write EEPROM block
+                            let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
+                            warn!(target: "JOY", "{}: JOYBUS_COMMAND_WRITE_EEPROM channel={}, block={}, res_addr={}", cmd_count - 1, channel, block, res_addr - 0x7C0);
                         },
 
                         _ => {

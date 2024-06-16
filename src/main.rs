@@ -45,6 +45,10 @@ struct Args {
     /// Synchronize the UI with the Game render (useful for RenderDoc captures)
     #[arg(short('S'), long("syncui"))]
     sync_ui_to_game: bool,
+
+    /// Use the interpreter core only (no JIT)
+    #[arg(short('I'), long("interpreter"))]
+    use_interpreter_cpu_core: bool
 }
 
 fn main() {
@@ -121,7 +125,9 @@ fn main() {
     }
 
     let program_rom = args.game_file.clone();
+    let use_interpreter_cpu_core = args.use_interpreter_cpu_core;
     let make_system = move |comms: SystemCommunication| {
+        comms.settings.write().unwrap().cpu_interpreter_only = use_interpreter_cpu_core;
         System::new(comms, "bios/pifrom.z64", &program_rom)
     };
 

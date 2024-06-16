@@ -302,7 +302,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         let position = in.view_position.xyz / in.view_position.w;
         for (var i: i32 = 0; i < 7; i++) {
             if (light_state.lights[i].w != 0.0) {
-                let neg_light_direction = normalize(light_state.lights[i].xyz - position);
+                let neg_light_direction = normalize(position - light_state.lights[i].xyz);
                 let contrib = max(dot(in.view_normal, neg_light_direction), 0.0);
                 color += light_state.colors[i].rgb * contrib;
             }

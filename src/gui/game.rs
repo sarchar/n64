@@ -10,6 +10,8 @@ use tracing_core::Level;
 use winit::keyboard::KeyCode;
 use wgpu::util::DeviceExt;
 
+use atomic_counter::AtomicCounter;
+
 use image::GenericImageView;
 
 use crate::*;
@@ -250,6 +252,9 @@ pub struct Game {
     capturing_display_list: bool,
 
     active_controller_port: u32,
+
+    last_cpu_cycle_time: Instant,
+    last_cpu_cycle_count: usize,
 }
 
 impl App for Game {
@@ -881,6 +886,9 @@ impl App for Game {
             capturing_display_list: false,
 
             active_controller_port: 0,
+
+            last_cpu_cycle_time: Instant::now(),
+            last_cpu_cycle_count: 0,
         };
 
         // Upload a null texture to texture 0 so that a game render always has a texture attached
@@ -1297,6 +1305,8 @@ impl App for Game {
 
         if self.stats_window_opened {
             let window = ui.window("Stats");
+            let total_cpu_steps = self.comms.total_cpu_steps.get();
+            let duration = self.last_cpu_cycle_time.elapsed().as_secs_f64();
             window.size([300.0, 100.0], imgui::Condition::FirstUseEver)
                   .position([0.0, 0.0], imgui::Condition::FirstUseEver)
                   .opened(&mut self.stats_window_opened) // TODO: remember closed state between runs
@@ -1304,8 +1314,13 @@ impl App for Game {
                       ui.text(format!("UI   FPS: {}", self.ui_fps));
                       ui.text(format!("GAME FPS: {}", self.game_fps));
                       ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
+                      ui.text(format!("CPU     : {:.4} MHz", (((total_cpu_steps - self.last_cpu_cycle_count) as f64) / duration) / 1_000_000.0));
                   }
             );
+            if duration >= 0.2 { // arbitrary time for resetting the freq timer
+                self.last_cpu_cycle_time = std::time::Instant::now();
+                self.last_cpu_cycle_count = total_cpu_steps;
+            }
         }
 
         if self.tweakables_window_opened {

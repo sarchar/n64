@@ -197,6 +197,7 @@ impl Addressable for SerialInterface {
         if (block.len() * 4) as u32 != length { todo!(); }
         match address & 0x7FE0_0000 {
             0x1FC0_0000 => {
+                //println!("serial issuing block write to PIF");
                 self.pif.write_block(address & 0x001F_FFFF, block, length)
             },
             _ => todo!(),

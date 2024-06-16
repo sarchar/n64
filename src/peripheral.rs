@@ -33,6 +33,9 @@ pub struct PeripheralInterface {
     is_write_pos: usize,
     //is_read_pos: usize,
     is_magic: u32,
+
+    // Timing
+    test_start: Option<std::time::Instant>,
 }
 
 impl PeripheralInterface {
@@ -67,6 +70,8 @@ impl PeripheralInterface {
             is_magic: 0,
             //is_read_pos: 0,
             is_write_pos: 0,
+
+            test_start: None,
         }
     }
 
@@ -482,6 +487,16 @@ impl Addressable for PeripheralInterface {
             for c in msg.chars() {
                 if c == '\n' {
                     info!(target: "PI", "message: {}", self.debug_string);
+
+                    if self.debug_string.starts_with("Heap range") {
+                        self.test_start = Some(std::time::Instant::now());
+                    } else if self.debug_string.starts_with("Slowest tests") {
+                        self.test_start.and_then(|test_start| -> Option<()> {
+                            info!(target: "PI", "total test time: {:.6?} (message)", test_start.elapsed());
+                            None
+                        });
+                    }
+
                     self.debug_string = String::new();
                 } else {
                     if self.debug_string.len() < 0x10000 {

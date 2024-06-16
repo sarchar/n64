@@ -156,7 +156,7 @@ pub struct Tweakables {
 // Settings -- normal things people may want to configure (like antialiasing, audio playback rate, etc.)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Settings {
-    cpu_interpreter_only: bool,
+    pub cpu_interpreter_only: bool,
 }
 
 // Collection of thread-safe channels for the front end to communicate with the emulating system
