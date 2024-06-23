@@ -208,6 +208,7 @@ impl Addressable for RdramInterface {
                 }
                 _ => {},
             }
+
             Ok(WriteReturnSignal::None)
         } else {
             todo!("DMA write to rdram offset ${:08X}: not likely", offset);

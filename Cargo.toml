@@ -9,10 +9,11 @@ debug = true
 
 [features]
 default = ["gui", "nodebuglogging"]
-gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image", "cgmath"]
+gui = ["winit", "winit_input_helper", "wgpu", "imgui", "imgui-winit-support", "imgui-wgpu", "pollster", "image"]
 nodebuglogging = ["tracing/release_max_level_info"]
 headless = []
-dev = ["gui"]
+dev = []
+jit-accuracy = []
 
 [dependencies]
 atomic-counter = "1.0.1"
@@ -22,7 +23,6 @@ crc64 = "2.0.0"
 
 [dependencies.cgmath]
 version = "0.18"
-optional = true
 
 [dependencies.atomicring]
 version = "1.2.9"

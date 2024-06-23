@@ -278,15 +278,16 @@ impl System {
             while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
                 self.cpu.step()?;
                 cycles_ran += 1;
+                self.comms.total_cpu_steps.inc();
             }
         } else {
             if !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
-                cycles_ran = self.cpu.run_for(cpu_cycles)?;
+                cycles_ran += self.cpu.run_for(cpu_cycles)?;
+
+                // accumulate total cycles ran
+                self.comms.total_cpu_steps.add(cycles_ran as usize);
             }
         }
-
-        // accumulate total cycles ran
-        self.comms.total_cpu_steps.add(cycles_ran as usize);
 
         // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
         self.comms.break_cpu_cycles.store(false, Ordering::SeqCst);
