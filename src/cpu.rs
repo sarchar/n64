@@ -113,7 +113,7 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 32; //2048; // max instruction count per block
+const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
 
 const CACHED_BLOCK_MAP_RDRAM_OFFSET  : usize = 0;
 const CACHED_BLOCK_MAP_PIFROM_OFFSET : usize = CACHED_BLOCK_MAP_RDRAM_OFFSET   + (0x80_0000 >> 2);
@@ -122,8 +122,8 @@ const CACHED_BLOCK_MAP_SIZE          : usize = CACHED_BLOCK_MAP_RSP_MEM_OFFSET +
 
 #[derive(Copy, Clone, Debug)]
 enum CachedBlockReference {
-    CachedBlock(u64),             // official reference to the block
-    AddressReference(usize, u64), // usize is an offset into the cache, u64 is a block id
+    CachedBlock(u64),              // official reference to the block
+    AddressReference(usize, u64),  // usize is an offset into the cache, u64 is a block id
 }
 
 struct CompiledBlock {
@@ -179,7 +179,8 @@ macro_rules! letsgo {
             ; .alias v_tmp2, r11
             $($t)*
         );
-        //println!("\t{}", stringify!($($t)*).replace("\n", " ").replace("\r", "").replace(";", "\n\t;").trim());
+
+        //trace!(target: "JIT-ASM", "\t{}", stringify!($($t)*).replace("\n", " ").replace("\r", "").replace(";", "\n\t;").trim());
     }
 }
 
@@ -364,7 +365,7 @@ macro_rules! letsexcept {
 //      1) exception code in rax (return value from the rw call)
 macro_rules! letscheck {
     ($self:ident, $ops:ident) => {
-        // check if there was an exception while calling read_u32
+        // check if there was an exception in the previous letscall
         letsgo!($ops
             ;   mov v_tmp, QWORD &$self.jit_other_exception as *const bool as _
             ;   cmp BYTE [v_tmp], BYTE 0u8 as _
@@ -382,19 +383,19 @@ macro_rules! letscheck {
 // for the branch likely family
 macro_rules! letsbranch {
     ($self:ident, $ops:ident, $cond_string:literal, $not_cond:ident, $is_likely:expr, $branch_taken_on_zero_zero:expr) => {
-        println!("${:08X}[{:5}]: {} r{}, r{}, ${:08X}", $self.current_instruction_pc as u32, $self.jit_current_assembler_offset, 
-                 $cond_string, $self.inst.rs, $self.inst.rt, ($self.inst.signed_imm << 2) as u32);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: {} r{}, r{}, ${:08X}", $self.current_instruction_pc as u32, $self.jit_current_assembler_offset, 
+                                    $cond_string, $self.inst.rs, $self.inst.rt, ($self.inst.signed_imm << 2) as u32);
 
         // compute target jump and determine if the destination is within the current block
         // (self.pc is pointing at the delay slot)
         let dest = ($self.pc - 4).wrapping_add(($self.inst.signed_imm as u64) << 2);
-        println!("** conditional branch to ${:08X}", dest as u32);
+        trace!(target: "JIT-BUILD", "** conditional branch to ${:08X}", dest as u32);
 
         // if we're in a delay slot, we should save r_cond before changing it
         // branching from delay slots is extremely uncommon, so this instruction isn't emitted very often
         // we save r_cond in case the instruction before this one set it
         if $self.is_delay_slot {
-            println!("** conditional branch inside delay slot not compilable");
+            trace!(target: "JIT-BUILD", "** conditional branch inside delay slot not compilable");
             return CompileInstructionResult::Cant;
         }
 
@@ -475,7 +476,6 @@ pub struct Cpu {
     // 32/64-bit addressing modes, set by Cop0_Status bits
     kernel_64bit_addressing: bool,
 
-    half_clock: u32,
     llbit: bool,
 
     cop1: cop1::Cop1,
@@ -508,6 +508,9 @@ pub struct Cpu {
     jit_current_assembler_offset: usize,
     jit_executing: bool, // true when inside run_block()
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
+    jit_run_limit: u64, // starting run limit for each block that's run
+    cp0_count_tracker: u64, // used to calculating Cop0_Count increment in JIT
+    cp0_compare_distance: u32, // used to determine when the timer interrupt occurs in JIT
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -544,7 +547,7 @@ impl Cpu {
             pc  : 0,
             current_instruction_pc: 0,
             next_instruction: 0,
-            next_instruction_pc: 0,
+            next_instruction_pc: 0xFFFF_FFFF_FFFF_FFFF,
             is_delay_slot: false,
             next_is_delay_slot: false,
             next_cop_index: 0,
@@ -558,7 +561,6 @@ impl Cpu {
             tlb: [TlbEntry::default(); 32],
             cp2gpr_latch: 0,
             kernel_64bit_addressing: false,
-            half_clock: 0,
             llbit: false,
 
             cop1: cop1::Cop1::new(),
@@ -646,6 +648,9 @@ impl Cpu {
             jit_current_assembler_offset: 0,
             jit_executing: false,
             jit_other_exception: false,
+            jit_run_limit: 0,
+            cp0_count_tracker: 0,
+            cp0_compare_distance: 0,
         };
         
         let _ = cpu.reset(false);
@@ -654,7 +659,8 @@ impl Cpu {
 
     pub fn reset(&mut self, is_soft: bool) -> Result<(), InstructionFault> {
         // set Cop0_EPC to the current PC
-        self.cp0gpr[Cop0_EPC] = self.current_instruction_pc;
+        self.cp0gpr[Cop0_EPC] = self.next_instruction_pc;
+        self.cp0gpr[_COP0_ERROREPC] = self.next_instruction_pc;
 
         // all resets are vectored to the same address
         self.pc = 0xFFFF_FFFF_BFC0_0000;
@@ -678,6 +684,13 @@ impl Cpu {
 
         // reset some JIT flags
         self.jit_other_exception = false;
+
+        // invalidate the exception handlers
+        // TODO should actually invalidate everything?
+        self.cached_block_map[0] = None;
+        self.cached_block_map[0x80 >> 2] = None;
+        self.cached_block_map[0x180 >> 2] = None;
+        self.gpr[0] = 0;
 
         Ok(())
     }
@@ -750,7 +763,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u8 {
-        trace!(target: "JIT", "read_u8_bridge from ${:08X}", virtual_address as u32);
+        //trace!(target: "JIT", "read_u8_bridge from ${:08X}", virtual_address as u32);
 
         let cpu = { &mut *cpu };
         //if virtual_address == 2 { std::arch::asm!("int3"); }
@@ -776,7 +789,8 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn read_u16_bridge(cpu: *mut Cpu, virtual_address: u64) -> u16 {
-        trace!(target: "JIT", "read_u16_bridge from ${:08X}", virtual_address as u32);
+        //trace!(target: "JIT", "read_u16_bridge from ${:08X}", virtual_address as u32);
+
         let cpu = { &mut *cpu };
         match cpu.read_u16(virtual_address as usize) {
             Ok(value) => value,
@@ -798,7 +812,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn read_u32_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
-        trace!(target: "JIT", "read_u32_bridge from ${:08X}", virtual_address as u32);
+        //trace!(target: "JIT", "read_u32_bridge from ${:08X}", virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.read_u32(virtual_address as usize) {
@@ -828,7 +842,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn read_u64_bridge(cpu: *mut Cpu, virtual_address: u64) -> u64 {
-        trace!(target: "JIT", "read_u64_bridge from ${:08X}", virtual_address as u32);
+        //trace!(target: "JIT", "read_u64_bridge from ${:08X}", virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.read_u64(virtual_address as usize) {
@@ -869,6 +883,10 @@ impl Cpu {
         //println!();
 
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            if (address.physical_address & 0xFF800000) == 0 {
+                let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
+                self.cached_block_map[offs] = None;
+            }
             self.write_u8_phys(value, address)
         } else {
             // invalid TLB translation, no physical address present to read
@@ -877,7 +895,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn write_u8_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
-        trace!(target: "JIT", "write_u8_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+        //trace!(target: "JIT", "write_u8_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.write_u8(value, virtual_address as usize) {
@@ -892,6 +910,10 @@ impl Cpu {
     #[inline(always)]
     fn write_u16(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
+            if (address.physical_address & 0xFF800000) == 0 {
+                let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
+                assert!(self.cached_block_map[offs].is_none());
+            }
             self.write_u16_phys(value, address)
         } else {
             // invalid TLB translation, no physical address present to read
@@ -900,7 +922,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn write_u16_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
-        trace!(target: "JIT", "write_u16_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+        //trace!(target: "JIT", "write_u16_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.write_u16(value, virtual_address as usize) {
@@ -925,7 +947,7 @@ impl Cpu {
 
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
             // invalidate RDRAM blocks
-            if (address.physical_address & 0xFF000000) == 0 {
+            if (address.physical_address & 0xFF800000) == 0 {
                 // assert!((address & 0x800000) == 0, "need to handle writes here"); // rdram.rs will panic on this situation, but we may need to handle it someday
                 let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
                 // just invalidate the cached_block_map without clearing self.cached_blocks
@@ -943,7 +965,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> u32 {
-        trace!(target: "JIT", "write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+        //trace!(target: "JIT", "write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.write_u32(value, virtual_address as usize) {
@@ -967,6 +989,11 @@ impl Cpu {
     #[inline(always)]
     fn write_u64(&mut self, value: u64, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+            if (address.physical_address & 0xFF800000) == 0 {
+                let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
+                assert!(self.cached_block_map[offs].is_none());
+                assert!(self.cached_block_map[offs+1].is_none());
+            }
             self.write_u64_phys(value, address)
         } else {
             Ok(WriteReturnSignal::None)
@@ -974,7 +1001,7 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn write_u64_bridge(cpu: *mut Cpu, value: u64, virtual_address: u64) -> i32 {
-        trace!(target: "JIT", "write_u64_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
+        //trace!(target: "JIT", "write_u64_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
         let cpu = { &mut *cpu };
         match cpu.write_u64(value, virtual_address as usize) {
@@ -1048,8 +1075,9 @@ impl Cpu {
             self.current_instruction_pc
         } as i32) as u64;
 
-        //if exception_code == ExceptionCode_CpU && self.current_instruction_pc <= 0x0500_0000 { panic!("pc = ${:08X}, BadVAddr=${:08X}", self.current_instruction_pc, self.cp0gpr[Cop0_BadVAddr]); }
-        println!("exception {}: pc = ${:08X}, EPC=${:08X}", exception_code, self.current_instruction_pc, self.cp0gpr[Cop0_EPC]);
+        // TODO debugging LoZ crash
+        //.if exception_code == ExceptionCode_CpU && self.current_instruction_pc <= 0x0500_0000 { panic!("pc = ${:08X}, BadVAddr=${:08X}", self.current_instruction_pc, self.cp0gpr[Cop0_BadVAddr]); }
+        //.println!("exception {}: pc = ${:08X}, EPC=${:08X}", exception_code, self.current_instruction_pc, self.cp0gpr[Cop0_EPC]);
 
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
         // TLB and XTLB miss are vectored to offsets 0 and 0x80, respectively
@@ -1799,7 +1827,7 @@ impl Cpu {
 
     fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
         if let Some(physical_address) = self.translate_address(virtual_address, false, false)? {
-            trace!(target: "JIT", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
+            trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
             //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
 
             // determine where in the block map to look up the block
@@ -1862,24 +1890,14 @@ impl Cpu {
     }
 
     // run the JIT core, return the number of cycles actually ran
+    // self.next_instruction_pc contains the address of code we start executing from
     pub fn run_for(&mut self, max_cycles: u64) -> Result<u64, InstructionFault> {
-        // TODO: accumulate steps run
-        //
-        // TODO: accumulate Cop0_Count and trigger timer interrupt
-        // calculate amount to increment based on max_cycles?
-        //
         // TODO: Decrement Random
         // calculate change based on max_cycles?
         //
         // TODO: Catch PC address and TLB exceptions
 
-        // self.next_instruction_pc contains the address of code we need to be executing _now_
-
-        //let buf = ops.finalize().unwrap();
-        //let do_it: extern "win64" fn() -> i64 = unsafe { std::mem::transmute(buf.ptr(entry_point)) };
-        //let v = do_it();
-        //println!("we're alive: ${:016X}", v);
-        trace!(target: "CPU", "run_for started at ${:08X}", self.next_instruction_pc as u32);
+        //trace!(target: "JIT-RUN", "run_for started at ${:08X}", self.next_instruction_pc as u32);
 
         let steps_start = self.num_steps;
         // const MIN_STEPS_TO_BE_WORTH_IT: u64 = 8; // TODO does this "optimization" make sense?
@@ -1888,7 +1906,6 @@ impl Cpu {
             // this happens if there's a jump within a jump, where we have exited the block and left next_is_delay_slot true
             if self.next_is_delay_slot {
                 self.step()?;
-                self.num_steps += 1;
                 continue;
             }
 
@@ -1896,35 +1913,62 @@ impl Cpu {
             if (self.next_instruction_pc & 0x03) != 0 {
                 self.pc -= 4; // the JIT code is one instruction ahead due to the call to prefetch().
                 self.step()?;
-                self.num_steps += 1;
                 continue;
             }
 
-            let run_limit = (steps_start + max_cycles) - self.num_steps;
+            // Cop0_Count tracker start value
+            self.cp0_count_tracker = self.num_steps & !1;
+
+            // determine how many cycles until Cop0_Compare would be hit, a value of 0 would mean
+            // means there's actually 0x1_0000_0000 cycles until the exception triggers again, but
+            // our block will never run that long
+            self.cp0_compare_distance = (self.cp0gpr[Cop0_Compare] as u32).wrapping_sub(self.cp0gpr[Cop0_Count] as u32);
+            if self.cp0_compare_distance == 0 { self.cp0_compare_distance = 0x7FFF_FFFF; }
+
+            // for calcuating how many cycles have executed in the middle of a block
+            self.jit_run_limit = std::cmp::min(2 * self.cp0_compare_distance as u64, (steps_start + max_cycles) - self.num_steps);
+
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
-                    trace!(target: "CPU", "target ${:08X} not found in cache, compiling", self.next_instruction_pc as u32);
-                    println!("[block not found, building new block at next_instruction_pc=${:08X}]", self.next_instruction_pc as u32);
+                    debug!(target: "JIT-BUILD", "[target ${:08X} not found in cache, compiling]", self.next_instruction_pc as u32);
+                    //println!("[block not found, building new block at next_instruction_pc=${:08X}]", self.next_instruction_pc as u32);
 
+                    // TODO use RefCell, duh!
                     // build block and remove from cached_blocks to satisfy the borrow checker
                     let (compiled_block_id, compiled_block) = self.build_block()?;
 
-                    println!("[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
-                    self.num_steps += self.run_block(&compiled_block, run_limit)?;
+                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    self.num_steps += self.run_block(&compiled_block)?;
 
                     // reinsert into hash table
                     self.cached_blocks.insert(compiled_block_id, compiled_block);
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
-                    debug!(target: "JIT", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, run_limit);
-                    self.num_steps += self.run_block(&compiled_block, run_limit)?;
+                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    self.num_steps += self.run_block(&compiled_block)?;
 
                     // reinsert into hash table
                     let compiled_block_id = compiled_block.id;
                     self.cached_blocks.insert(compiled_block_id, compiled_block);
                 }
                 _ => todo!(),
+            }
+
+            // PC and next_instruction_pc have changed, update current_instruction_pc
+            self.current_instruction_pc = self.next_instruction_pc;
+            self.is_delay_slot = self.next_is_delay_slot;
+
+            // Cop0_Count increments at half the PClock, so we take half the cycles executed and add that to Count
+            let cp0_count_increment = (self.num_steps - self.cp0_count_tracker) >> 1;
+            if cp0_count_increment != 0 {
+                self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + (cp0_count_increment as u32)) as u64;
+
+                // Trigger timer interrupt if enough cycles occurred
+                if cp0_count_increment >= self.cp0_compare_distance as u64 {
+                    debug!(target: "CPU", "CPU0: timer interrupt");
+                    let _ = self.timer_interrupt();
+                }
             }
         }
 
@@ -1973,12 +2017,13 @@ impl Cpu {
             ;   sub rsp, BYTE 0x28 // setup the stack so function calls are aligned
                                    // 0x28 bytes is enough room for the s_* variables
                                    // since we pushed 0x28 bytes rsp should be 0x10 aligned now
+            // run_limit in ecx
             ;   mov DWORD [rsp+s_cycle_count], ecx
-                // copy self.lo to the stack
+            // copy self.lo to the stack
             ;   mov rax, QWORD &self.lo as *const u64 as _
             ;   mov v_tmp, QWORD [rax]
             ;   mov QWORD [rsp+s_lo], v_tmp
-                // copy self.hi to the stack
+            // copy self.hi to the stack
             ;   mov rax, QWORD &self.hi as *const u64 as _
             ;   mov v_tmp, QWORD [rax]
             ;   mov QWORD [rsp+s_hi], v_tmp
@@ -2059,11 +2104,10 @@ impl Cpu {
             cfg_if! {
                 if #[cfg(feature="dev")] {
                     letsgo!(assembler
-                        ;   xor v_tmp, v_tmp
-                        ;   cmp v_tmp, QWORD [r_gpr + 0 as i32]
+                        ;   cmp QWORD [r_gpr /*+ 0 as i32*/], BYTE 0u8 as _
                         ;   je >r0_ok
-                        ;   mov rax, QWORD self.current_instruction_pc as _
                         ;   int3
+                        ;   mov rax, QWORD self.current_instruction_pc as _
                         ;r0_ok:
                     );
                 }
@@ -2073,7 +2117,7 @@ impl Cpu {
             if let Some((_, is_branch_likely)) = jit_conditional_branch {
                 assert!(self.is_delay_slot); // always the case when jit_conditional_branch is set
                 if is_branch_likely {
-                    println!("** previous instruction was a branch_likely, checking r_cond..");
+                    trace!(target: "JIT-BUILD", "** previous instruction was a branch_likely, checking r_cond..");
                     // if the branch is not taken (r_cond == 0), we skip over the next compiled instruction
                     letsgo!(assembler
                         ;   dec r_cond     // test if r_cond starts at 1
@@ -2160,7 +2204,7 @@ impl Cpu {
                     );
 
                     // break compilation, preventing the check count and jumps (which we know we don't have)
-                    println!("** terminating block compilation due to Cant-compile situation");
+                    debug!(target: "JIT-BUILD", "** terminating block compilation due to Cant-compile situation");
                     break 'build_loop;
                 },
             }
@@ -2174,7 +2218,7 @@ impl Cpu {
                 assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // TODO delay slot also a branch
                 self.jit_jump_no_delay = false;
 
-                println!("** performing jump");
+                trace!(target: "JIT-BUILD", "** performing jump");
 
                 // move jump target value into self.pc, call self.prefetch and gtfo
                 letsgo!(assembler
@@ -2212,7 +2256,7 @@ impl Cpu {
                 // to check r_cond), or we are using branch_likely and know that we're taking the
                 // branch
                 if is_branch_likely {
-                    println!("** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
+                    trace!(target: "JIT-BUILD", "** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
 
                     // test if we need to break out of the block before the branch
                     letsgo!(assembler
@@ -2245,7 +2289,7 @@ impl Cpu {
                         ;no_break_out:
                     );
                 } else {
-                    println!("** checking normal branch condition:");
+                    trace!(target: "JIT-BUILD", "** checking normal branch condition:");
 
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _    // break out when run count hits 0 or less
@@ -2277,9 +2321,9 @@ impl Cpu {
 
         // TODO: so fucking much
         if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
-            println!("[terminating block compilation after {} instructions]", instruction_index);
+            debug!(target: "JIT-BUILD", "[terminating block compilation after {} instructions]", instruction_index);
         } else if num_nops == MAX_NOPS {
-            println!("[terminating block compilation after {} nops]", num_nops);
+            debug!(target: "JIT-BUILD", "[terminating block compilation after {} nops]", num_nops);
         }
 
         // If we fall through into epilog, we need to store self.pc before returning.
@@ -2305,8 +2349,6 @@ impl Cpu {
         }
         letscall!(assembler, Cpu::prefetch_bridge);
 
-
-        // TODO: epilog
         // Restore the stack in reverse order and set return value in rax
         letsgo!(assembler
             ;epilog:
@@ -2354,7 +2396,7 @@ impl Cpu {
                         // whatever the branch target was supposed to be needs to be loaded into PC and then we jump to the epilog
                         let code_start_offset = assembler.offset();
 
-                        println!("** creating unknown branch target handler for branch to ${:16X}", branch_target);
+                        trace!(target: "JIT-BUILD", "** creating unknown branch target handler for branch to ${:16X}", branch_target);
                         letsgo!(assembler
                             ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _
                         );
@@ -2408,15 +2450,17 @@ impl Cpu {
     }
 
     // return number of instructions executed
-    fn run_block(&mut self, compiled_block: &CompiledBlock, run_limit: u64) -> Result<u64, InstructionFault> {
+    fn run_block(&mut self, compiled_block: &CompiledBlock) -> Result<u64, InstructionFault> {
         // place &self into rax
-        let call_block: extern "win64" fn(u64) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        let call_block: extern "win64" fn(u32) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
 
         self.jit_executing = true;
 
-        let res = match call_block(run_limit) {
+        let res = match call_block(self.jit_run_limit as u32) {
             // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
-            i if i >= -2147483648 => Ok((run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
+            // jit_run_limit can change during the course of the run (when we need to reduce the
+            // length of the run due to Compare value changes)
+            i if i >= -2147483648 => Ok((self.jit_run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
 
             i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
                 todo!("execution error code: {}", i as u32);
@@ -2452,15 +2496,11 @@ impl Cpu {
         self.num_steps += 1;
 
         // increment Cop0_Count at half PClock and trigger exception
-        self.half_clock ^= 1;
-        self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + self.half_clock) as u64;
+        self.cp0gpr[Cop0_Count] = ((self.cp0gpr[Cop0_Count] as u32) + ((self.num_steps & 1) as u32)) as u64;
         //println!("Count=${:08X} Compare=${:08X}", self.cp0gpr[Cop0_Count], self.cp0gpr[Cop0_Compare]);
         if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
-            // Timer interrupt enable, bit 7 of IM field 
-            if self.interrupts_enabled(STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG) { // TODO move to self.timer_interrupt()
-                debug!(target: "CPU", "COP0: timer interrupt");
-                self.timer_interrupt()?;
-            }
+            debug!(target: "CPU", "COP0: timer interrupt");
+            self.timer_interrupt()?;
         }
 
         // decrement Random every cycle
@@ -2648,7 +2688,7 @@ impl Cpu {
     }
 
     fn build_inst_reserved(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        warn!(target: "JIT", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
+        trace!(target: "JIT-BUILD", "reserved instruction ${:03b}_{:03b}", self.inst.op >> 3, self.inst.op & 0x07);
 
         // pass 0 as coprocessor_number
         letsgo!(assembler
@@ -2706,7 +2746,7 @@ impl Cpu {
     }
 
     fn build_inst_addi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: addi r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: addi r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rs == 0 {
@@ -2753,7 +2793,7 @@ impl Cpu {
     }
 
     fn build_inst_addiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: addiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: addiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rt != 0 { // if destination is zero, no-op
@@ -2782,7 +2822,7 @@ impl Cpu {
     #[allow(unreachable_code)] // remove after all code paths have been tested
     #[allow(unused_variables)] // remove after all code paths have been tested
     fn build_inst_andi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: andi r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: andi r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.imm);
 
         if self.inst.rt != 0 { // if destination register is 0, this is a nop
@@ -2926,7 +2966,8 @@ impl Cpu {
             },
 
             Cop0_Compare => {
-                // TODO clear timer interrupt see 6.3.4
+                // clear pending timer interrupt (see 6.3.4)
+                self.cp0gpr[Cop0_Cause] &= !(InterruptCode_Timer << 8);
                 // truncate to 32-bits
                 value & 0x0000_0000_FFFF_FFFF
             },
@@ -3046,7 +3087,7 @@ impl Cpu {
         );
 
         if (self.inst.v & (1 << 25)) != 0 {
-            println!("${:08X}[{:5}]: cop1 special ${:03b}_{:03b}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+            trace!(target: "JIT-BUILD", "${:08X}[{:5}]: cop1 special ${:03b}_{:03b}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                      (self.inst.v & 0x3F) >> 3, self.inst.v & 0x07);
 
             // setup exception values for bridge
@@ -3066,7 +3107,7 @@ impl Cpu {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
                 0b00_000 => { // MFC
-                    println!("${:08X}[{:5}]: mfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
                     // setup exception values for bridge
@@ -3093,7 +3134,7 @@ impl Cpu {
                 },
 
                 0b00_001 => { // DMFC
-                    println!("${:08X}[{:5}]: dmfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
                     // setup exception values for bridge
@@ -3119,7 +3160,7 @@ impl Cpu {
                 },
 
                 0b00_010 => { // CFC
-                    println!("${:08X}[{:5}]: cfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: cfc1 r{}, fpr{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rt, self.inst.rd);
 
                     // setup exception values for bridge
@@ -3155,7 +3196,7 @@ impl Cpu {
                 },
 
                 0b00_100 => { // MTC
-                    println!("${:08X}[{:5}]: mtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
                     // setup exception values for bridge
@@ -3183,7 +3224,7 @@ impl Cpu {
                 },
   
                 0b00_101 => { // DMTC
-                    println!("${:08X}[{:5}]: dmtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmtc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
                     // setup exception values for bridge
@@ -3211,7 +3252,7 @@ impl Cpu {
                 },
 
                 0b00_110 => { // CTC
-                    println!("${:08X}[{:5}]: ctc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                    trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ctc1 fcr{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                              self.inst.rd, self.inst.rt);
 
                     // setup exception values for bridge
@@ -3243,7 +3284,7 @@ impl Cpu {
                     // compute target jump and determine if the destination is within the current block
                     // (self.pc is pointing at the delay slot)
                     let dest = (self.pc - 4).wrapping_add((self.inst.signed_imm as u64) << 2);
-                    println!("** cop1 conditional branch to ${:08X}", dest as u32);
+                    trace!(target: "JIT-BUILD", "** cop1 conditional branch to ${:08X}", dest as u32);
 
                     self.next_is_delay_slot = true;
 
@@ -3348,6 +3389,15 @@ impl Cpu {
 
                 // fix bits of the various registers
                 self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
+
+                // Setting IE, at this point if we're still executing an exception is pending
+                if (self.inst.rd == Cop0_Status) && (val & 0x01) == 0x01 {
+                    let pending_interrupts = (self.cp0gpr[Cop0_Cause] >> 8) as u8;
+                    if (((self.cp0gpr[Cop0_Status] >> 8) as u8) & pending_interrupts) != 0 { // any enabled pending interrupts?
+                        self.exception(ExceptionCode_Int, false)?;
+                    }
+                }
+
                 // TODO debugging crash in LoZ
                 //.if self.inst.rd == Cop0_EPC {
                 //.    println!("changing EPC To ${:08X} at pc=${:08X} (exception)", self.cp0gpr[self.inst.rd], self.current_instruction_pc);
@@ -3445,12 +3495,21 @@ impl Cpu {
     }
 
     unsafe extern "win64" fn inst_cop0_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
-        let cpu = { &mut *cpu };
+        let cpu = &mut *cpu;
+
         // we're running inside a compiled block so self.inst isn't being used, we
         // can safely destroy it and call into rust code
         cpu.decode_instruction(inst);
+
         match cpu.inst_cop0() {
             Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_Int);
+                cpu.jit_other_exception = true;
+                exception_code as i64
+            },
+
             Err(err) => {
                 // TODO handle rrors
                 todo!("inst_cop0 error = {:?}", err);
@@ -3464,56 +3523,78 @@ impl Cpu {
         let cop0_op = (self.inst.v >> 21) & 0x1F;
         match cop0_op {
             0b00_000 => { // MFC
-                println!("${:08X}[{:5}]: mfc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mfc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                          self.inst.rd, self.inst.rt);
 
                 if self.inst.rt != 0 {
                     match self.inst.rd {
+                        // undefined registers
                         7 | 21 | 22 | 23 | 24 | 25 | 31 => {
                             letsgo!(assembler
                                 ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
+                                ;   mov v_tmp, QWORD [rax]
+                                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+                            );
+                        },
+
+                        // We need to catch reading from Count since it may not be updated yet,
+                        // but reading Cop0_Compare doesn't change any state
+                        Cop0_Count => {
+                            // put the cycle count into edx
+                            letsgo!(assembler
+                                //;   int3
+                                //;   mov edx, DWORD 1 as _
+                                ;   mov edx, DWORD [rsp+s_cycle_count]
+                            );
+
+                            // call update_count
+                            letscall!(assembler, Cpu::update_cop0_count);
+
+                            // return value in rax needs to go into rt
+                            letsgo!(assembler
+                                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
                             );
                         },
 
                         _ => {
                             letsgo!(assembler
                                 ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
+                                ;   mov v_tmp_32, DWORD [rax]
+                                // TODO debugging LoZ crash
+                                // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
+                                // ;   jne >fjffj
+                                // ;   int3
+                                // ;   mov rax, DWORD 0x1234_1234 as _
+                                // ;fjffj:
+                                ;   movsxd v_tmp2, v_tmp_32
+                                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
                             );
                         },
                     }
-
-                    letsgo!(assembler
-                        ;   mov v_tmp_32, DWORD [rax]
-                        // TODO debugging LoZ crash
-                        // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
-                        // ;   jne >fjffj
-                        // ;   int3
-                        // ;   mov rax, DWORD 0x1234_1234 as _
-                        // ;fjffj:
-                        ;   movsxd v_tmp2, v_tmp_32
-                        ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
-                    );
                 }
 
                 CompileInstructionResult::Continue
             },
 
             0b00_001 => { // DMFC
-                println!("${:08X}[{:5}]: dmfc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmfc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                          self.inst.rd, self.inst.rt);
 
-                //self.gpr[self.inst.rt] = match self.inst.rd {
-                //    7 | 21 | 22 | 23 | 24 | 25 | 31 => {
-                //        self.cp0gpr_latch
-                //    },
-
-                //    _ => self.cp0gpr[self.inst.rd],
-                //};
                 if self.inst.rt != 0 {
                     match self.inst.rd {
                         7 | 21 | 22 | 23 | 24 | 25 | 31 => {
                             letsgo!(assembler
                                 ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
+                            );
+                        },
+
+                        Cop0_Count => {
+                            // TODO need to compute Count based on how many cycles have occurred,
+                            // and then update our Count tracker.
+                            letsgo!(assembler
+                                ;   int3
+                                ;   mov rax, DWORD 0x7EEE_3333u32 as _
+                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
                             );
                         },
 
@@ -3534,23 +3615,129 @@ impl Cpu {
             },
 
             0b00_100 => { // MTC
-                println!("${:08X}[{:5}]: mtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                          self.inst.rd, self.inst.rt);
 
-                // setup exception values
-                letssetupexcept!(self, assembler, false);
+                match self.inst.rd {
+                    // Writing Count means we need to recompute cp0_compare_distance
+                    // Writing Compare to a new value needs cp0_compare_distance updated, which requires Cop0_Count
+                    // And both cases may affect how many cycles can be run in the rest of this block
+                    Cop0_Count => {
+                        letsgo!(assembler
+                            //;   int3
+                            //;   mov edx, DWORD 2 as _
+                            // cycle count in rdx
+                            ;   mov edx, DWORD [rsp+s_cycle_count]
+                            // value in r8
+                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
+                            // copy to cp0gpr_latch
+                            ;   movsxd v_tmp, r8d
+                            ;   mov rax, QWORD &mut self.cp0gpr_latch as *mut _ as _
+                            ;   mov QWORD [rax], v_tmp
+                        );
 
-                // opcode in arg 2
-                letsgo!(assembler
-                    ; mov edx, DWORD self.inst.v as _
-                );
+                        unsafe extern "win64" fn write_count(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
+                            let cpu = &mut *cpu;
+                            // update Count
+                            cpu.cp0gpr[Cop0_Count] = write_value as u64;
+                            // update the count tracker, which requires the current step number
+                            let cur_steps = cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64;
+                            cpu.cp0_count_tracker = cur_steps & !1;
+                            // update the compare distance
+                            cpu.cp0_compare_distance = (cpu.cp0gpr[Cop0_Compare] as u32).wrapping_sub(write_value);
+                            if cpu.cp0_compare_distance == 0 { cpu.cp0_compare_distance = 0x7FFF_FFFF; }
+                            // compute the amount of Count that could increase in this run
+                            let potential_count_increment = (cur_steps + cycles_remaining as u64 - cpu.cp0_count_tracker) >> 1;
+                            // if Compare would trigger within this run, we need to reduce the
+                            // length of the run, otherwise we can just keep executing
+                            if (cpu.cp0_compare_distance as u64) < potential_count_increment {
+                                let max_cycles_left = (2 * cpu.cp0_compare_distance) as u64;
+                                assert!(cpu.jit_run_limit >= max_cycles_left);
+                                // reduce self.jit_run_limit and cycles_remaining by delta
+                                let delta = cpu.jit_run_limit - max_cycles_left;
+                                cpu.jit_run_limit -= delta;
+                                cycles_remaining -= delta as i32;
+                            }
+                            // new cycles remaining value
+                            cycles_remaining
+                        }
 
-                // call self.inst_cop0_bridge(Cpu, inst)
-                letscall!(assembler, Cpu::inst_cop0_bridge);
+                        letscall!(assembler, write_count);
 
-                //.// Two options: we can keep r_cpu (self) in a register or we can skip
-                //.// that can use an extra instruction. TODO: what's better?
-                //.// We use a register (r_cpu) for access that may be generally uncommon
+                        // copy eax to s_cycle_count
+                        letsgo!(assembler
+                            ;   mov DWORD [rsp+s_cycle_count], eax
+                        );
+                    },
+
+                    // Writing Compare to a new value needs cp0_compare_distance updated, which requires Cop0_Count recomputed
+                    Cop0_Compare => {
+                        letsgo!(assembler
+                            //;   int3
+                            //;   mov edx, DWORD 3 as _
+                            // cycle count in rdx
+                            ;   mov edx, DWORD [rsp+s_cycle_count]
+                            // value in r8
+                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
+                            // copy to cp0gpr_latch
+                            ;   movsxd v_tmp, r8d
+                            ;   mov rax, QWORD &mut self.cp0gpr_latch as *mut _ as _
+                            ;   mov QWORD [rax], v_tmp
+                        );
+
+                        unsafe extern "win64" fn write_compare(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
+                            // recompute Count
+                            let count = Cpu::update_cop0_count(cpu, cycles_remaining) as u32;
+                            // update Compare
+                            let cpu = &mut *cpu;
+                            cpu.cp0gpr[Cop0_Compare] = write_value as u64;
+                            // update the compare distance
+                            cpu.cp0_compare_distance = (cpu.cp0gpr[Cop0_Compare] as u32).wrapping_sub(count);
+                            if cpu.cp0_compare_distance == 0 { cpu.cp0_compare_distance = 0x7FFF_FFFF; }
+                            // compute the amount of Count that could increase in this run
+                            let cur_steps = cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64;
+                            let potential_count_increment = (cur_steps + cycles_remaining as u64 - cpu.cp0_count_tracker) >> 1;
+                            // if Compare would trigger within this run, we need to reduce the
+                            // length of the run, otherwise we can just keep executing
+                            if (cpu.cp0_compare_distance as u64) < potential_count_increment {
+                                let max_cycles_left = (2 * cpu.cp0_compare_distance) as u64;
+                                assert!(cpu.jit_run_limit >= max_cycles_left);
+                                // reduce self.jit_run_limit and cycles_remaining by delta
+                                let delta = cpu.jit_run_limit - max_cycles_left;
+                                cpu.jit_run_limit -= delta;
+                                cycles_remaining -= delta as i32;
+                            }
+                            // clear pending timer interrupt (see 6.3.4)
+                            cpu.cp0gpr[Cop0_Cause] &= !(InterruptCode_Timer << 8);
+                            // new cycles remaining value
+                            cycles_remaining
+                        }
+
+                        letscall!(assembler, write_compare);
+
+                        // copy eax to s_cycle_count
+                        letsgo!(assembler
+                            ;   mov DWORD [rsp+s_cycle_count], eax
+                        );
+                    },
+
+                    _ => {
+                        // setup exception values
+                        letssetupexcept!(self, assembler, false);
+
+                        // opcode in arg 2
+                        letsgo!(assembler
+                            ; mov edx, DWORD self.inst.v as _
+                        );
+
+                        // call self.inst_cop0_bridge(Cpu, inst)
+                        letscall!(assembler, Cpu::inst_cop0_bridge);
+
+                        // check for exceptions
+                        letscheck!(self, assembler);
+                    }
+                }
+
                 //.// Option 1:
                 //.let cp0gpr_latch_offset = offset_of!(Cpu, cp0gpr_latch) as i32;
                 //.letsgo!(assembler
@@ -3574,16 +3761,27 @@ impl Cpu {
             },
 
             0b00_101 => { // DMTC
-                println!("${:08X}[{:5}]: dmtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmtc0 c{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                          self.inst.rd, self.inst.rt);
 
-                // opcode in second argument
-                letsgo!(assembler
-                    ; mov edx, DWORD self.inst.v as _
-                );
+                match self.inst.rd {
+                    Cop0_Count => {
+                        panic!();
+                    },
 
-                // call self.inst_cop0_bridge(Cpu, inst)
-                letscall!(assembler, Cpu::inst_cop0_bridge);
+                    _ => {
+                        // setup exception values
+                        letssetupexcept!(self, assembler, false);
+
+                        // opcode in second argument
+                        letsgo!(assembler
+                            ; mov edx, DWORD self.inst.v as _
+                        );
+
+                        // call self.inst_cop0_bridge(Cpu, inst)
+                        letscall!(assembler, Cpu::inst_cop0_bridge);
+                    },
+                }
 
                 CompileInstructionResult::Continue
             },
@@ -3592,7 +3790,7 @@ impl Cpu {
                 let special = self.inst.v & 0x3F;
                 match special {
                     0b000_001 => { // tlbr
-                        println!("${:08X}[{:5}]: tlbr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+                        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
                         // TODO this could be done in assembly, but tlbr isn't a commonly executed instruction
                         unsafe extern "win64" fn tlbr_bridge(cpu: *mut Cpu) {
@@ -3604,7 +3802,7 @@ impl Cpu {
                             cpu.cp0gpr[Cop0_EntryHi]  = tlb.entry_hi & !(0x1000 | tlb.page_mask);
                             cpu.cp0gpr[Cop0_EntryLo1] = tlb.entry_lo1 | g;
                             cpu.cp0gpr[Cop0_EntryLo0] = tlb.entry_lo0 | g;
-                            println!("COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                            trace!(target: "CPU", "COP0: tlbr, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                         cpu.cp0gpr[Cop0_Index], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
                         }
 
@@ -3614,11 +3812,11 @@ impl Cpu {
                     },
 
                     0b000_010 => { // tlbwi
-                        println!("${:08X}[{:5}]: tlbwi", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+                        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwi", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
                         unsafe extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
-                            println!("COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                            trace!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                         cpu.cp0gpr[Cop0_Index], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
                             cpu.set_tlb_entry(cpu.cp0gpr[Cop0_Index] & 0x1F);
                         }
@@ -3636,7 +3834,7 @@ impl Cpu {
                     },
 
                     0b001_000 => { // tlbp
-                        println!("${:08X}[{:5}]: tlbp", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+                        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbp", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
                         //self.cp0gpr[Cop0_Index] = 0x8000_0000;
                         //let entry_hi = self.cp0gpr[Cop0_EntryHi];
                         //let asid = entry_hi & 0xFF;
@@ -3662,7 +3860,7 @@ impl Cpu {
                         // TODO this is just a wrapper so we can println!() the instruction
                         unsafe extern "win64" fn tlbp_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
                             //let cpu = unsafe { &mut *cpu };
-                            println!("COP0: tlbp, EntryHi=${:016X}", (*cpu).cp0gpr[Cop0_EntryHi]);
+                            trace!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}", (*cpu).cp0gpr[Cop0_EntryHi]);
                             Cpu::inst_cop0_bridge(cpu, inst)
                         }
 
@@ -3677,7 +3875,7 @@ impl Cpu {
                     },
 
                     0b011_000 => { // eret
-                        println!("${:08X}[{:5}]: eret", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+                        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: eret", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
                         assert!(!self.is_delay_slot); // ERET must not be in a delay slot TODO error gracefully
 
                         letsgo!(assembler
@@ -3717,8 +3915,33 @@ impl Cpu {
                 }
             },
 
-            _ => panic!("CPU: unknown cop0 op: 0b{:02b}_{:03b} (0b{:032b})", cop0_op >> 3, cop0_op & 0x07, self.inst.v)
+            // unknown cop0 instructions go to build_inst_unknown
+            _ => {
+                self.build_inst_unknown(assembler)
+            }
         }
+    }
+
+    // Count has not been updated within the currently executing block yet, so we need to update that
+    // However, self.num_steps has also not been updated with the new cycles already ran in the block
+    // So to figure that out first, we need the run limit and how many cycles have executed so far.
+    // then we can update Count and cp0_count_tracker
+    #[inline(always)]
+    unsafe extern "win64" fn update_cop0_count(cpu: *mut Cpu, cycles_remaining: i32) -> u64 {
+        let cpu = &mut *cpu;
+        // compute the current step number
+        let cur_steps = cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64;
+        // compute the increment to Count and add it
+        let cp0_count_increment = (cpu.num_steps - cpu.cp0_count_tracker) >> 1;
+        cpu.cp0gpr[Cop0_Count] = ((cpu.cp0gpr[Cop0_Count] as u32) + (cp0_count_increment as u32)) as u64;
+        // update the count tracker (so the next update is correct)
+        let new_cp0_count_tracker = cur_steps & !1;
+        let cp0_count_tracker_delta = new_cp0_count_tracker - cpu.cp0_count_tracker;
+        cpu.cp0_count_tracker = new_cp0_count_tracker;
+        // reduce the cp0_compare_distance by the distance added to cp0_count_tracker
+        cpu.cp0_compare_distance = cpu.cp0_compare_distance.saturating_sub(cp0_count_tracker_delta as u32);
+        // return the computed Count value in rax, sign-extended
+        (cpu.cp0gpr[Cop0_Count] as i32) as u64
     }
 
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
@@ -3804,7 +4027,7 @@ impl Cpu {
     }
 
     fn build_inst_cop2(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: cop2", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: cop2", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
         // setup for exceptions
         letssetupexcept!(self, assembler, false);
@@ -3924,7 +4147,7 @@ impl Cpu {
     }
 
     fn build_inst_cache(&mut self, _: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: cache", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: cache", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
         CompileInstructionResult::Continue
     }
 
@@ -3944,7 +4167,7 @@ impl Cpu {
     }
 
     fn build_inst_daddi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: addi r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: addi r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rs == 0 { // source is zero, copy over the immediate
@@ -3991,7 +4214,7 @@ impl Cpu {
     }
 
     fn build_inst_daddiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: daddiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: daddiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rt != 0 { // if destination is zero, no-op
@@ -4024,7 +4247,7 @@ impl Cpu {
 
     fn build_inst_j(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
-        println!("${:08X}[{:5}]: j ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: j ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest);
 
         if self.is_delay_slot {
             return CompileInstructionResult::Cant;
@@ -4061,7 +4284,7 @@ impl Cpu {
 
     fn build_inst_jal(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
-        println!("${:08X}[{:5}]: jal ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest as u32);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: jal ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest as u32);
 
         if self.is_delay_slot {
             return CompileInstructionResult::Cant;
@@ -4104,7 +4327,7 @@ impl Cpu {
     }
 
     fn build_inst_lb(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
@@ -4133,7 +4356,7 @@ impl Cpu {
     }
 
     fn build_inst_lbu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lbu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lbu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
@@ -4165,7 +4388,7 @@ impl Cpu {
     }
 
     fn build_inst_ld(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ld r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ld r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
@@ -4229,7 +4452,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_ldl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ldl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ldl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -4273,7 +4496,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_ldr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ldr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ldr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -4295,7 +4518,7 @@ impl Cpu {
     }
 
     fn build_inst_lh(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u16_bridge
@@ -4338,7 +4561,7 @@ impl Cpu {
     }
     
     fn build_inst_lhu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lhu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lhu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u16_bridge
@@ -4398,7 +4621,7 @@ impl Cpu {
     fn build_inst_ll(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         // TODO this function is implemented at its bare minimum right now
         // TODO needs to perform the address exceptions that the above version does
-        println!("${:08X}[{:5}]: ll r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ll r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         //if self.current_instruction_pc == 0x80005D50 { letsbreak!(assembler); }
@@ -4456,7 +4679,7 @@ impl Cpu {
 
         self.gpr[self.inst.rt] = self.read_u64_phys(address)?;
 
-        // the "linked part" sets the LLAddr register in cop0 to the physical address
+        // the "linked" part sets the LLAddr register in cop0 to the physical address
         // of the read, and the LLbit to 1
         // the LLAddr register only stores bits 31:4 of the address at bit 0 of the register
         self.cp0gpr[Cop0_LLAddr] = address.physical_address >> 4;
@@ -4471,7 +4694,7 @@ impl Cpu {
     }
 
     fn build_inst_lui(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lui r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lui r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16);
 
         // if destination register is 0, this is a nop
@@ -4501,7 +4724,7 @@ impl Cpu {
     }
 
     fn build_inst_lw(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // TODO debugging a crash with LoZ
@@ -4587,7 +4810,7 @@ impl Cpu {
     }
 
     fn build_inst_lwu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lwu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lwu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
@@ -4654,7 +4877,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_lwl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lwl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lwl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -4697,7 +4920,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_lwr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lwr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lwr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -4743,7 +4966,7 @@ impl Cpu {
     }
 
     fn build_inst_ldc1(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ldc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ldc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // setup for exception
@@ -4801,7 +5024,7 @@ impl Cpu {
     }
 
     fn build_inst_lwc1(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: lwc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lwc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // setup values needed for exceptions in LWC1
@@ -4827,7 +5050,7 @@ impl Cpu {
     }
 
     fn build_inst_ori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.imm);
 
         // if destination register is 0, this is a nop
@@ -4866,7 +5089,7 @@ impl Cpu {
     }
 
     fn build_inst_sb(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // value to write in 2nd argument (edx)
@@ -4898,7 +5121,7 @@ impl Cpu {
     }
 
     fn build_inst_sh(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // value to write in 2nd argument (edx)
@@ -4960,7 +5183,7 @@ impl Cpu {
     }
 
     fn build_inst_sc(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sc r{}, ${:04X}(r{}) // TODO THIS FUNCTION IS NOT DONE", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sc r{}, ${:04X}(r{}) // TODO THIS FUNCTION IS NOT DONE", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -4980,7 +5203,7 @@ impl Cpu {
     }
 
     fn build_inst_sd(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sd r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sd r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // value to write in 2nd argument (rdx)
@@ -5053,7 +5276,7 @@ impl Cpu {
     }
 
     fn build_inst_sdc1(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sdc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sdc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // setup values needed for exceptions in LWC1
@@ -5111,7 +5334,7 @@ impl Cpu {
     }
 
     fn build_inst_swc1(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: swc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // setup values needed for exceptions in LWC1
@@ -5178,7 +5401,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_sdl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sdl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sdl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -5234,7 +5457,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_sdr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sdr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sdr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -5254,7 +5477,7 @@ impl Cpu {
     }
 
     fn build_inst_slti(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: slti r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: slti r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rt != 0 {
@@ -5303,7 +5526,7 @@ impl Cpu {
     }
 
     fn build_inst_sltiu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sltiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sltiu r{}, r{}, ${:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.signed_imm as u16);
 
         if self.inst.rt != 0 {
@@ -5365,7 +5588,7 @@ impl Cpu {
     }
 
     fn build_inst_sw(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
         // value to write in 2nd argument (edx)
@@ -5509,7 +5732,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_swl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: swl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -5568,7 +5791,7 @@ impl Cpu {
 
     // TODO
     fn build_inst_swr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: swr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
@@ -5584,7 +5807,7 @@ impl Cpu {
     }
 
     fn build_inst_xori(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: xori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: xori r{}, r{}, 0x{:04X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.imm);
 
         if self.inst.rt != 0 { // if destination register is 0, this is a nop
@@ -5723,7 +5946,7 @@ impl Cpu {
     }
 
     fn build_special_add(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: add r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: add r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         // start with v_tmp set to 0 if zero register is used
@@ -5770,7 +5993,7 @@ impl Cpu {
     }
 
     fn build_special_addu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: addu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: addu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
@@ -5812,7 +6035,7 @@ impl Cpu {
     }
     
     fn build_special_and(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: and r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: and r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
@@ -5840,7 +6063,7 @@ impl Cpu {
     }
 
     fn build_special_break(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: break", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: break", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
         letsexcept!(self, assembler, Cpu::breakpoint_exception_bridge);
 
@@ -5866,7 +6089,7 @@ impl Cpu {
     }
 
     fn build_special_dadd(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dadd r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dadd r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         // start with v_tmp set to 0 if zero register is used
@@ -5913,7 +6136,7 @@ impl Cpu {
     }
 
     fn build_special_daddu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: daddu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: daddu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
@@ -6033,7 +6256,7 @@ impl Cpu {
     }
 
     fn build_special_ddiv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ddiv r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ddiv r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // dividend goes into rax
@@ -6080,7 +6303,7 @@ impl Cpu {
     }
 
     fn build_special_ddivu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: ddivu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ddivu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // dividend goes into rax (64-bit divide but truncated to 32-bit values)
@@ -6132,7 +6355,7 @@ impl Cpu {
     }
 
     fn build_special_div(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: div r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: div r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // dividend goes into rax
@@ -6189,7 +6412,7 @@ impl Cpu {
     }
 
     fn build_special_divu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: divu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: divu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // dividend goes into rax (64-bit divide but truncated to 32-bit values)
@@ -6241,7 +6464,7 @@ impl Cpu {
     }
 
     fn build_special_dmult(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dmult r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmult r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // must be 64-bit unsigned numbers
@@ -6255,7 +6478,7 @@ impl Cpu {
             letsgo!(assembler
                 ;   mov rax, QWORD [r_gpr + (self.inst.rs * 8) as i32]  // first 64-bit operand sign-extended in rax
                 ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // second 64-bit operand sign-extended into rdx
-                ;   mul rdx                 // 64-bit unsigned multiply
+                ;   imul rdx                // 64-bit signed multiply
                                             // result in rdx:rax (both are caller saved)
                 ;   mov QWORD [rsp + s_lo], rax    // low 64-bits in LO
                 ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits in HI
@@ -6279,7 +6502,7 @@ impl Cpu {
     }
 
      fn build_special_dmultu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dmultu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dmultu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
@@ -6309,7 +6532,7 @@ impl Cpu {
     }
 
     fn build_special_dsll(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsll r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsll r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6337,7 +6560,7 @@ impl Cpu {
     }
 
     fn build_special_dsllv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsllv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsllv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6372,7 +6595,7 @@ impl Cpu {
     }
 
     fn build_special_dsll32(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsll32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsll32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6401,7 +6624,7 @@ impl Cpu {
     }
 
     fn build_special_dsra(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6429,7 +6652,7 @@ impl Cpu {
     }
 
     fn build_special_dsrav(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsrav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsrav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
@@ -6462,7 +6685,7 @@ impl Cpu {
     }
 
     fn build_special_dsra32(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsra32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsra32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6491,7 +6714,7 @@ impl Cpu {
     }
 
     fn build_special_dsrl32(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsrl32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsrl32 r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6521,7 +6744,7 @@ impl Cpu {
     }
 
     fn build_special_dsrl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsrl r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsrl r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.rs, self.inst.sa as u8);
 
         if self.inst.rd != 0 { // NOP on rd==r0
@@ -6550,7 +6773,7 @@ impl Cpu {
     }
 
     fn build_special_dsrlv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsrlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsrlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
@@ -6593,7 +6816,7 @@ impl Cpu {
     }
 
     fn build_special_dsub(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         // start with v_tmp set to 0 if zero register is used
@@ -6640,7 +6863,7 @@ impl Cpu {
     }
 
     fn build_special_dsubu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: dsubu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: dsubu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
@@ -6687,7 +6910,7 @@ impl Cpu {
     }
 
     fn build_special_jalr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: jalr r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rs, self.inst.rd);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: jalr r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rs, self.inst.rd);
 
         if self.is_delay_slot {
             return CompileInstructionResult::Cant;
@@ -6737,7 +6960,7 @@ impl Cpu {
     }
 
     fn build_special_jr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: jr r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rs);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: jr r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rs);
 
         if self.is_delay_slot {
             return CompileInstructionResult::Cant;
@@ -6767,7 +6990,7 @@ impl Cpu {
     }
 
     fn build_special_mfhi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mfhi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mfhi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
                  
         if self.inst.rd != 0 {
             letsgo!(assembler
@@ -6785,7 +7008,7 @@ impl Cpu {
     }
 
     fn build_special_mflo(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mflo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mflo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
                  
         if self.inst.rd != 0 {
             letsgo!(assembler
@@ -6803,7 +7026,7 @@ impl Cpu {
     }
 
     fn build_special_mthi(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mthi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mthi r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
 
         if self.inst.rd == 0 {
             letsgo!(assembler
@@ -6825,7 +7048,7 @@ impl Cpu {
     }
 
     fn build_special_mtlo(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mtlo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mtlo r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, self.inst.rd);
 
         if self.inst.rd == 0 {
             letsgo!(assembler
@@ -6855,7 +7078,7 @@ impl Cpu {
     }
 
     fn build_special_mult(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: mult r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: mult r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // must be 32-bit unsigned numbers
@@ -6897,7 +7120,7 @@ impl Cpu {
     }
 
     fn build_special_multu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: multu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: multu r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rs, self.inst.rt);
 
         // must be 32-bit unsigned numbers
@@ -6930,7 +7153,7 @@ impl Cpu {
     }
 
     fn build_special_nor(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: nor r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: nor r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
@@ -6967,7 +7190,7 @@ impl Cpu {
     }
 
     fn build_special_or(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: or r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: or r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // NOP on write to zero reg
@@ -7292,7 +7515,7 @@ impl Cpu {
 
     fn build_special_sll(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
-            println!("${:08X}[{:5}]: sll r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+            trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sll r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                      self.inst.rd, self.inst.rt, self.inst.sa as u8);
 
             if self.inst.rt == 0 { // if source is zero, destination is zero
@@ -7309,7 +7532,7 @@ impl Cpu {
                 );
             }
         } else {
-            println!("${:08X}[{:5}]: nop", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+            trace!(target: "JIT-BUILD", "${:08X}[{:5}]: nop", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
         }
 
         CompileInstructionResult::Continue
@@ -7322,7 +7545,7 @@ impl Cpu {
     }
 
     fn build_special_sllv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sllv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sllv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
@@ -7353,7 +7576,7 @@ impl Cpu {
     }
 
     fn build_special_slt(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: slt r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: slt r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 {
@@ -7400,7 +7623,7 @@ impl Cpu {
     }
 
     fn build_special_sltu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sltu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sltu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 {
@@ -7453,7 +7676,7 @@ impl Cpu {
     }
 
     fn build_special_sra(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sra r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.sa);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
@@ -7482,7 +7705,7 @@ impl Cpu {
     }
 
     fn build_special_srav(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: srav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: srav r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
@@ -7515,7 +7738,7 @@ impl Cpu {
     }
 
     fn build_special_srl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: srl r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: srl r{}, r{}, {}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.sa);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op
@@ -7543,7 +7766,7 @@ impl Cpu {
     }
 
     fn build_special_srlv(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: srlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: srlv r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         if self.inst.rd != 0 { // if dest is zero, this is a no-op
@@ -7587,7 +7810,7 @@ impl Cpu {
     }
 
     fn build_special_sub(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rt, self.inst.rs);
 
         // start with v_tmp set to 0 if zero register is used
@@ -7634,7 +7857,7 @@ impl Cpu {
     }
 
     fn build_special_subu(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: subu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: subu r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if destination is zero, no-op
@@ -7678,7 +7901,7 @@ impl Cpu {
     }
 
     fn build_special_syscall(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: syscall", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: syscall", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
        
         letsexcept!(self, assembler, Cpu::syscall_exception_bridge);
 
@@ -7691,7 +7914,7 @@ impl Cpu {
     }
 
     fn build_special_sync(&mut self, _: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: sync", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sync", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
         CompileInstructionResult::Continue
     }
 
@@ -7701,7 +7924,7 @@ impl Cpu {
     }
 
     fn build_special_xor(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        println!("${:08X}[{:5}]: xor r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: xor r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rd, self.inst.rs, self.inst.rt);
 
         if self.inst.rd != 0 { // if dest register is 0, this is a no-op

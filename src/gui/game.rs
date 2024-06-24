@@ -1169,7 +1169,7 @@ impl App for Game {
 
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
                         let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
-                        let height = if width == 320 { 240 } else if width == 640 { 480 } else { /*warn!(target: "RENDER", "unknown render size {}", width);*/ return; } as usize;
+                        let height = if width == 320 { 240 } else if width == 640 { 480 } else if width == 400 { 240 } else { /*warn!(target: "RENDER", "unknown render size {}", width);*/ return; } as usize;
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
                         //println!("width={} height={} format={}", width, height, format);
 
@@ -1311,8 +1311,8 @@ impl App for Game {
                   .position([0.0, 0.0], imgui::Condition::FirstUseEver)
                   .opened(&mut self.stats_window_opened) // TODO: remember closed state between runs
                   .build(|| {
-                      ui.text(format!("UI   FPS: {}", self.ui_fps));
-                      ui.text(format!("GAME FPS: {}", self.game_fps));
+                      ui.text(format!("UI   FPS: {}", self.ui_fps as u64));
+                      ui.text(format!("GAME FPS: {:.2}", self.game_fps));
                       ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
                       ui.text(format!("CPU     : {:.4} MHz", (((total_cpu_steps - self.last_cpu_cycle_count) as f64) / duration) / 1_000_000.0));
                   }

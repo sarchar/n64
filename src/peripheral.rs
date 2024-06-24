@@ -42,7 +42,7 @@ impl PeripheralInterface {
     pub fn new(comms: SystemCommunication, cartridge_rom: Vec<u8>) -> PeripheralInterface {
         // convert cartridge_rom to u32
         let mut word_rom = vec![];
-        for i in (0..cartridge_rom.len()).step_by(4) {
+        for i in (0..((cartridge_rom.len() / 4) * 4)).step_by(4) {
             word_rom.push(u32::from_be_bytes([cartridge_rom[i+0], cartridge_rom[i+1], cartridge_rom[i+2], cartridge_rom[i+3]]));
         }
 
