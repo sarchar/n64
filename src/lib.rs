@@ -230,6 +230,8 @@ pub struct System {
 
     pub rcp: Rc<RefCell<rcp::Rcp>>,
     pub cpu: cpu::Cpu,
+
+    start_time: std::time::Instant,
 }
 
 impl System {
@@ -252,6 +254,8 @@ impl System {
 
             rcp: rcp,
             cpu: cpu,
+
+            start_time: std::time::Instant::now(),
         }
     }
 
@@ -281,6 +285,12 @@ impl System {
                 self.comms.total_cpu_steps.inc();
             }
         } else {
+            //// delay...
+            //let mut cur_ips = 95_000_000.0;
+            //while cur_ips > 94_000_000.0 {
+            //    cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
+            //}
+
             if !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
                 cycles_ran += self.cpu.run_for(cpu_cycles)?;
 

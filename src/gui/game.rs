@@ -255,6 +255,8 @@ pub struct Game {
 
     last_cpu_cycle_time: Instant,
     last_cpu_cycle_count: usize,
+
+    last_interrupt_time: Instant,
 }
 
 impl App for Game {
@@ -889,6 +891,8 @@ impl App for Game {
 
             last_cpu_cycle_time: Instant::now(),
             last_cpu_cycle_count: 0,
+
+            last_interrupt_time: Instant::now(),
         };
 
         // Upload a null texture to texture 0 so that a game render always has a texture attached
@@ -1314,7 +1318,7 @@ impl App for Game {
                       ui.text(format!("UI   FPS: {}", self.ui_fps as u64));
                       ui.text(format!("GAME FPS: {:.2}", self.game_fps));
                       ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
-                      ui.text(format!("CPU     : {:.4} MHz", (((total_cpu_steps - self.last_cpu_cycle_count) as f64) / duration) / 1_000_000.0));
+                      ui.text(format!("CPU     : {:.4} MIPS", (((total_cpu_steps - self.last_cpu_cycle_count) as f64) / duration) / 1_000_000.0));
                   }
             );
             if duration >= 0.2 { // arbitrary time for resetting the freq timer
@@ -1826,6 +1830,10 @@ impl Game {
 
                     // trigger RDP interrupt to signal render is done
                     if let Some(mi) = &self.comms.mi_interrupts_tx {
+                        //while self.last_interrupt_time.elapsed().as_secs_f64() < (1.0 / 60.0) {
+                        //    unsafe { std::arch::asm!("nop"); }
+                        //}
+                        self.last_interrupt_time = Instant::now();
                         mi.send(InterruptUpdate(IMask_DP, InterruptUpdateMode::SetInterrupt)).unwrap();
                         self.comms.break_cpu();
                     }

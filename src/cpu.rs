@@ -39,7 +39,7 @@ const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
 const Cop0_Config: usize = 16;
 const Cop0_LLAddr: usize = 17;
 
-const STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
+const _STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
 const ExceptionCode_Int  : u64 = 0;  // interrupt
 const ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
@@ -737,6 +737,7 @@ impl Cpu {
         NAMES[i]
     }
 
+    #[allow(dead_code)]
     fn interrupts_enabled(&self, interrupt_number: u64) -> bool {
         // interrupts are enabled when IE is set and EXL (exception level) and ERL (error level) are 0
         // (and also when the IM bit is set for the specified interrupt)
@@ -2500,7 +2501,7 @@ impl Cpu {
         //println!("Count=${:08X} Compare=${:08X}", self.cp0gpr[Cop0_Count], self.cp0gpr[Cop0_Compare]);
         if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
             debug!(target: "CPU", "COP0: timer interrupt");
-            self.timer_interrupt()?;
+            let _ = self.timer_interrupt();
         }
 
         // decrement Random every cycle
@@ -3388,13 +3389,16 @@ impl Cpu {
                 self.cp0gpr_latch = val;
 
                 // fix bits of the various registers
+                let old_val = self.cp0gpr[self.inst.rd];
                 self.cp0gpr[self.inst.rd] = self.mask_cp0_register(self.inst.rd, val);
 
                 // Setting IE, at this point if we're still executing an exception is pending
-                if (self.inst.rd == Cop0_Status) && (val & 0x01) == 0x01 {
-                    let pending_interrupts = (self.cp0gpr[Cop0_Cause] >> 8) as u8;
-                    if (((self.cp0gpr[Cop0_Status] >> 8) as u8) & pending_interrupts) != 0 { // any enabled pending interrupts?
-                        self.exception(ExceptionCode_Int, false)?;
+                if (self.inst.rd == Cop0_Status) && (old_val & 0x01) == 0 && (val & 0x01) == 0x01 {
+                    if (self.cp0gpr[Cop0_Status] & 0x02) == 0 { // EXL must be clear to run a new exception
+                        let pending_interrupts = (self.cp0gpr[Cop0_Cause] >> 8) as u8;
+                        if (((self.cp0gpr[Cop0_Status] >> 8) as u8) & pending_interrupts) != 0 { // any enabled pending interrupts?
+                            self.exception(ExceptionCode_Int, false)?;
+                        }
                     }
                 }
 
@@ -3738,6 +3742,7 @@ impl Cpu {
                     }
                 }
 
+                // TODO
                 //.// Option 1:
                 //.let cp0gpr_latch_offset = offset_of!(Cpu, cp0gpr_latch) as i32;
                 //.letsgo!(assembler
