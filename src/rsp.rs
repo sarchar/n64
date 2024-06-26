@@ -1710,7 +1710,12 @@ impl RspCpuCore {
 
                                 let mut access = self.comms.rdram.write();
                                 let rdram: &mut [u32] = access.as_mut().unwrap().as_mut().unwrap();
+                                if (dma_info.dest_address >> 2) as usize >= rdram.len() {
+                                    println!("dma about to fail: {:?}", dma_info);
+                                }
                                 rdram[(dma_info.dest_address >> 2) as usize..][..(dma_info.length >> 2) as usize].copy_from_slice(slice);
+
+                                // TODO: inform the CPU that it needs to invalidate_block_cache for the above RDRAM write
                             } else {
                                 // update the addresses as if the dma has been completed
                                 shared_state.dma_current_cache        = (shared_state.dma_cache & 0x1000) | (((shared_state.dma_cache & !0x07) + shared_state.dma_total_size) & 0x0FFF);

@@ -162,7 +162,7 @@ impl Rcp {
         cycles
     }
 
-    pub fn step(&mut self, cpu_cycles_elapsed: u64) {
+    pub fn step(&mut self, cpu_cycles_elapsed: u64, cpu: &mut crate::cpu::Cpu) {
         // run DMAs before stepping modules, as they often check for dma completion
         // and this way we can trigger interrupts asap
         while let Some(mut dma_info) = self.should_dma() {
@@ -170,7 +170,7 @@ impl Rcp {
                 trace!(target: "DMA", "performing dma: DmaInfo = {:?}", dma_info);
             }
 
-            if let Err(_) = self.do_dma(&mut dma_info) {
+            if let Err(_) = self.do_dma(&mut dma_info, cpu) {
                 todo!("handle dma error");
             }
 
@@ -274,7 +274,7 @@ impl Rcp {
     }
 
     // Slow, maybe at some point we can do more of a direct memory copy
-    fn do_dma(&mut self, dma_info: &mut DmaInfo) -> Result<(), ReadWriteFault> {
+    fn do_dma(&mut self, dma_info: &mut DmaInfo, cpu: &mut crate::cpu::Cpu) -> Result<(), ReadWriteFault> {
         let transfer_size = dma_info.count * dma_info.length;
         if transfer_size == 0 {
             return Ok(());
@@ -290,7 +290,19 @@ impl Rcp {
             source_address += dma_info.length + dma_info.source_stride;
             source_address  = (source_address & dma_info.source_mask) | dma_info.source_bits;
 
-            self.write_block(dest_address as usize, &block, dma_info.length)?;
+            // catch InvalidateBlockCache for the JIT core
+            match self.write_block(dest_address as usize, &block, dma_info.length) {
+                Ok(WriteReturnSignal::InvalidateBlockCache { physical_address, length }) => {
+                    cpu.invalidate_block_cache(physical_address, length);
+                },
+
+                Ok(_) => {},
+
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+
             dest_address += dma_info.length + dma_info.dest_stride;
             dest_address  = (dest_address & dma_info.dest_mask) | dma_info.dest_bits;
         }

@@ -5,6 +5,7 @@ use cfg_if::cfg_if;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::HashMap;
+use std::pin::Pin;
 
 #[allow(unused_imports)]
 use tracing::{debug, error, warn, info, trace};
@@ -131,6 +132,7 @@ struct CompiledBlock {
     start_address: u64,
     entry_point: dynasmrt::AssemblyOffset,
     code_buffer: dynasmrt::mmap::ExecutableBuffer,
+    _jump_table: Pin<Box<Vec<u64>>>,
 }
 
 enum CachedBlockStatus {
@@ -687,10 +689,11 @@ impl Cpu {
 
         // invalidate the exception handlers
         // TODO should actually invalidate everything?
-        self.cached_block_map[0] = None;
-        self.cached_block_map[0x80 >> 2] = None;
-        self.cached_block_map[0x180 >> 2] = None;
-        self.gpr[0] = 0;
+        self.invalidate_block_cache(0, 0x80000);
+        //self.cached_block_map[0] = None;
+        //self.cached_block_map[0x80 >> 2] = None;
+        //self.cached_block_map[0x180 >> 2] = None;
+        //self.gpr[0] = 0;
 
         Ok(())
     }
@@ -735,6 +738,31 @@ impl Cpu {
         ];
 
         NAMES[i]
+    }
+
+    // clear all references to compiled blocks for a given address range
+    // just invalidate the cached_block_map without clearing self.cached_blocks
+    // 1) if something else uses this address, then the old cached_blocks address will be freed.
+    // 2) it doesn't really matter if that memory hangs around anyway.
+    pub fn invalidate_block_cache(&mut self, physical_address: u64, length: usize) {
+        if let Some(cached_block_map_index) = self.get_cached_block_map_index(physical_address) {
+            //println!("invalidating ${:08X}..${:08X}", physical_address, physical_address + (length as u64));
+            //self.cached_block_map[cached_block_map_index..][..aligned_length >> 2].fill(None);
+            let aligned_length = (length + 7) & !7;
+            for i in 0..(aligned_length >> 2) {
+                match self.cached_block_map[cached_block_map_index + i] {
+                    // invalidate all blocks contained in this region
+                    Some(CachedBlockReference::CachedBlock(_)) => {
+                        self.cached_block_map[cached_block_map_index + i] = None;
+                    }
+                    // any address that has an address reference to a parent block means the whole block is invaldated
+                    Some(CachedBlockReference::AddressReference(index_reference, _)) => {
+                        self.cached_block_map[index_reference] = None;
+                    }
+                    None => {},
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -886,7 +914,9 @@ impl Cpu {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
             if (address.physical_address & 0xFF800000) == 0 {
                 let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-                self.cached_block_map[offs] = None;
+                if self.cached_block_map[offs].is_some() {
+                    self.invalidate_block_cache(address.physical_address, 1);
+                }
             }
             self.write_u8_phys(value, address)
         } else {
@@ -913,7 +943,9 @@ impl Cpu {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
             if (address.physical_address & 0xFF800000) == 0 {
                 let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-                assert!(self.cached_block_map[offs].is_none());
+                if self.cached_block_map[offs].is_some() {
+                    self.invalidate_block_cache(address.physical_address, 2);
+                }
             }
             self.write_u16_phys(value, address)
         } else {
@@ -949,15 +981,11 @@ impl Cpu {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
             // invalidate RDRAM blocks
             if (address.physical_address & 0xFF800000) == 0 {
-                // assert!((address & 0x800000) == 0, "need to handle writes here"); // rdram.rs will panic on this situation, but we may need to handle it someday
                 let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-                // just invalidate the cached_block_map without clearing self.cached_blocks
-                // 1) if something else uses this address, then the old cached_blocks address will
-                //    be freed.
-                // 2) it doesn't really matter if that memory hangs around anyway.
-                self.cached_block_map[offs] = None;
+                if self.cached_block_map[offs].is_some() {
+                    self.invalidate_block_cache(address.physical_address, 4);
+                }
             }
-
             self.write_u32_phys(value, address)
         } else {
             // invalid TLB translation, no physical address present to read
@@ -992,8 +1020,9 @@ impl Cpu {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
             if (address.physical_address & 0xFF800000) == 0 {
                 let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-                assert!(self.cached_block_map[offs].is_none());
-                assert!(self.cached_block_map[offs+1].is_none());
+                if self.cached_block_map[offs].is_some() || self.cached_block_map[offs+1].is_some() {
+                    self.invalidate_block_cache(address.physical_address, 8);
+                }
             }
             self.write_u64_phys(value, address)
         } else {
@@ -1813,14 +1842,14 @@ impl Cpu {
         Ok(None)
     }
 
-    fn get_cached_block_map_index(&mut self, physical_address: &Address) -> Option<usize> {
+    fn get_cached_block_map_index(&mut self, physical_address: u64) -> Option<usize> {
         // Using the physical_address, determine where the memory came from
-        if physical_address.physical_address < 0x0080_0000 { // RDRAM
-            Some(CACHED_BLOCK_MAP_RDRAM_OFFSET + ((physical_address.physical_address & 0x007F_FFFF) >> 2) as usize)
-        } else if physical_address.physical_address >= 0x0400_0000 && physical_address.physical_address < 0x0400_2000 {
-            Some(CACHED_BLOCK_MAP_RSP_MEM_OFFSET + ((physical_address.physical_address & 0x1FFF) >> 2) as usize)
-        } else if physical_address.physical_address >= 0x1FC0_0000 && physical_address.physical_address < 0x1FC0_07C0 {
-            Some(CACHED_BLOCK_MAP_PIFROM_OFFSET + ((physical_address.physical_address & 0x7FF) >> 2) as usize)
+        if physical_address < 0x0080_0000 { // RDRAM
+            Some(CACHED_BLOCK_MAP_RDRAM_OFFSET + ((physical_address & 0x007F_FFFF) >> 2) as usize)
+        } else if physical_address >= 0x0400_0000 && physical_address < 0x0400_2000 {
+            Some(CACHED_BLOCK_MAP_RSP_MEM_OFFSET + ((physical_address & 0x1FFF) >> 2) as usize)
+        } else if physical_address >= 0x1FC0_0000 && physical_address < 0x1FC0_07C0 {
+            Some(CACHED_BLOCK_MAP_PIFROM_OFFSET + ((physical_address & 0x7FF) >> 2) as usize)
         } else {
             None
         }
@@ -1832,51 +1861,28 @@ impl Cpu {
             //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
 
             // determine where in the block map to look up the block
-            let cached_block_map_index = match self.get_cached_block_map_index(&physical_address) {
+            let cached_block_map_index = match self.get_cached_block_map_index(physical_address.physical_address) {
                 Some(v) => v,
                 None => return Ok(CachedBlockStatus::Uncompilable),
             };
 
             match self.cached_block_map[cached_block_map_index] {
-                Some(reference) => {
-                    // might be valid
-                    match reference {
-                        // block is valid
-                        CachedBlockReference::CachedBlock(block_id) => {
-                            // block must exist (and block starts at the provided address)
-                            let cached_block = self.cached_blocks.remove(&block_id).unwrap();
+                Some(CachedBlockReference::CachedBlock(block_id)) => {
+                    // block must exist (and block starts at the provided address)
+                    let cached_block = self.cached_blocks.remove(&block_id).unwrap();
+                    return Ok(CachedBlockStatus::Cached(cached_block));
+                },
+
+                Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) => {
+                    if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
+                        if referenced_block_id == block_id_reference {
+                            //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address.physical_address);
+                            // block id must exist because this is a CachedBlock
+                            let cached_block = self.cached_blocks.remove(&referenced_block_id).unwrap();
                             return Ok(CachedBlockStatus::Cached(cached_block));
-                        },
-
-                        // lookup offset and match block_id
-                        CachedBlockReference::AddressReference(offset, block_id_ref) => {
-                            // otherwise follow the chain to see if the address is part of another block
-                            match self.cached_block_map[offset] {
-                                Some(other_reference) => {
-                                    match other_reference {
-                                        CachedBlockReference::CachedBlock(block_id) => {
-                                            // block id must exist because this is a CachedBlock
-                                            let cached_block = self.cached_blocks.get(&block_id).unwrap();
-                                            if cached_block.id == block_id_ref {
-                                                let cached_block = self.cached_blocks.remove(&block_id).unwrap();
-                                                return Ok(CachedBlockStatus::Cached(cached_block));
-                                            }
-                                            // not the matching block
-                                            return Ok(CachedBlockStatus::NotCached);
-                                        },
-
-                                        // no indirect references
-                                        CachedBlockReference::AddressReference(_, _) => {
-                                            return Ok(CachedBlockStatus::NotCached);
-                                        }
-                                    }
-                                },
-                                None => {
-                                    return Ok(CachedBlockStatus::NotCached);
-                                }
-                            }
                         }
                     }
+                    return Ok(CachedBlockStatus::NotCached);
                 },
 
                 // not found
@@ -1939,7 +1945,7 @@ impl Cpu {
                     let (compiled_block_id, compiled_block) = self.build_block()?;
 
                     trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
-                    self.num_steps += self.run_block(&compiled_block)?;
+                    self.num_steps += self.run_block(&compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
 
                     // reinsert into hash table
                     self.cached_blocks.insert(compiled_block_id, compiled_block);
@@ -1947,7 +1953,7 @@ impl Cpu {
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
-                    self.num_steps += self.run_block(&compiled_block)?;
+                    self.num_steps += self.run_block(&compiled_block, self.next_instruction_pc)?; // start execution at an offset into the block
 
                     // reinsert into hash table
                     let compiled_block_id = compiled_block.id;
@@ -1989,7 +1995,17 @@ impl Cpu {
         // determine the start index into the cached block map
         // the physical address and index must be valid since we're in build_block()
         let physical_address = self.translate_address(start_address, false, false)?.unwrap();
-        let cached_block_map_index = self.get_cached_block_map_index(&physical_address).unwrap();
+        let cached_block_map_index = self.get_cached_block_map_index(physical_address.physical_address).unwrap();
+
+        // must first invalidate any block that might be referenced by an AddressReference at this location
+        if let Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) = self.cached_block_map[cached_block_map_index] {
+            if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
+                if block_id_reference == referenced_block_id {
+                    debug!(target: "JIT-BUILD", "[invalidating ${:08X} because ${:08X} contained a reference to it]", index_reference << 2, cached_block_map_index << 2);
+                    self.cached_block_map[index_reference] = None;
+                }
+            }
+        }
 
         // reset state that belongs to this block
         self.jit_jump = false;
@@ -1998,6 +2014,11 @@ impl Cpu {
 
         let block_id = self.next_block_id;
         self.next_block_id += 1;
+
+        // allocate space for the jump table and pin it in place
+        // we can already use the pointer in the prologue
+        let mut jump_table = Box::pin(Vec::<u64>::with_capacity(JIT_BLOCK_MAX_INSTRUCTION_COUNT + 8));
+        let jump_table_ptr = jump_table.as_ref().get_ref().as_ptr();
 
         // break before executing
         //letsbreak!(assembler);
@@ -2028,26 +2049,16 @@ impl Cpu {
             ;   mov rax, QWORD &self.hi as *const u64 as _
             ;   mov v_tmp, QWORD [rax]
             ;   mov QWORD [rsp+s_hi], v_tmp
+            // do the jump to desired instruction using the jump table, instruction_index in rdx
+            ;   mov v_tmp, QWORD jump_table_ptr as *const _ as _
+            ;   mov rax, QWORD [v_tmp + rdx*8]
+            ;   jmp rax
         );
 
         let mut instruction_start_offsets = HashMap::new();
         let mut jit_fixups = Vec::new();
         const MAX_NOPS: u32 = 5;
         let mut num_nops = 0;
-
-        // TODO: jump table
-        //
-        //.let block_start_offset = assembler.offset();
-        //.letsgo!(assembler
-        //.    ;block_start:
-        //.    ; jmp >forward
-        //.);
-        //.let jump_table_start = assembler.offset();
-        //.letsgo!(assembler
-        //.    ; .qword 0
-        //.    ;forward:
-        //.    ; mov v_tmp, QWORD 0x1234u64 as _
-        //.);
 
         // loop over instructions, compiling one at a time
         let mut instruction_index = 0usize;
@@ -2081,8 +2092,10 @@ impl Cpu {
             self.is_delay_slot = self.next_is_delay_slot;
             self.next_is_delay_slot = false;
 
-            // update the block cache map
-            //.self.cached_block_map[cached_block_map_index + instruction_index] = Some(CachedBlockReference::AddressReference(cached_block_map_index, block_id));
+            // update the block cache map. we don't have to check AddressReference because the
+            // nearest CachedBlock has already been invalidated, and any other CachedBlocks along
+            // the way will also get invalidated
+            self.cached_block_map[cached_block_map_index + instruction_index] = Some(CachedBlockReference::AddressReference(cached_block_map_index, block_id));
 
             // save whether there's a jump that terminates the block after this instruction (w/ delay slot)
             let jit_jump = std::mem::replace(&mut self.jit_jump, false);
@@ -2095,6 +2108,9 @@ impl Cpu {
             instruction_start_offsets.insert(start_address + (instruction_index << 2) as u64, instruction_offset);
             self.jit_current_assembler_offset = instruction_offset;
             instruction_index += 1;
+
+            // start each element in the jump table with the offset in the assembly
+            jump_table.push(instruction_offset as u64);
 
             // TODO per-instruction prologue
             //letsgo!(assembler
@@ -2436,12 +2452,19 @@ impl Cpu {
             assembler.finalize().unwrap()
         };
 
+        // update the offsets in the jump table to be absolute addresses
+        for entry in jump_table.as_mut().get_mut().iter_mut() {
+            *entry = executable_buffer.ptr(dynasmrt::AssemblyOffset(*entry as usize)) as u64;
+        }
+
         // TODO: convert to CompiledBlock
         let compiled_block = CompiledBlock {
             id: block_id,
             start_address: start_address,
             entry_point: entry_point,
             code_buffer: executable_buffer,
+            // keep the jump_table from being freed, but we never directly access it after this point
+            _jump_table: jump_table,
         };
 
         // insert into block cache
@@ -2451,13 +2474,15 @@ impl Cpu {
     }
 
     // return number of instructions executed
-    fn run_block(&mut self, compiled_block: &CompiledBlock) -> Result<u64, InstructionFault> {
+    fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> Result<u64, InstructionFault> {
         // place &self into rax
-        let call_block: extern "win64" fn(u32) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        let call_block: extern "win64" fn(u32, u64) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+
+        // find the nth instruction in the block, which is the offset divided by 4
+        let instruction_index = (execution_address - compiled_block.start_address) >> 2;
 
         self.jit_executing = true;
-
-        let res = match call_block(self.jit_run_limit as u32) {
+        let res = match call_block(self.jit_run_limit as u32, instruction_index) {
             // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
             // jit_run_limit can change during the course of the run (when we need to reduce the
             // length of the run due to Compare value changes)
@@ -3350,7 +3375,10 @@ impl Cpu {
                     }
                 },
 
-                _ => panic!("JIT: unknown cop function 0b{:02b}_{:03b} (called on cop{})", func >> 3, func & 7, copno),
+                // unknown cop instructions go to build_inst_unknown
+                _ => {
+                    return self.build_inst_unknown(assembler);
+                }
             }
         }
 
@@ -3916,7 +3944,9 @@ impl Cpu {
                         CompileInstructionResult::Stop
                     },
 
-                    _ => panic!("COP0: unknown cp0 function 0b{:03b}_{:03b}", special >> 3, special & 0x07),
+                    _ => {
+                        self.build_inst_unknown(assembler)
+                    }
                 }
             },
 
@@ -5723,14 +5753,23 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_swl_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_swl_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
+
         cpu.decode_instruction(inst);
+
         match cpu.inst_swl() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
+            Ok(_) => 0,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_TLBS); // only valid exceptions here
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            },
+
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in inst_swl_bridge: {:?}", e);
+                panic!("unhandled error in inst_swl_bridge: {:?}", e);
             }
         }
     }
@@ -5739,10 +5778,20 @@ impl Cpu {
     fn build_inst_swl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exceptions
+        letssetupexcept!(self, assembler, false);
+
+        // opcode in second argument
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
+
         letscall!(assembler, Cpu::inst_swl_bridge);
+
+        // check exceptions
+        letscheck!(self, assembler);
+
         CompileInstructionResult::Continue
     }
 
@@ -5782,14 +5831,23 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_swr_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
+    unsafe extern "win64" fn inst_swr_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
         let cpu = { &mut *cpu };
+
         cpu.decode_instruction(inst);
+
         match cpu.inst_swr() {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
+                        //
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_TLBS); // only valid exceptions here
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            },
+
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in inst_swr_bridge: {:?}", e);
+                panic!("unhandled error in inst_swr_bridge: {:?}", e);
             }
         }
     }
@@ -5798,10 +5856,20 @@ impl Cpu {
     fn build_inst_swr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exceptions
+        letssetupexcept!(self, assembler, false);
+
+        // opcode in second argument
         letsgo!(assembler
             ; mov edx, DWORD self.inst.v as _
         );
+
         letscall!(assembler, Cpu::inst_swr_bridge);
+
+        // check exceptions
+        letscheck!(self, assembler);
+
         CompileInstructionResult::Continue
     }
 
@@ -6926,7 +6994,7 @@ impl Cpu {
             letsgo!(assembler
                 ; mov QWORD [rsp+s_jump_target], DWORD 0u32 as _
             );
-            panic!("does this ever happen?");
+            //panic!("does this ever happen?");
         } else {
             letsgo!(assembler
                 ; mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]
@@ -6975,7 +7043,7 @@ impl Cpu {
             letsgo!(assembler
                 ; mov QWORD [rsp+s_jump_target], DWORD 0u32 as _
             );
-            panic!("does this ever happen?");
+            //panic!("does this ever happen?");
         } else {
             letsgo!(assembler
                 ; mov v_tmp, QWORD [r_gpr + (self.inst.rs * 8) as i32]

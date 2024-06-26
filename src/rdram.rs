@@ -209,7 +209,10 @@ impl Addressable for RdramInterface {
                 _ => {},
             }
 
-            Ok(WriteReturnSignal::None)
+            Ok(WriteReturnSignal::InvalidateBlockCache { 
+                physical_address: offset as u64,
+                length          : length as usize,
+            })
         } else {
             todo!("DMA write to rdram offset ${:08X}: not likely", offset);
         }

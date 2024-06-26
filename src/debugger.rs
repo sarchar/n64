@@ -108,8 +108,7 @@ impl Breakpoints {
 }
 
 impl Debugger {
-
-    pub fn new(mut system: System, change_logging: Box<dyn Fn(&str, Level) -> ()>) -> Debugger {
+    pub fn new(system: System, change_logging: Box<dyn Fn(&str, Level) -> ()>) -> Debugger {
         let cpu_running = Arc::new(AtomicBool::new(false));
         let r = cpu_running.clone();
 
@@ -121,8 +120,8 @@ impl Debugger {
         let breakpoints = Rc::new(RefCell::new(Breakpoints::new()));
 
         // replace the bus the CPU is connected to to our debugger bus
-        let old_bus = system.cpu.bus.clone();
-        system.cpu.bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
+        let old_bus = system.cpu.borrow().bus.clone();
+        system.cpu.borrow_mut().bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
 
         Debugger {
             alive         : true,
@@ -145,19 +144,22 @@ impl Debugger {
         let mut lastline = String::from("");
         let mut last_printed_pc = 0;
         while self.alive {
-            let next_instruction_pc = *self.system.cpu.next_instruction_pc();
-            if last_printed_pc != next_instruction_pc {
-                let inst = cpu::Cpu::disassemble(next_instruction_pc, *self.system.cpu.next_instruction(), true);
-                print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
-                if *self.system.cpu.next_is_delay_slot() {
-                    print!(" (delay slot)");
+            let readline = { // context for dropping cpu
+                let cpu = self.system.cpu.borrow();
+                let next_instruction_pc = *cpu.next_instruction_pc();
+                if last_printed_pc != next_instruction_pc {
+                    let inst = cpu::Cpu::disassemble(next_instruction_pc, *cpu.next_instruction(), true);
+                    print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
+                    if *cpu.next_is_delay_slot() {
+                        print!(" (delay slot)");
+                    }
+                    println!("");
+                    last_printed_pc = next_instruction_pc;
                 }
-                println!("");
-                last_printed_pc = next_instruction_pc;
-            }
 
-            let prompt = format!("<PC:${:08X}>@ ", next_instruction_pc);
-            let readline = rl.readline(&prompt);
+                let prompt = format!("<PC:${:08X}>@ ", next_instruction_pc);
+                rl.readline(&prompt)
+            };
 
             match readline {
                 RustylineResult::Ok(line) => {
@@ -251,12 +253,12 @@ impl Debugger {
             };
         }
 
-        let start_steps = *self.system.cpu.num_steps();
+        let start_steps = *self.system.cpu.borrow().num_steps();
         let now = std::time::Instant::now();
 
         while self.cpu_running.load(Ordering::SeqCst) {
-            //let address = *self.system.cpu.next_instruction_pc();
-            //let inst = cpu::Cpu::disassemble(address, *self.system.cpu.next_instruction(), true);
+            //let address = *cpu.next_instruction_pc();
+            //let inst = cpu::Cpu::disassemble(address, *cpu.next_instruction(), true);
             //println!("${:08X}: {}", address, inst);
 
             // Break loop on any instruction error or memory access
@@ -265,7 +267,7 @@ impl Debugger {
             }
 
             // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.next_instruction_pc() as i32) as u64, BP_EXEC) {
+            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
                 println!("Breakpoint ${:016X} hit", breakpoint.address);
                 self.cpu_running.store(false, Ordering::SeqCst);
             }
@@ -273,7 +275,7 @@ impl Debugger {
             // Check run until
             match self.cpu_run_til {
                 Some(v) => {
-                    if *self.system.cpu.next_instruction_pc() == v {
+                    if *self.system.cpu.borrow().next_instruction_pc() == v {
                         self.cpu_running.store(false, Ordering::SeqCst);
                     }
                 },
@@ -281,7 +283,7 @@ impl Debugger {
             };
         }
 
-        let steps = *self.system.cpu.num_steps() - start_steps;
+        let steps = *self.system.cpu.borrow().num_steps() - start_steps;
         let elapsed = now.elapsed();
         let duration = (elapsed.as_secs() as f64) + (elapsed.subsec_micros() as f64) / 1000000.0;
 
@@ -313,7 +315,7 @@ impl Debugger {
             count -= 1;
 
             // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.next_instruction_pc() as i32) as u64, BP_EXEC) {
+            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
                 println!("Breakpoint ${:016X} hit", breakpoint.address);
                 self.cpu_running.store(false, Ordering::SeqCst);
             }
@@ -328,7 +330,8 @@ impl Debugger {
     }
 
     fn dump_regs(&mut self, _: &Vec<&str>) -> Result<(), String> {
-        let regs = self.system.cpu.regs();
+        let cpu = self.system.cpu.borrow();
+        let regs = cpu.regs();
         
         for k in 0..8 {
             for j in 0..4 {
@@ -337,13 +340,14 @@ impl Debugger {
             println!("");
         }
 
-        println!("PC: ${:08X}", self.system.cpu.next_instruction_pc());
+        println!("PC: ${:08X}", cpu.next_instruction_pc());
 
         Ok(())
     }
 
     fn dump_regs_as_words(&mut self, _: &Vec<&str>) -> Result<(), String> {
-        let regs = self.system.cpu.regs();
+        let cpu = self.system.cpu.borrow();
+        let regs = cpu.regs();
         
         for k in 0..4 {
             for j in 0..8 {
@@ -352,7 +356,7 @@ impl Debugger {
             println!("");
         }
 
-        println!("PC: ${:08X}", self.system.cpu.next_instruction_pc());
+        println!("PC: ${:08X}", cpu.next_instruction_pc());
 
         Ok(())
     }
@@ -439,7 +443,8 @@ impl Debugger {
     }
 
     fn listing(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        let start_pc = self.system.cpu.next_instruction_pc(); // TODO set from an argument
+        let cpu = self.system.cpu.borrow();
+        let start_pc = cpu.next_instruction_pc(); // TODO set from an argument
         let mut count = 10;
 
         if parts.len() >= 3 {
@@ -457,14 +462,14 @@ impl Debugger {
             let addr = start_pc + (i as u64) * 4;
             print!("${:08X}: ", addr);
 
-            if let Ok(op) = self.system.cpu.bus.borrow_mut().read_u32(addr as usize) {
+            if let Ok(op) = cpu.bus.borrow_mut().read_u32(addr as usize) {
                 let inst = cpu::Cpu::disassemble(addr, op, true);
                 print!("{}", inst);
             } else {
                 print!("<unaccessable>");
             }
 
-            if addr == *self.system.cpu.next_instruction_pc() {
+            if addr == *cpu.next_instruction_pc() {
                 print!(" <-");
             }
 

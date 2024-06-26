@@ -27,6 +27,7 @@ pub mod serial;
 pub mod video;
 
 pub enum WriteReturnSignal {
+    InvalidateBlockCache { physical_address: u64, length: usize },
     None
 }
 
@@ -229,7 +230,7 @@ pub struct System {
     comms: SystemCommunication,
 
     pub rcp: Rc<RefCell<rcp::Rcp>>,
-    pub cpu: cpu::Cpu,
+    pub cpu: RefCell<cpu::Cpu>,
 
     start_time: std::time::Instant,
 }
@@ -247,7 +248,7 @@ impl System {
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
-        let cpu = cpu::Cpu::new(rcp.clone());
+        let cpu = RefCell::new(cpu::Cpu::new(rcp.clone()));
 
         System {
             comms: comms,
@@ -263,7 +264,7 @@ impl System {
         self.rcp.borrow_mut().stop(); // stop the RCP
 
         // reset everything
-        let _ = self.cpu.reset(false);
+        let _ = self.cpu.borrow_mut().reset(false);
         self.rcp.borrow_mut().reset();
 
         // restart the RCP
@@ -271,7 +272,7 @@ impl System {
     }
 
     pub fn soft_reset(&mut self) {
-        let _ = self.cpu.reset(true);
+        let _ = self.cpu.borrow_mut().reset(true);
     }
 
     #[inline(always)]
@@ -279,20 +280,21 @@ impl System {
         let mut cycles_ran = 0;
 
         if self.comms.settings.read().unwrap().cpu_interpreter_only {
+            let mut cpu = self.cpu.borrow_mut();
             while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
-                self.cpu.step()?;
+                cpu.step()?;
                 cycles_ran += 1;
                 self.comms.total_cpu_steps.inc();
             }
         } else {
-            //// delay...
-            //let mut cur_ips = 95_000_000.0;
-            //while cur_ips > 94_000_000.0 {
-            //    cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
-            //}
+            // delay...
+            let mut cur_ips = 95_000_000.0;
+            while cur_ips > 93_750_000.0 {
+                cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
+            }
 
             if !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
-                cycles_ran += self.cpu.run_for(cpu_cycles)?;
+                cycles_ran += self.cpu.borrow_mut().run_for(cpu_cycles)?;
 
                 // accumulate total cycles ran
                 self.comms.total_cpu_steps.add(cycles_ran as usize);
@@ -319,12 +321,12 @@ impl System {
 
         let trigger_int = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
-            rcp.step(cycles_ran);
+            rcp.step(cycles_ran, &mut self.cpu.borrow_mut());
             rcp.should_interrupt()
         };
 
         if trigger_int != 0 {
-            let _ = self.cpu.rcp_interrupt();
+            let _ = self.cpu.borrow_mut().rcp_interrupt();
         }
 
         Ok(())
