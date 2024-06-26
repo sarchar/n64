@@ -175,9 +175,10 @@ macro_rules! letsgo {
         dynasm!($ops
             ; .arch x64
             ; .alias r_gpr, rbx
-            ; .alias r_cp0gpr, rdi
+            ; .alias r_cp0gpr, r12
             ; .alias r_cpu, rsi
-            ; .alias r_cond, r12
+            ; .alias r_cond, edi
+            ; .alias r_cond_64, rdi
             ; .alias v_tmp, r10
             ; .alias v_tmp_32, r10d
             ; .alias v_tmp2, r11
@@ -2030,7 +2031,7 @@ impl Cpu {
             ;   push r_gpr
             ;   push r_cp0gpr
             ;   push r_cpu
-            ;   push r_cond
+            ;   push r_cond_64
             ;   mov r_cpu, QWORD self as *mut Self as _
             ;   mov r_gpr, QWORD self.gpr.as_mut_ptr() as _
             ;   mov r_cp0gpr, QWORD self.cp0gpr.as_mut_ptr() as _
@@ -2368,7 +2369,7 @@ impl Cpu {
             ;   movsxd rax, v_tmp_32 // return value
                 // restore stack
             ;   add rsp, BYTE 0x28 // must match the sub rsp in the prologue
-            ;   pop r_cond
+            ;   pop r_cond_64
             ;   pop r_cpu
             ;   pop r_cp0gpr
             ;   pop r_gpr
