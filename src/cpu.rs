@@ -12,6 +12,8 @@ use tracing::{debug, error, warn, info, trace};
 
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
+use memoffset::offset_of;
+
 use crate::*;
 
 // Exception handling registers
@@ -114,7 +116,7 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
+const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 256; //2048; // max instruction count per block
 
 const CACHED_BLOCK_MAP_RDRAM_OFFSET  : usize = 0;
 const CACHED_BLOCK_MAP_PIFROM_OFFSET : usize = CACHED_BLOCK_MAP_RDRAM_OFFSET   + (0x80_0000 >> 2);
@@ -308,19 +310,17 @@ macro_rules! letsoffset {
 macro_rules! letssetupexcept {
     ($self:ident, $ops:ident, $setup_cop_index:expr) => {
         letsgo!($ops
-            ;   mov rax, QWORD &mut $self.is_delay_slot as *mut bool as _
-            ;   mov BYTE [rax], BYTE $self.is_delay_slot as _
-            ;   mov rax, QWORD &mut $self.current_instruction_pc as *mut u64 as _
+            ;   mov BYTE [r_cpu + offset_of!(Cpu, is_delay_slot) as i32], BYTE $self.is_delay_slot as _
         );
 
         if ($self.current_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
             letsgo!($ops
-                ;   mov QWORD [rax], DWORD $self.current_instruction_pc as _
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, current_instruction_pc) as i32], DWORD $self.current_instruction_pc as _
             );
         } else {
             letsgo!($ops
                 ;   mov v_tmp2, QWORD $self.current_instruction_pc as _
-                ;   mov QWORD [rax], v_tmp2
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, current_instruction_pc) as i32], v_tmp2
             );
         }
 
@@ -335,8 +335,7 @@ macro_rules! letssetupexcept {
                     // the delay slot of that branch.
                     let next_cop_index = if !$self.is_delay_slot && ($self.next_instruction >> 29) == 0b010 { ($self.next_instruction >> 26) & 0b011 } else { 0 };
                     letsgo!($ops
-                        ;   mov rax, QWORD &mut $self.next_cop_index as *mut u32 as _
-                        ;   mov DWORD [rax], DWORD next_cop_index as _
+                        ;   mov DWORD [r_cpu + offset_of!(Cpu, next_cop_index) as i32], DWORD next_cop_index as _
                     );
                 }
             }
@@ -366,11 +365,10 @@ macro_rules! letsexcept {
 //      0) jit_other_exception to be set if an exception was triggered
 //      1) exception code in rax (return value from the rw call)
 macro_rules! letscheck {
-    ($self:ident, $ops:ident) => {
+    ($ops:ident) => {
         // check if there was an exception in the previous letscall
         letsgo!($ops
-            ;   mov v_tmp, QWORD &$self.jit_other_exception as *const bool as _
-            ;   cmp BYTE [v_tmp], BYTE 0u8 as _
+            ;   cmp BYTE [r_cpu + offset_of!(Cpu, jit_other_exception) as i32], BYTE 0u8 as _
             ;   jne >epilog
         );
 
@@ -2042,12 +2040,10 @@ impl Cpu {
             // run_limit in ecx
             ;   mov DWORD [rsp+s_cycle_count], ecx
             // copy self.lo to the stack
-            ;   mov rax, QWORD &self.lo as *const u64 as _
-            ;   mov v_tmp, QWORD [rax]
+            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, lo) as i32]
             ;   mov QWORD [rsp+s_lo], v_tmp
             // copy self.hi to the stack
-            ;   mov rax, QWORD &self.hi as *const u64 as _
-            ;   mov v_tmp, QWORD [rax]
+            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, hi) as i32]
             ;   mov QWORD [rsp+s_hi], v_tmp
             // do the jump to desired instruction using the jump table, instruction_index in rdx
             ;   mov v_tmp, QWORD jump_table_ptr as *const _ as _
@@ -2162,9 +2158,8 @@ impl Cpu {
                     if jit_jump { // use s_jump_target
                         letsgo!(assembler
                             // copy jump target directly to PC
-                            ;   mov v_tmp, QWORD &mut self.pc as *mut _ as _
                             ;   mov rax, QWORD [rsp+s_jump_target]
-                            ;   mov QWORD [v_tmp], rax
+                            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                         );
                     } else if jit_conditional_branch.is_some() {
                         let (branch_offset, is_branch_likely) = jit_conditional_branch.unwrap();
@@ -2193,9 +2188,8 @@ impl Cpu {
                         );
 
                         letsgo!(assembler
-                            ;   mov v_tmp, QWORD &mut self.pc as *mut _ as _
                             ;   mov rax, QWORD branch_target as u64 as _
-                            ;   mov QWORD [v_tmp], rax
+                            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                         );
                     } else {
                         // would need to reinstate the jit_interpret_next_instruction value, but this code path isn't ever hit
@@ -2204,15 +2198,12 @@ impl Cpu {
 
                     letsgo!(assembler
                         // current_instruction_pc needs to be replayed
-                        ;   mov v_tmp, QWORD &mut self.next_instruction_pc as *mut _ as _
                         ;   mov rax, QWORD self.current_instruction_pc as u64 as _
-                        ;   mov QWORD [v_tmp], rax
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32], rax
                         // the current opcode is self.inst.v, place back in next_instruction
-                        ;   mov v_tmp, QWORD &mut self.next_instruction as *mut _ as _
-                        ;   mov DWORD [v_tmp], DWORD self.inst.v as u32 as _
+                        ;   mov DWORD [r_cpu + offset_of!(Cpu, next_instruction) as i32], DWORD self.inst.v as u32 as _
                         // the current delay slot state back into next
-                        ;   mov v_tmp, QWORD &mut self.next_is_delay_slot as *mut _ as _
-                        ;   mov BYTE [v_tmp], BYTE self.is_delay_slot as u8 as _
+                        ;   mov BYTE [r_cpu + offset_of!(Cpu, next_is_delay_slot) as i32], BYTE self.is_delay_slot as u8 as _
                     );
 
                     // exit the block
@@ -2239,9 +2230,8 @@ impl Cpu {
 
                 // move jump target value into self.pc, call self.prefetch and gtfo
                 letsgo!(assembler
-                    ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // copy jump target to self.pc
-                    ;   mov rax, QWORD [rsp+s_jump_target]              // .
-                    ;   mov QWORD [v_tmp], rax                          // .
+                    ;   mov rax, QWORD [rsp+s_jump_target]                   // copy jump target to self.pc
+                    ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // .
                 );
 
                 // prepare exceptions for the prefetch() call
@@ -2280,9 +2270,8 @@ impl Cpu {
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
                         ;   jg =>dynamic_label                           // otherwise, just take the branch
                         ;break_out:
-                        ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // put branch target in self.pc
-                        ;   mov rax, QWORD branch_target as u64 as _        // PC address we need to jump to
-                        ;   mov QWORD [v_tmp], rax                          // .
+                        ;   mov rax, QWORD branch_target as u64 as _             // PC address we need to jump to
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // put branch target in self.pc
                     );
 
                     //TODO call letssetupexcept (actually jump below to optimize code gen)
@@ -2293,9 +2282,8 @@ impl Cpu {
                         ;no_branch:
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _   // also test on the non-branch version
                         ;   jg >no_break_out                               // on less than or equal to zero, break out
-                        ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _       // put next instruction address in self.pc
-                        ;   mov rax, QWORD self.next_instruction_pc as u64 as _  // .
-                        ;   mov QWORD [v_tmp], rax                               // .
+                        ;   mov rax, QWORD self.next_instruction_pc as u64 as _  // put next instruction address in self.pc
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // .
                     );
 
                     //TODO call letssetupexcept
@@ -2312,13 +2300,12 @@ impl Cpu {
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _    // break out when run count hits 0 or less
                         ;   jg >no_break_out
                         ;break_out:
-                        ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _  // put branch target in self.pc
                         ;   mov rax, QWORD self.next_instruction_pc as _    // default to fall through
                         ;   dec r_cond                                      // check if r_cond is set
                         ;   jne >skip_set                                   // .
                         ;   mov rax, QWORD branch_target as u64 as _        // if set, use the branch target instead
                         ;skip_set:
-                        ;   mov QWORD [v_tmp], rax                          // store branch dest in self.pc
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax // store branch dest in self.pc
                     );
 
                     //TODO call letssetupexcept
@@ -2352,16 +2339,15 @@ impl Cpu {
         assert!(!self.next_is_delay_slot);
         letsgo!(assembler
             ;restore_pc:
-            ;   mov rax, QWORD &mut self.pc as *mut u64 as _
         );
         if (self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
             letsgo!(assembler
-                ;   mov QWORD [rax], DWORD self.next_instruction_pc as i32 as _
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD self.next_instruction_pc as i32 as _
             );
         } else {
             letsgo!(assembler
                 ;   mov v_tmp, QWORD self.next_instruction_pc as _
-                ;   mov QWORD [rax], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], v_tmp
             );
         }
         letscall!(assembler, Cpu::prefetch_bridge);
@@ -2372,13 +2358,11 @@ impl Cpu {
                 // save self.lo
                 // TODO: we could theoretically omit saving hi/lo if there were no
                 // instructions that modified them in this block
-            ;   mov rax, QWORD &mut self.lo as *mut u64 as _
             ;   mov v_tmp, QWORD [rsp+s_lo]
-            ;   mov QWORD [rax], v_tmp
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
                 // save self.hi
-            ;   mov rax, QWORD &mut self.hi as *mut u64 as _
             ;   mov v_tmp, QWORD [rsp+s_hi]
-            ;   mov QWORD [rax], v_tmp
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
                 // cycle count to return value
             ;   mov v_tmp_32, DWORD [rsp+s_cycle_count]
             ;   movsxd rax, v_tmp_32 // return value
@@ -2414,18 +2398,14 @@ impl Cpu {
                         let code_start_offset = assembler.offset();
 
                         trace!(target: "JIT-BUILD", "** creating unknown branch target handler for branch to ${:16X}", branch_target);
-                        letsgo!(assembler
-                            ;   mov v_tmp, QWORD &mut self.pc as *mut u64 as _
-                        );
-
                         if ((branch_target as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
                             letsgo!(assembler
-                                ;   mov QWORD [v_tmp], DWORD branch_target as i32 as _ // sign-extend address
+                                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD branch_target as i32 as _ // sign-extend address
                             );
                         } else {
                             letsgo!(assembler
                                 ;   mov rax, QWORD branch_target as i64 as _
-                                ;   mov QWORD [v_tmp], rax
+                                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                             );
                         }
 
@@ -3095,9 +3075,7 @@ impl Cpu {
 
         // if the co-processor isn't enabled, generate an exception
         letsgo!(assembler
-            ;   mov v_tmp, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
-            ;   mov eax, DWORD [v_tmp]
-            ;   and eax, DWORD (0x1000_0000 << copno) as _
+            ;   test DWORD [r_cp0gpr + (Cop0_Status*8) as i32], DWORD (0x1000_0000 << copno) as _
             ;   jnz >no_exception
         );
 
@@ -3128,7 +3106,7 @@ impl Cpu {
             letscop!(assembler, cop, Cpu::cop1_special_bridge);
 
             // check for exceptions
-            letscheck!(self, assembler);
+            letscheck!(assembler);
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
@@ -3148,7 +3126,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_mfc_bridge);
 
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
 
                     // store sign-extended result in rt
                     if self.inst.rt != 0 {
@@ -3175,7 +3153,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_dmfc_bridge);
 
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -3201,7 +3179,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_cfc_bridge);
 
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -3246,7 +3224,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_mtc_bridge);
 
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
                 },
   
                 0b00_101 => { // DMTC
@@ -3274,7 +3252,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_dmtc_bridge);
                     
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
                 },
 
                 0b00_110 => { // CTC
@@ -3303,7 +3281,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_ctc_bridge);
 
                     // check exceptions
-                    letscheck!(self, assembler);
+                    letscheck!(assembler);
                 },
 
                 0b01_000 => {
@@ -3563,8 +3541,7 @@ impl Cpu {
                         // undefined registers
                         7 | 21 | 22 | 23 | 24 | 25 | 31 => {
                             letsgo!(assembler
-                                ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
-                                ;   mov v_tmp, QWORD [rax]
+                                ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32]
                                 ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
                             );
                         },
@@ -3590,8 +3567,7 @@ impl Cpu {
 
                         _ => {
                             letsgo!(assembler
-                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
-                                ;   mov v_tmp_32, DWORD [rax]
+                                ;   mov v_tmp_32, DWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
                                 // TODO debugging LoZ crash
                                 // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
                                 // ;   jne >fjffj
@@ -3616,7 +3592,7 @@ impl Cpu {
                     match self.inst.rd {
                         7 | 21 | 22 | 23 | 24 | 25 | 31 => {
                             letsgo!(assembler
-                                ;   mov rax, QWORD &self.cp0gpr_latch as *const u64 as _
+                                ;   mov rax, QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32]
                             );
                         },
 
@@ -3626,20 +3602,19 @@ impl Cpu {
                             letsgo!(assembler
                                 ;   int3
                                 ;   mov rax, DWORD 0x7EEE_3333u32 as _
-                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
+                                ;   mov rax, QWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
                             );
                         },
 
                         _ => {
                             letsgo!(assembler
-                                ;   mov rax, QWORD &self.cp0gpr[self.inst.rd] as *const u64 as _
+                                ;   mov rax, QWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
                             );
                         },
                     }
 
                     letsgo!(assembler
-                        ;   mov v_tmp, QWORD [rax]
-                        ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
+                        ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
                     );
                 }
 
@@ -3664,8 +3639,7 @@ impl Cpu {
                             ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
                             // copy to cp0gpr_latch
                             ;   movsxd v_tmp, r8d
-                            ;   mov rax, QWORD &mut self.cp0gpr_latch as *mut _ as _
-                            ;   mov QWORD [rax], v_tmp
+                            ;   mov QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32], v_tmp
                         );
 
                         unsafe extern "win64" fn write_count(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
@@ -3713,8 +3687,7 @@ impl Cpu {
                             ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
                             // copy to cp0gpr_latch
                             ;   movsxd v_tmp, r8d
-                            ;   mov rax, QWORD &mut self.cp0gpr_latch as *mut _ as _
-                            ;   mov QWORD [rax], v_tmp
+                            ;   mov QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32], v_tmp
                         );
 
                         unsafe extern "win64" fn write_compare(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
@@ -3766,29 +3739,9 @@ impl Cpu {
                         letscall!(assembler, Cpu::inst_cop0_bridge);
 
                         // check for exceptions
-                        letscheck!(self, assembler);
+                        letscheck!(assembler);
                     }
                 }
-
-                // TODO
-                //.// Option 1:
-                //.let cp0gpr_latch_offset = offset_of!(Cpu, cp0gpr_latch) as i32;
-                //.letsgo!(assembler
-                //.    ; movsxd v_tmp, DWORD [r_gpr + (self.inst.rt*8) as i32] // sign-extend from DWORD to QWORD
-                //.    ; mov QWORD [r_cpu + cp0gpr_latch_offset], v_tmp        // latch value for unused register reads
-                //.);
-                //.// Option 2:
-                //.//letsgo!(assembler
-                //.//    ; movsxd v_tmp, DWORD [r_gpr + (self.inst.rt*8) as i32] // sign-extend from DWORD to QWORD
-                //.//    ; mov r9, QWORD &mut self.cp0gpr_latch as *mut u64 as _
-                //.//    ; mov QWORD [r9], v_tmp        // latch value for unused register reads
-                //.//);
-
-                //.self.build_mask_cp0_register(assembler, self.inst.rd);
-
-                //.letsgo!(assembler
-                //.    ; mov QWORD [r_cp0gpr + (self.inst.rd*8) as i32], v_tmp
-                //.);
 
                 CompileInstructionResult::Continue
             },
@@ -3914,15 +3867,13 @@ impl Cpu {
                         letsgo!(assembler
                             // If ERL bit is set, load the contents of ErrorEPC to the PC and clear the
                             // ERL bit. Otherwise, load the PC from EPC and clear the EXL bit.
-                            ;   mov rax, QWORD &self.cp0gpr[Cop0_Status] as *const u64 as _
-                            ;   test BYTE [rax], BYTE 0x04 as _
+                            ;   test BYTE [r_cp0gpr + (Cop0_Status * 8) as i32], BYTE 0x04 as _
                             ;   jz >no_erl
                             ;   mov rax, QWORD 0x1111_5414_0000_AAAAu64 as _
                             ;   int3
                             ;no_erl:
                             // copy Cop0_EPC to the jump target
-                            ;   mov rax, QWORD &self.cp0gpr[Cop0_EPC] as *const u64 as _
-                            ;   mov v_tmp, QWORD [rax]
+                            ;   mov v_tmp, QWORD [r_cp0gpr + (Cop0_EPC * 8) as i32]
                             // TODO debugging LoZ
                             // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
                             // ;   jne >asdf
@@ -3930,12 +3881,9 @@ impl Cpu {
                             // ;asdf:
                             ;   mov QWORD [rsp+s_jump_target], v_tmp
                             // clear bit 0x02 of Cop0_Status
-                            ;   mov rax, QWORD &mut self.cp0gpr[Cop0_Status] as *mut u64 as _
-                            ;   mov v_tmp, DWORD !0x0000_0002u32 as _  // sign-extend v_tmp
-                            ;   and QWORD [rax], v_tmp                 // clear bit
+                            ;   and QWORD [r_cp0gpr + (Cop0_Status * 8) as i32], DWORD !0x0000_0002u32 as _ // clear bit (sign-extended DWORD)
                             // set llbit to false so SC instructions fail
-                            ;   mov rax, QWORD &mut self.llbit as *mut bool as _
-                            ;   mov BYTE [rax], BYTE 0x00u8 as _
+                            ;   mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 0x00u8 as _
                         );
 
                         self.jit_jump_no_delay = true;
@@ -4076,7 +4024,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_cop2_bridge);
 
         // check exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4672,14 +4620,12 @@ impl Cpu {
             ; int3           // end current run_block
             ;valid:
             // set Cop0_LLAddr to physical addr
-            ; mov v_tmp, QWORD &mut self.cp0gpr[Cop0_LLAddr] as *mut u64 as _ 
             ; mov eax, edx                    // address to 32-bit eax, clearing upper dword
             ; and eax, DWORD 0x7FFF_FFFF as _ // "physical address"
             ; shr eax, BYTE 4 as _            // shift right 32-bit
-            ; mov QWORD [v_tmp], rax          // move 64-bit addr to Cop0_LLAddr
+            ; mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax  // move 64-bit addr to Cop0_LLAddr
             // set llbit true
-            ; mov v_tmp, QWORD &mut self.llbit as *mut bool as _
-            ; mov BYTE [v_tmp], BYTE 1i8 as _
+            ; mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 1i8 as _
         );
 
         // rdx contains address
@@ -4820,7 +4766,7 @@ impl Cpu {
         //.}
 
         // check the jit_other_exception flag after call to read_u32_bridge
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -5016,7 +4962,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_ldc1_bridge);
 
         // check for exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5073,7 +5019,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_lwc1_bridge);
 
         // check for exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5325,7 +5271,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_sdc1_bridge);
 
         // check for exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5383,7 +5329,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_swc1_bridge);
 
         // check for exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5711,7 +5657,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check the jit_other_exception flag after call to write_u32_bridge
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
@@ -5790,7 +5736,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_swl_bridge);
 
         // check exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5868,7 +5814,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_swr_bridge);
 
         // check exceptions
-        letscheck!(self, assembler);
+        letscheck!(assembler);
 
         CompileInstructionResult::Continue
     }

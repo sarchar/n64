@@ -960,7 +960,7 @@ impl Hle {
 
 
     fn handle_unknown(&mut self) {
-        unimplemented!("unimplemented DL command ${:02X}", self.command_op);
+        error!(target: "HLE", "unimplemented DL command ${:02X}", self.command_op);
     }
 
     fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1 (S3DEX2, F3DEX2)
@@ -1355,8 +1355,8 @@ impl Hle {
         self.command_words += 2;
 
         // nop
-        trace!(target: "HLE", "{} glSPLoadUcodeEx(...)", self.command_prefix);
-        todo!();
+        error!(target: "HLE", "{} glSPLoadUcodeEx(...)", self.command_prefix);
+        //todo!();
     }
 
     fn handle_displaylist(&mut self) { // G_DL (S3DEX2, F3DEX2)

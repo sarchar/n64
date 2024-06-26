@@ -102,6 +102,9 @@ version = "0.2.4"
 [dependencies.dynasmrt]
 version = "2.0.0"
 
+[dependencies.memoffset]
+version = "0.9"
+
 [build-dependencies.cc]
 version = "1.0"
 
