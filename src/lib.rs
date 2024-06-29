@@ -289,10 +289,10 @@ impl System {
             }
         } else {
             // delay...
-            let mut cur_ips = 95_000_000.0;
-            while cur_ips > 93_750_000.0 {
-                cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
-            }
+            //let mut cur_ips = 95_000_000.0;
+            //while cur_ips > 93_750_000.0 {
+            //    cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
+            //}
 
             if !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
                 cycles_ran += self.cpu.borrow_mut().run_for(cpu_cycles)?;

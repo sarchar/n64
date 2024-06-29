@@ -4406,26 +4406,50 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_ldl_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
-        let cpu = { &mut *cpu };
-        cpu.decode_instruction(inst);
-        match cpu.inst_ldl() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-            Err(e) => {
-                // TODO handle errors better
-                panic!("error in inst_ldl_bridge: {:?}", e);
-            }
-        }
-    }
-
-    // TODO
     fn build_inst_ldl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ldl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exception
+        letssetupexcept!(self, assembler, false);
+
+        // rdx is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
-            ; mov edx, DWORD self.inst.v as _
+            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   and BYTE [rsp+s_tmp0], BYTE 0x07u8 as _
+            ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
+            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
-        letscall!(assembler, Cpu::inst_ldl_bridge);
+
+        // call read_u32()
+        letscall!(assembler, Cpu::read_u64_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
+
+        // eax contains the result
+        // TODO reduce # of instructions if possible
+        letsgo!(assembler
+            // no shift - use eax as is
+            ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
+            ;   je >done
+            // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
+            ;   mov cl, BYTE [rsp+s_tmp0]            // shift amount
+            ;   shl rax, cl                          // shift mem into position
+            ;   mov cl, BYTE 64 as _                 // compute 64-shift into cl
+            ;   sub cl, BYTE [rsp+s_tmp0]            // .
+            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 32-shift
+            ;   shr rdx, cl                          // .
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // lower bits of rt
+            ;   and v_tmp, rdx                                        // .
+            ;   or rax, v_tmp                        // result
+            ;done:
+            ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
+        );
+
         CompileInstructionResult::Continue
     }
 
@@ -4438,7 +4462,6 @@ impl Cpu {
 
         // combine register and mem
         let shift = (address & 0x07) << 3;
-
         let new = if shift == 56 { // handle case where no shift occurs
             mem 
         } else {
@@ -4450,26 +4473,51 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_ldr_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
-        let cpu = { &mut *cpu };
-        cpu.decode_instruction(inst);
-        match cpu.inst_ldr() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-            Err(e) => {
-                // TODO handle errors better
-                panic!("error in inst_ldr_bridge: {:?}", e);
-            }
-        }
-    }
-
-    // TODO
     fn build_inst_ldr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ldr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exception
+        letssetupexcept!(self, assembler, false);
+
+        // rdx is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
-            ; mov edx, DWORD self.inst.v as _
+            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   and BYTE [rsp+s_tmp0], BYTE 0x07u8 as _
+            ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
+            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
-        letscall!(assembler, Cpu::inst_ldr_bridge);
+
+        // call read_u64()
+        letscall!(assembler, Cpu::read_u64_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
+
+        // eax contains the result
+        // TODO reduce # of instructions if possible
+        letsgo!(assembler
+            // no shift - use eax as is
+            ;   cmp BYTE [rsp+s_tmp0], BYTE 56u8 as _
+            ;   je >done
+            // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
+            ;   mov cl, BYTE 56 as _                 // compute 56-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]            // .
+            ;   shr rax, cl                          // shift mem into position
+            ;   mov cl, BYTE 8 as _                  // compute 8+shift
+            ;   add cl, BYTE [rsp+s_tmp0]            // .
+            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 8+shift
+            ;   shl rdx, cl                          // .
+            ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // lower bits of rt
+            ;   and v_tmp, rdx                                        // .
+            ;   or rax, v_tmp                        // result
+            ;done:
+            ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
+        );
+
         CompileInstructionResult::Continue
     }
 
@@ -4833,7 +4881,7 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u16_bridge
+        // rdx is the 2nd parameter to read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // get the shift amount from the address, and mask low bits out of rdx
@@ -4902,7 +4950,7 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u16_bridge
+        // rdx is the 2nd parameter to read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // get the shift amount from the address, and mask low bits out of rdx
@@ -5371,27 +5419,13 @@ impl Cpu {
 
 
     fn inst_sdl(&mut self) -> Result<(), InstructionFault> {
-        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
-
-        // translate the address with the offset so that TLB errors produce the correct BadVAddr
-        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
-            Some(address) => address,
-            None => {
-                // this shouldn't happen, but if it does we act like a NOP
-                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
-                return Ok(());
-            }
-        };
-
-        // extract the dword offset
-        let offset = address.physical_address & 0x07;
-        address.physical_address &= !0x07;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = self.read_u64_phys(address)?;
+        let mem = self.read_u64(address & !0x07)?;
 
         // combine register and mem
-        let shift = offset << 3;
+        let shift = (address & 0x07) << 3;
         let new = if shift == 0 {
             self.gpr[self.inst.rt]
         } else {
@@ -5399,55 +5433,82 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64_phys(new, address)?;
+        self.write_u64(new, address & !0x07)?;
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_sdl_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
-        let cpu = { &mut *cpu };
-        cpu.decode_instruction(inst);
-        match cpu.inst_sdl() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-            Err(e) => {
-                // TODO handle errors better
-                panic!("error in inst_sdl_bridge: {:?}", e);
-            }
-        }
-    }
-
-    // TODO
     fn build_inst_sdl(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sdl r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exception
+        letssetupexcept!(self, assembler, false);
+
+        // rdx is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
-            ; mov edx, DWORD self.inst.v as _
+            // compute 32-shift
+            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   and BYTE [rsp+s_tmp0], BYTE 0x07 as _
+            ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
+            // place mask out low two bits of address
+            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
-        letscall!(assembler, Cpu::inst_sdl_bridge);
+
+        // call read_u64()
+        letscall!(assembler, Cpu::read_u64_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
+
+        // rax contains the result
+        // we place the computation in rdx, as it's the second parameter to write_u64_bridge
+        // TODO reduce # of instructions if possible
+        letsgo!(assembler
+            // no shift - use rt as is
+            ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
+            ;   jne >combine
+            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   jmp >done
+            // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
+            ;combine:
+            ;   mov cl, BYTE 64 as _                 // compute 64-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]            // .
+            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
+            ;   shl rdx, cl                          // .
+            ;   and rax, rdx                         // mask memory
+            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
+            ;   shr rdx, cl                                        // .
+            ;   or rdx, rax                          // result
+            ;done:
+        );
+
+        // r8 is the 3nd parameter to write_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        letsgo!(assembler
+            ;   and r8, DWORD !0x07u32 as _
+        );
+
+        // write rdx to r8
+        letscall!(assembler, Cpu::write_u64_bridge);
+
+        // check for exception
+        letscheck!(assembler);
+
         CompileInstructionResult::Continue
     }
 
     fn inst_sdr(&mut self) -> Result<(), InstructionFault> {
-        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
-
-        // translate the address with the offset so that TLB errors produce the correct BadVAddr
-        let mut address = match self.translate_address(virtual_address as u64, true, true)? {
-            Some(address) => address,
-            None => {
-                // this shouldn't happen, but if it does we act like a NOP
-                warn!(target: "CPU", "translate_address for ${:016X} returned None", virtual_address);
-                return Ok(());
-            }
-        };
-
-        // extract the word offset
-        let offset = address.physical_address & 0x07;
-        address.physical_address &= !0x07;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
 
         // need to fetch data on cache misses but not uncachable addresses
-        let mem = self.read_u64_phys(address)?;
+        let mem = self.read_u64(address & !0x07)?;
 
         // combine register and mem
-        let shift = 56 - (offset << 3);
+        let shift = 56 - ((address & 0x07) << 3);
         let new = if shift == 0 {
             self.gpr[self.inst.rt]
         } else {
@@ -5455,30 +5516,73 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64_phys(new, address)?;
+        self.write_u64(new, address & !0x07)?;
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_sdr_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
-        let cpu = { &mut *cpu };
-        cpu.decode_instruction(inst);
-        match cpu.inst_sdr() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-            Err(e) => {
-                // TODO handle errors better
-                panic!("error in inst_sdr_bridge: {:?}", e);
-            }
-        }
-    }
-
-    // TODO
     fn build_inst_sdr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sdr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // setup for exception
+        letssetupexcept!(self, assembler, false);
+
+        // rdx is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
-            ; mov edx, DWORD self.inst.v as _
+            // compute 32-shift
+            ;   mov cl, dl
+            ;   and cl, BYTE 0x07 as _
+            ;   shl cl, BYTE 3 as _
+            ;   mov BYTE [rsp+s_tmp0], BYTE 56 as _
+            ;   sub BYTE [rsp+s_tmp0], cl
+            // place mask out low two bits of address
+            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
-        letscall!(assembler, Cpu::inst_sdr_bridge);
+
+        // call read_u64()
+        letscall!(assembler, Cpu::read_u64_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
+
+        // rax contains the result
+        // we place the computation in rdx, as it's the second parameter to write_u64_bridge
+        // TODO reduce # of instructions if possible
+        letsgo!(assembler
+            // no shift - use eax as is
+            ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
+            ;   jne >combine
+            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   jmp >done
+            // otherwise, take the lower bits of rt and or with the low bits of eax shifted into position
+            ;combine:
+            ;   mov cl, BYTE 64 as _                 // compute 64-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]            // .
+            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
+            ;   shr rdx, cl                          // .
+            ;   and rax, rdx                         // mask memory
+            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
+            ;   shl rdx, cl                                        // .
+            ;   or rdx, rax                          // result
+            ;done:
+        );
+
+        // r8 is the 3nd parameter to write_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        letsgo!(assembler
+            ;   and r8, DWORD !0x07u32 as _
+        );
+
+        // write rdx to r8
+        letscall!(assembler, Cpu::write_u64_bridge);
+
+        // check for exception
+        letscheck!(assembler);
+
         CompileInstructionResult::Continue
     }
 
@@ -5713,7 +5817,7 @@ impl Cpu {
         };
 
         // write mem value
-        self.write_u32(new, address)?;
+        self.write_u32(new, address & !0x03)?;
         Ok(())
     }
 
@@ -5724,7 +5828,7 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u16_bridge
+        // rdx is the 2nd parameter to read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // get the shift amount from the address, and mask low bits out of rdx
@@ -5766,6 +5870,9 @@ impl Cpu {
 
         // r8 is the 3nd parameter to write_u16_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        letsgo!(assembler
+            ;   and r8, DWORD !0x03u32 as _
+        );
 
         // write edx to r8
         letscall!(assembler, Cpu::write_u32_bridge);
@@ -5791,7 +5898,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u32(new, address)?;
+        self.write_u32(new, address & !0x03)?;
         Ok(())
     }
 
@@ -5802,7 +5909,7 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u16_bridge
+        // rdx is the 2nd parameter to read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // get the shift amount from the address, and mask low bits out of rdx
@@ -5848,6 +5955,9 @@ impl Cpu {
 
         // r8 is the 3nd parameter to write_u16_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        letsgo!(assembler
+            ;   and r8, DWORD !0x03u32 as _
+        );
 
         // write edx to r8
         letscall!(assembler, Cpu::write_u32_bridge);
