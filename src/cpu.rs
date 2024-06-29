@@ -5795,28 +5795,6 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_swr_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
-
-        cpu.decode_instruction(inst);
-
-        match cpu.inst_swr() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-                        //
-            Err(InstructionFault::OtherException(exception_code)) => {
-                assert!(exception_code == ExceptionCode_TLBS); // only valid exceptions here
-                cpu.jit_other_exception = true;
-                exception_code as u32
-            },
-
-            Err(e) => {
-                // TODO handle errors better
-                panic!("unhandled error in inst_swr_bridge: {:?}", e);
-            }
-        }
-    }
-
-    // TODO
     fn build_inst_swr(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swr r{}, ${:04X}(r{}) (TODO)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
