@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::fs;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
@@ -180,7 +181,7 @@ pub struct SystemCommunication {
 
     // interrupt signal
     pub mi_interrupts_tx: Option<mpsc::Sender<mips::InterruptUpdate>>,
-    pub break_cpu_cycles: Arc<AtomicBool>,
+    pub break_cpu_cycles: Pin<Arc<AtomicBool>>,
 
     // full sync
     pub rdp_full_sync: Arc<AtomicU32>,
@@ -211,7 +212,7 @@ impl SystemCommunication {
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
             mi_interrupts_tx  : None,
-            break_cpu_cycles  : Arc::new(AtomicBool::new(false)),
+            break_cpu_cycles  : Arc::pin(AtomicBool::new(false)),
             rdp_full_sync     : Arc::new(AtomicU32::new(0)),
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
@@ -222,7 +223,7 @@ impl SystemCommunication {
     }
 
     pub fn break_cpu(&mut self) {
-        self.break_cpu_cycles.store(true, Ordering::SeqCst);
+        self.break_cpu_cycles.store(true, Ordering::Relaxed);
     }
 }
 
@@ -248,7 +249,7 @@ impl System {
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
-        let cpu = RefCell::new(cpu::Cpu::new(rcp.clone()));
+        let cpu = RefCell::new(cpu::Cpu::new(comms.clone(), rcp.clone()));
 
         System {
             comms: comms,
@@ -281,19 +282,19 @@ impl System {
 
         if self.comms.settings.read().unwrap().cpu_interpreter_only {
             let mut cpu = self.cpu.borrow_mut();
-            while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
+            while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
                 cpu.step()?;
                 cycles_ran += 1;
                 self.comms.total_cpu_steps.inc();
             }
         } else {
             // delay...
-            //let mut cur_ips = 95_000_000.0;
-            //while cur_ips > 93_750_000.0 {
-            //    cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
-            //}
+            let mut cur_ips = 95_000_000.0;
+            while cur_ips > 93_750_000.0 {
+                cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
+            }
 
-            if !self.comms.break_cpu_cycles.load(Ordering::SeqCst) {
+            if !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
                 cycles_ran += self.cpu.borrow_mut().run_for(cpu_cycles)?;
 
                 // accumulate total cycles ran
@@ -302,7 +303,7 @@ impl System {
         }
 
         // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
-        self.comms.break_cpu_cycles.store(false, Ordering::SeqCst);
+        self.comms.break_cpu_cycles.store(false, Ordering::Relaxed);
 
         // handle reset
         match self.comms.reset_signal.load(Ordering::SeqCst) {
@@ -338,7 +339,6 @@ impl System {
             let _ = self.run_for(num_cycles); 
         }
     }
-
 }
 
 #[derive(Default, Debug, Copy, Clone)]

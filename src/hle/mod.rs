@@ -870,7 +870,7 @@ impl Hle {
 
     fn current_display_list_address(&mut self) -> u32 {
         let cur = self.dl_stack.last().unwrap();
-        cur.base_address + cur.pc
+        cur.base_address + (cur.pc << 2)
     }
 
     fn next_display_list_command(&mut self) -> u64 {
@@ -882,7 +882,7 @@ impl Hle {
         if needs_data {
             let load_address = {
                 let cur = self.dl_stack.last().unwrap();
-                cur.base_address + cur.pc * 4
+                cur.base_address + (cur.pc << 2)
             };
 
             let dl = self.load_from_rdram(load_address, DL_FETCH_SIZE);
@@ -960,7 +960,7 @@ impl Hle {
 
 
     fn handle_unknown(&mut self) {
-        error!(target: "HLE", "unimplemented DL command ${:02X}", self.command_op);
+        error!(target: "HLE", "{} unimplemented DL command ${:02X}", self.command_prefix, self.command_op);
     }
 
     fn handle_rdphalf_1(&mut self) { // G_RDPHALF_1 (S3DEX2, F3DEX2)
@@ -980,7 +980,7 @@ impl Hle {
     }
 
     fn handle_noop(&mut self) { // G_NOOP
-        let addr = (self.command & 0xFFFF_FFFF) as u32;
+        let addr = self.command as u32;
         if addr != 0 {
             let translated_addr = (if (addr & 0xE000_0000) != 0 { addr } else {
                 let segment = ((addr >> 24) & 0x0F) as usize;

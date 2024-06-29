@@ -23,7 +23,7 @@ pub struct AudioInterface {
 
     // buffer states
     buffer_playing: bool,
-    next_buffer: Vec<u32>,
+    next_buffer: Vec<f32>,
     sample_rate: u32,
     output_sample_rate: u32,
 
@@ -96,24 +96,9 @@ impl AudioInterface {
             // take the next buffer and replace it with an empty one
             let buffer = std::mem::replace(&mut self.next_buffer, Vec::new()); 
 
-            // convert the i16's (which are packed as u32's) into f32
-            // TODO maybe we can use output i16 format and let the hardware do the conversion
-            // but we're not processing /that/ much data.
-            let mut queue_buffer = Vec::new();
-            for v in buffer.iter() {
-                let mut left = ((v >> 16) as i16) as f32;
-                left = if left < 0.0 { left / 32768.0 } else { left / 32767.0 };
-                let mut right = ((v & 0xFFFF) as i16) as f32;
-                right = if right < 0.0 { right / 32768.0 } else { right / 32767.0 };
-                queue_buffer.push(left);
-                queue_buffer.push(right);
-            }
-
-            // resample the game audio to fit our output device
-            let resampled = samplerate::convert(self.sample_rate, self.output_sample_rate, 2, samplerate::ConverterType::SincBestQuality, &queue_buffer).unwrap();
-
             // queue the data into SDL
-            self.audio_queue.queue_audio(&resampled).unwrap();
+            let buffer_slice: &[f32] = &buffer;
+            self.audio_queue.queue_audio(&buffer_slice).unwrap();
 
             // make sure playback is enabled
             self.play();
@@ -125,32 +110,28 @@ impl AudioInterface {
             self.buffer_playing = false;
         }
 
-        // if a dma is pending, and no next buffer, start it and trigger AI interrupt
+        // if a dma is pending, and no next buffer, do the dma and trigger AI interrupt
         if self.next_buffer.len() == 0 && self.transfer_length.is_some() {
             let len = std::mem::replace(&mut self.transfer_length, None).unwrap();
 
-            let dma_info = DmaInfo {
-                initiator     : "AI",
-                source_address: (self.dram_address),
-                dest_address  : 0x045F_0000, // Special hacky address to capture the audio buffer
-                count         : 1,
-                length        : len,
-                source_stride : 0,
-                completed     : Some(self.dma_completed_tx.clone()),
-                ..Default::default()
+            let source_buffer = {
+                let access = self.comms.rdram.read().unwrap();
+                let rdram: &[u32] = access.as_ref().unwrap();
+                let start = (self.dram_address >> 2) as usize;
+                let end   = start + (len >> 2) as usize;
+                if end > rdram.len() {
+                    panic!("read from ${:08X} length {} reads outside of RDRAM", start << 2, len);
+                }
+                rdram[start..end].to_owned()
             };
+
+            self.next_buffer = self.resample_buffer(&source_buffer);
 
             // mark system as playing
             self.buffer_playing = true;
 
-            // Send DMA
-            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
-
             // AI interrupt triggers at the start of dma
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_AI, InterruptUpdateMode::SetInterrupt)).unwrap();
-            
-            // Interrupt cpu to process things
-            self.comms.break_cpu();
         }
     }
 
@@ -162,6 +143,24 @@ impl AudioInterface {
     // tell SDL to stop
     pub fn pause(&self) {
         self.audio_queue.pause();
+    }
+
+    fn resample_buffer(&self, buffer: &[u32]) -> Vec<f32> {
+        // convert the i16's (which are packed as u32's) into f32
+        // TODO maybe we can use output i16 format and let the hardware do the conversion
+        // but we're not processing /that/ much data.
+        let mut queue_buffer = Vec::new();
+        for v in buffer.iter() {
+            let mut left = ((v >> 16) as i16) as f32;
+            left = if left < 0.0 { left / 32768.0 } else { left / 32767.0 };
+            let mut right = ((v & 0xFFFF) as i16) as f32;
+            right = if right < 0.0 { right / 32768.0 } else { right / 32767.0 };
+            queue_buffer.push(left);
+            queue_buffer.push(right);
+        }
+
+        // resample the game audio to fit our output device
+        samplerate::convert(self.sample_rate, self.output_sample_rate, 2, samplerate::ConverterType::SincFastest, &queue_buffer).unwrap()
     }
 }
 
@@ -224,10 +223,16 @@ impl Addressable for AudioInterface {
                             self.transfer_length = Some(len);
                         },
                         None => { // No DMA pending, either queue or start dma
-                            if self.buffer_playing || !self.dma_enable { // buffer playing or dma is disabled, queue dma
-                                self.transfer_length = Some(len);
+                            if self.buffer_playing || !self.dma_enable { // buffer playing or dma is disabled, queue size of later
                                 //println!("new length={:?}", self.transfer_length);
+                                self.transfer_length = Some(len);
+
+                                // break current cpu run to process the buffer
+                                self.comms.break_cpu();
                             } else {
+                                // since the write_u32 call happens inside of a Cpu write, we'll
+                                // queue DMA to process during the next RCP step
+
                                 // no buffer playing, dma enabled, start transfer
                                 let dma_info = DmaInfo {
                                     initiator     : "AI",
@@ -244,7 +249,7 @@ impl Addressable for AudioInterface {
                                 // really means that a DMA is "in progress" and thus so is audio playback
                                 self.buffer_playing = true;
 
-                                // Send DMA
+                                // Queue DMA
                                 self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
 
                                 // AI interrupt triggers at the start of dma
@@ -301,7 +306,7 @@ impl Addressable for AudioInterface {
             // Incoming buffer!
             //println!("got block: {:?}", block);
             assert!(self.next_buffer.len() == 0);
-            self.next_buffer = block.to_owned();
+            self.next_buffer = self.resample_buffer(block);
         } else {
             panic!("should never happen");
         }

@@ -116,7 +116,7 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 256; //2048; // max instruction count per block
+const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
 
 const CACHED_BLOCK_MAP_RDRAM_OFFSET  : usize = 0;
 const CACHED_BLOCK_MAP_PIFROM_OFFSET : usize = CACHED_BLOCK_MAP_RDRAM_OFFSET   + (0x80_0000 >> 2);
@@ -140,7 +140,7 @@ struct CompiledBlock {
 enum CachedBlockStatus {
     Uncompilable,
     NotCached,
-    Cached(CompiledBlock),
+    Cached(Rc<RefCell<CompiledBlock>>),
 }
 
 enum CompileInstructionResult {
@@ -455,6 +455,8 @@ macro_rules! letsbranch {
 }
 
 pub struct Cpu {
+    comms: SystemCommunication,
+
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u64,                     // lookahead PC
     current_instruction_pc: u64, // actual PC of the currently executing instruction
@@ -491,7 +493,7 @@ pub struct Cpu {
     num_steps: u64,
 
     // JIT
-    cached_blocks: HashMap<u64, CompiledBlock>,
+    cached_blocks: HashMap<u64, Rc<RefCell<CompiledBlock>>>,
     next_block_id: u64,
 
     // 8MiB for RDRAM
@@ -540,8 +542,10 @@ pub type Assembler = dynasmrt::Assembler<dynasmrt::x64::X64Relocation>;
 type CpuInstructionBuilder = fn(&mut Cpu, &mut Assembler) -> CompileInstructionResult;
 
 impl Cpu {
-    pub fn new(bus: Rc<RefCell<dyn Addressable>>) -> Cpu {
+    pub fn new(comms: SystemCommunication, bus: Rc<RefCell<dyn Addressable>>) -> Cpu {
         let mut cpu = Cpu {
+            comms: comms,
+
             num_steps: 0,
 
             bus : bus,
@@ -1854,7 +1858,7 @@ impl Cpu {
         }
     }
 
-    fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
+    fn lookup_cached_block<'a>(&'a mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
         if let Some(physical_address) = self.translate_address(virtual_address, false, false)? {
             trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
             //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
@@ -1868,7 +1872,7 @@ impl Cpu {
             match self.cached_block_map[cached_block_map_index] {
                 Some(CachedBlockReference::CachedBlock(block_id)) => {
                     // block must exist (and block starts at the provided address)
-                    let cached_block = self.cached_blocks.remove(&block_id).unwrap();
+                    let cached_block = self.cached_blocks.get(&block_id).unwrap().clone();
                     return Ok(CachedBlockStatus::Cached(cached_block));
                 },
 
@@ -1877,7 +1881,7 @@ impl Cpu {
                         if referenced_block_id == block_id_reference {
                             //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address.physical_address);
                             // block id must exist because this is a CachedBlock
-                            let cached_block = self.cached_blocks.remove(&referenced_block_id).unwrap();
+                            let cached_block = self.cached_blocks.get(&referenced_block_id).unwrap().clone();
                             return Ok(CachedBlockStatus::Cached(cached_block));
                         }
                     }
@@ -1936,28 +1940,23 @@ impl Cpu {
 
             match self.lookup_cached_block(self.next_instruction_pc)? {
                 CachedBlockStatus::NotCached => {
-                    debug!(target: "JIT-BUILD", "[target ${:08X} not found in cache, compiling]", self.next_instruction_pc as u32);
-                    //println!("[block not found, building new block at next_instruction_pc=${:08X}]", self.next_instruction_pc as u32);
+                    debug!(target: "JIT-BUILD", "[pc=${:08X} not found in block cache, compiling]", self.next_instruction_pc as u32);
 
-                    // TODO use RefCell, duh!
-                    // build block and remove from cached_blocks to satisfy the borrow checker
-                    let (compiled_block_id, compiled_block) = self.build_block()?;
+                    // build the block
+                    let compiled_block_ref = self.build_block()?;
+                    let compiled_block = compiled_block_ref.borrow();
 
+                    // execute the block
                     trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
-                    self.num_steps += self.run_block(&compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
-
-                    // reinsert into hash table
-                    self.cached_blocks.insert(compiled_block_id, compiled_block);
+                    self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
+                    let compiled_block = compiled_block.borrow();
                     trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
-                    self.num_steps += self.run_block(&compiled_block, self.next_instruction_pc)?; // start execution at an offset into the block
-
-                    // reinsert into hash table
-                    let compiled_block_id = compiled_block.id;
-                    self.cached_blocks.insert(compiled_block_id, compiled_block);
+                    self.num_steps += self.run_block(&*compiled_block, self.next_instruction_pc)?; // start execution at an offset into the block
                 }
+
                 _ => todo!(),
             }
 
@@ -1982,7 +1981,7 @@ impl Cpu {
     }
 
     // compile a block of code starting at self.next_instruction_pc
-    fn build_block(&mut self) -> Result<(u64, CompiledBlock), InstructionFault> {
+    fn build_block<'a>(&'a mut self) -> Result<Rc<RefCell<CompiledBlock>>, InstructionFault> {
         let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
         let start_address = self.next_instruction_pc;
 
@@ -2218,9 +2217,9 @@ impl Cpu {
                 },
             }
 
-            // TODO post-instruction prologue
+            // post-instruction prologue
             letsgo!(assembler
-                ;   dec DWORD [rsp+s_cycle_count] // TODO do this before the instruction so its easier for instructions to break execution?
+                ;   dec DWORD [rsp+s_cycle_count]
             );
 
             if jit_jump || self.jit_jump_no_delay {
@@ -2269,7 +2268,10 @@ impl Cpu {
                     // test if we need to break out of the block before the branch
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
-                        ;   jg =>dynamic_label                           // otherwise, just take the branch
+                        ;   jle >break_out
+                        ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
+                        ;   cmp BYTE [rax], BYTE 0u8 as _
+                        ;   je =>dynamic_label                           // otherwise, just take the branch
                         ;break_out:
                         ;   mov rax, QWORD branch_target as u64 as _             // PC address we need to jump to
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // put branch target in self.pc
@@ -2281,25 +2283,16 @@ impl Cpu {
                     letsgo!(assembler
                         ;   jmp >epilog                                     // exit the block
                         ;no_branch:
-                        ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _   // also test on the non-branch version
-                        ;   jg >no_break_out                               // on less than or equal to zero, break out
-                        ;   mov rax, QWORD self.next_instruction_pc as u64 as _  // put next instruction address in self.pc
-                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // .
-                    );
-
-                    //TODO call letssetupexcept
-                    letscall!(assembler, Cpu::prefetch_bridge);            // setup next_instruction_pc
-
-                    letsgo!(assembler
-                        ;   jmp >epilog                                    // exit the block
-                        ;no_break_out:
                     );
                 } else {
                     trace!(target: "JIT-BUILD", "** checking normal branch condition:");
 
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _    // break out when run count hits 0 or less
-                        ;   jg >no_break_out
+                        ;   jle >break_out
+                        ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
+                        ;   cmp BYTE [rax], BYTE 0u8 as _
+                        ;   je >no_break_out
                         ;break_out:
                         ;   mov rax, QWORD self.next_instruction_pc as _    // default to fall through
                         ;   dec r_cond                                      // check if r_cond is set
@@ -2324,7 +2317,6 @@ impl Cpu {
             }
         }
 
-        // TODO: so fucking much
         if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
             debug!(target: "JIT-BUILD", "[terminating block compilation after {} instructions]", instruction_index);
         } else if num_nops == MAX_NOPS {
@@ -2341,7 +2333,7 @@ impl Cpu {
         letsgo!(assembler
             ;restore_pc:
         );
-        if (self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+        if (self.next_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
             letsgo!(assembler
                 ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD self.next_instruction_pc as i32 as _
             );
@@ -2376,74 +2368,62 @@ impl Cpu {
             ;   ret
         );
 
-        let executable_buffer = {
-            //let executable_buffer = assembler.finalize().unwrap();
-            //let mut memory_ptr = executable_buffer.make_mut().unwrap();
-            // calculate the offset from the start of the buffer
-            //.let block_start_address = (block_start_offset.0) + (memory_ptr.as_ptr() as *const _ as usize);
-            //.(*memory_ptr)[jump_table_start.0..jump_table_start.0+8].copy_from_slice(&block_start_address.to_le_bytes());
+        // fixup jumps
+        for &(branch_target, dynamic_label) in &jit_fixups {
+            if instruction_start_offsets.contains_key(&(branch_target as u64)) {
+                // get the offset from the start of the block to the target instruction jump
+                let target_instruction_offset = instruction_start_offsets.get(&(branch_target as u64)).unwrap();
+                // update the dynamic label to use that offset
+                let _ = assembler.labels_mut().define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(*target_instruction_offset)).unwrap();
+            } else {
+                // whatever the branch target was supposed to be needs to be loaded into PC and then we jump to the epilog
+                let code_start_offset = assembler.offset();
 
-            // fixup jumps
-            {
-                for &(branch_target, dynamic_label) in &jit_fixups {
-                    if instruction_start_offsets.contains_key(&(branch_target as u64)) {
-                        let target_instruction_offset = instruction_start_offsets.get(&(branch_target as u64)).unwrap();
-                        let labels = assembler.labels_mut();
-                        let _ = labels.define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(*target_instruction_offset)).unwrap();
-                        //target_instruction_offset += memory_ptr.as_ptr() as *const _ as usize;
-
-                        //// write address to fixup offset
-                        //(*memory_ptr)[fixup_offset..fixup_offset+8].copy_from_slice(&target_instruction_offset.to_le_bytes());
-                    } else {
-                        // whatever the branch target was supposed to be needs to be loaded into PC and then we jump to the epilog
-                        let code_start_offset = assembler.offset();
-
-                        trace!(target: "JIT-BUILD", "** creating unknown branch target handler for branch to ${:16X}", branch_target);
-                        if ((branch_target as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-                            letsgo!(assembler
-                                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD branch_target as i32 as _ // sign-extend address
-                            );
-                        } else {
-                            letsgo!(assembler
-                                ;   mov rax, QWORD branch_target as i64 as _
-                                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
-                            );
-                        }
-
-                        // no arguments to prefetch_bridge
-                        // TODO this should actually be skipped if the jump target is already compiled
-                        // otherwise, we're doing an unnecessary read_u32() on every jump
-                        letscall!(assembler, Cpu::prefetch_bridge);
-
-                        letsgo!(assembler
-                            ; jmp <epilog
-                        );
-
-                        // set the dynamic_label to jump here
-                        let labels = assembler.labels_mut();
-                        let _ = labels.define_dynamic(dynamic_label, code_start_offset).unwrap();
-
-                        // and any other jumps that might go to the same address
-                        instruction_start_offsets.insert(branch_target as u64, code_start_offset.0);
-                    }
+                trace!(target: "JIT-BUILD", "** creating unknown branch target handler for branch to ${:16X}", branch_target);
+                if ((branch_target as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+                    letsgo!(assembler
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD branch_target as i32 as _ // sign-extend address
+                    );
+                } else {
+                    letsgo!(assembler
+                        ;   mov rax, QWORD branch_target as i64 as _
+                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
+                    );
                 }
+
+                // no arguments to prefetch_bridge
+                // TODO this should actually be skipped if the jump target is already compiled
+                // otherwise, we're doing an unnecessary read_u32() on every jump
+                letscall!(assembler, Cpu::prefetch_bridge);
+
+                letsgo!(assembler
+                    ; jmp <epilog
+                );
+
+                // set the dynamic_label to jump here
+                let labels = assembler.labels_mut();
+                let _ = labels.define_dynamic(dynamic_label, code_start_offset).unwrap();
+
+                // and any other jumps that might go to the same address
+                instruction_start_offsets.insert(branch_target as u64, code_start_offset.0);
             }
+        }
 
-            //memory_ptr.make_exec().unwrap()
-            assembler.finalize().unwrap()
-        };
+        // finalize the block
+        let executable_buffer = assembler.finalize().unwrap();
 
-        // update the offsets in the jump table to be absolute addresses
+        // with the buffer finalized, we know where it is in memory, we can update the jump table
+        // offsets to be absolute addresses
         for entry in jump_table.as_mut().get_mut().iter_mut() {
             *entry = executable_buffer.ptr(dynasmrt::AssemblyOffset(*entry as usize)) as u64;
         }
 
-        // TODO: convert to CompiledBlock
         let compiled_block = CompiledBlock {
-            id: block_id,
+            id           : block_id,
             start_address: start_address,
-            entry_point: entry_point,
-            code_buffer: executable_buffer,
+            entry_point  : entry_point,
+            code_buffer  : executable_buffer,
+
             // keep the jump_table from being freed, but we never directly access it after this point
             _jump_table: jump_table,
         };
@@ -2451,7 +2431,9 @@ impl Cpu {
         // insert into block cache
         self.cached_block_map[cached_block_map_index] = Some(CachedBlockReference::CachedBlock(block_id));
 
-        Ok((block_id, compiled_block))
+        self.cached_blocks.insert(block_id, Rc::new(RefCell::new(compiled_block)));
+
+        Ok(self.cached_blocks.get(&block_id).unwrap().clone())
     }
 
     // return number of instructions executed
