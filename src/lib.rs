@@ -171,6 +171,7 @@ pub struct SystemCommunication {
     
     // total cpu cycle count
     pub total_cpu_steps: Arc<RelaxedCounter>,
+    pub prefetch_counter: Arc<RelaxedCounter>,
 
     // current render framebuffer
     pub vi_origin: Arc<AtomicU32>,
@@ -208,6 +209,7 @@ impl SystemCommunication {
             hle_command_buffer: hle_command_buffer.map_or(None, |v| Some(Arc::new(v))),
             reset_signal      : Arc::new(AtomicU32::new(0)),
             total_cpu_steps   : Arc::new(RelaxedCounter::new(0)),
+            prefetch_counter  : Arc::new(RelaxedCounter::new(0)),
             vi_origin         : Arc::new(AtomicU32::new(0)),
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
@@ -224,6 +226,18 @@ impl SystemCommunication {
 
     pub fn break_cpu(&mut self) {
         self.break_cpu_cycles.store(true, Ordering::Relaxed);
+    }
+
+    pub fn increment_prefetch_counter(&mut self) {
+        self.prefetch_counter.inc();
+    }
+
+    pub fn get_prefetch_counter(&mut self) -> usize {
+        self.prefetch_counter.get()
+    }
+
+    pub fn reset_prefetch_counter(&mut self) -> usize {
+        self.prefetch_counter.reset()
     }
 }
 

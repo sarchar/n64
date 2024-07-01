@@ -334,7 +334,7 @@ macro_rules! letssetupexcept {
                     // to 0 on delay slot exceptions.  this will fail when the destination of the branch 
                     // has an instruction like MFC1 or MFC2 with when a co-processor exception occurs in
                     // the delay slot of that branch.
-                    let next_cop_index = if !$self.is_delay_slot && ($self.next_instruction >> 29) == 0b010 { ($self.next_instruction >> 26) & 0b011 } else { 0 };
+                    let next_cop_index = if !$self.is_delay_slot && ($self.next_instruction.unwrap() >> 29) == 0b010 { ($self.next_instruction.unwrap() >> 26) & 0b011 } else { 0 };
                     letsgo!($ops
                         ;   mov DWORD [r_cpu + offset_of!(Cpu, next_cop_index) as i32], DWORD next_cop_index as _
                     );
@@ -459,14 +459,14 @@ pub struct Cpu {
     comms: SystemCommunication,
 
     pub bus: Rc<RefCell<dyn Addressable>>,
-    pc: u64,                     // lookahead PC
-    current_instruction_pc: u64, // actual PC of the currently executing instruction
-                                 // only valid inside step()
-    next_instruction: u32,       // emulates delay slot (prefetch, next instruction)
-    next_instruction_pc: u64,    // for printing correct delay slot addresses
-    is_delay_slot: bool,         // true if the currently executing instruction is in a delay slot
-    next_is_delay_slot: bool,    // set to true on branching instructions
-    next_cop_index: u32,         // set to the cop index of the next instruction in the pipeline
+    pc: u64,                       // lookahead PC
+    current_instruction_pc: u64,   // actual PC of the currently executing instruction
+                                   // only valid inside step()
+    next_instruction: Option<u32>, // emulates delay slot (prefetch, next instruction), but can be None during JIT runs
+    next_instruction_pc: u64,      // for printing correct delay slot addresses
+    is_delay_slot: bool,           // true if the currently executing instruction is in a delay slot
+    next_is_delay_slot: bool,      // set to true on branching instructions
+    next_cop_index: u32,           // set to the cop index of the next instruction in the pipeline
 
     gpr: [u64; 32],
     lo: u64,
@@ -552,7 +552,7 @@ impl Cpu {
             bus : bus,
             pc  : 0,
             current_instruction_pc: 0,
-            next_instruction: 0,
+            next_instruction: None,
             next_instruction_pc: 0xFFFF_FFFF_FFFF_FFFF,
             is_delay_slot: false,
             next_is_delay_slot: false,
@@ -710,7 +710,7 @@ impl Cpu {
         &self.current_instruction_pc
     }
 
-    pub fn next_instruction(&self) -> &u32 {
+    pub fn next_instruction(&self) -> &Option<u32> {
         &self.next_instruction
     }
 
@@ -1070,23 +1070,29 @@ impl Cpu {
     // prefetch the next instruction
     #[inline(always)]
     fn prefetch(&mut self) -> Result<(), InstructionFault> {
-        self.next_instruction = self.read_u32(self.pc as usize)?; 
+        self.next_instruction = Some(self.read_u32(self.pc as usize)?); 
         self.next_instruction_pc = self.pc;
         self.pc += 4;
+
+        self.comms.increment_prefetch_counter();
 
         Ok(())
     }
 
     unsafe extern "win64" fn prefetch_bridge(cpu: *mut Self) -> u64 {
         let cpu = { &mut *cpu };
+        cpu.next_instruction = None;
+        cpu.next_instruction_pc = cpu.pc;
+        cpu.pc += 4;
+        0
         //println!("DBG prefetching with pc=${:08X}", cpu.pc as u32);
-        match cpu.prefetch() {
-            Ok(_) => 0,
-            Err(err) => {
-                // TODO handle rrors
-                todo!("prefetch error = {:?} on address ${:16X}", err, cpu.pc as u64);
-            }
-        }
+        //match cpu.prefetch() {
+        //    Ok(_) => 0,
+        //    Err(err) => {
+        //        // TODO handle rrors
+        //        todo!("prefetch error = {:?} on address ${:16X}", err, cpu.pc as u64);
+        //    }
+        //}
     }
 
     fn exception(&mut self, exception_code: u64, use_special: bool) -> Result<(), InstructionFault> {
@@ -1916,12 +1922,18 @@ impl Cpu {
             // if the next step() instruction was a jump as well we should continue executing until it's not 
             // this happens if there's a jump within a jump, where we have exited the block and left next_is_delay_slot true
             if self.next_is_delay_slot {
+                if self.next_instruction.is_none() {
+                    self.next_instruction = Some(self.read_u32((self.next_instruction_pc) as usize).unwrap());
+                    self.comms.increment_prefetch_counter();
+                }
                 self.step()?;
                 continue;
             }
 
             // if the PC address is unaligned, just run Cpu::step() for the exception handler
-            if (self.next_instruction_pc & 0x03) != 0 {
+            if (self.pc & 0x03) != 0 {
+                // it doesn't matter that self.next_instruction is likely None right now, as step()
+                // will see the address exception instead of trying to execute next_instruction
                 self.pc -= 4; // the JIT code is one instruction ahead due to the call to prefetch().
                 self.step()?;
                 continue;
@@ -1963,7 +1975,8 @@ impl Cpu {
                 },
             }
 
-            // PC and next_instruction_pc have changed, update current_instruction_pc
+            // PC and next_instruction_pc have changed, update current_instruction_pc for code that
+            // relies on these values outside of this module (ie, debugger)
             self.current_instruction_pc = self.next_instruction_pc;
             self.is_delay_slot = self.next_is_delay_slot;
 
@@ -1989,6 +2002,12 @@ impl Cpu {
         let start_address = self.next_instruction_pc;
 
         let entry_point = assembler.offset();
+
+        // make sure next_instruction is valid
+        if self.next_instruction.is_none() {
+            self.next_instruction = Some(self.read_u32((self.next_instruction_pc) as usize).unwrap());
+            self.comms.increment_prefetch_counter();
+        }
 
         // set global block start address to the correct pc
         self.jit_block_start_pc = self.next_instruction_pc;
@@ -2066,7 +2085,7 @@ impl Cpu {
         'build_loop: while self.next_is_delay_slot || (!done_compiling && instruction_index < JIT_BLOCK_MAX_INSTRUCTION_COUNT) {
             // tally up non-delay slot NOPs and break if we get too many (most of the time this
             // would be a non-code region)
-            num_nops = if !self.next_is_delay_slot && self.next_instruction == 0 { num_nops + 1 } else { 0 };
+            num_nops = if !self.next_is_delay_slot && self.next_instruction.unwrap() == 0 { num_nops + 1 } else { 0 };
             if num_nops == MAX_NOPS {
                 // if there were other nops, next_is_delay_slot can't be set
                 assert!(!self.next_is_delay_slot);
@@ -2077,10 +2096,10 @@ impl Cpu {
             // just need to make an address exception block
 
             // setup self.inst
-            self.decode_instruction(self.next_instruction);
+            self.decode_instruction(self.next_instruction.unwrap());
 
             // next instruction prefetch TODO: abstract out the match block from step() instead of unwrap()
-            self.next_instruction = self.read_u32(self.pc as usize).unwrap();
+            self.next_instruction = Some(self.read_u32(self.pc as usize).unwrap());
 
             // update and increment PC (perhaps this should also be part of next instruction prefetch)
             self.current_instruction_pc = self.next_instruction_pc;
@@ -2203,11 +2222,17 @@ impl Cpu {
                         // current_instruction_pc needs to be replayed
                         ;   mov rax, QWORD self.current_instruction_pc as u64 as _
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32], rax
-                        // the current opcode is self.inst.v, place back in next_instruction
-                        ;   mov DWORD [r_cpu + offset_of!(Cpu, next_instruction) as i32], DWORD self.inst.v as u32 as _
+                        // the current opcode is self.inst.v, place back in next_instruction via set_next_instruction
+                        ;   mov edx, DWORD self.inst.v as u32 as _
                         // the current delay slot state back into next
                         ;   mov BYTE [r_cpu + offset_of!(Cpu, next_is_delay_slot) as i32], BYTE self.is_delay_slot as u8 as _
                     );
+
+                    // need to set next_instruction to current opcode
+                    unsafe extern "win64" fn set_next_instruction(cpu: *mut Cpu, inst: u32) {
+                        (*cpu).next_instruction = Some(inst);
+                    }
+                    letscall!(assembler, set_next_instruction);
 
                     // exit the block
                     letsgo!(assembler
@@ -2241,8 +2266,6 @@ impl Cpu {
                 letssetupexcept!(self, assembler, false);
 
                 // no arguments to prefetch_bridge
-                // TODO this should actually be skipped if the jump target is already compiled
-                // otherwise, we're doing an unnecessary read_u32() on every jump
                 letscall!(assembler, Cpu::prefetch_bridge);
 
                 // jumps have to leave the block, but continue compiling
@@ -2280,7 +2303,6 @@ impl Cpu {
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // put branch target in self.pc
                     );
 
-                    //TODO call letssetupexcept (actually jump below to optimize code gen)
                     letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
 
                     letsgo!(assembler
@@ -2305,7 +2327,6 @@ impl Cpu {
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax // store branch dest in self.pc
                     );
 
-                    //TODO call letssetupexcept
                     letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
 
                     letsgo!(assembler
@@ -2346,7 +2367,7 @@ impl Cpu {
                 ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], v_tmp
             );
         }
-        letscall!(assembler, Cpu::prefetch_bridge);
+        letscall!(assembler, Cpu::prefetch_bridge); // setup next_instruction_pc
 
         // Restore the stack in reverse order and set return value in rax
         letsgo!(assembler
@@ -2519,10 +2540,10 @@ impl Cpu {
         }
 
         // current instruction decode
-        self.decode_instruction(self.next_instruction);
+        self.decode_instruction(self.next_instruction.unwrap());
 
         // next instruction prefetch. we need to catch TLB misses
-        self.next_instruction = match self.read_u32(self.pc as usize) {
+        self.next_instruction = Some(match self.read_u32(self.pc as usize) {
             // most common situation
             Ok(x) => x,
 
@@ -2601,10 +2622,10 @@ impl Cpu {
             }
 
             Err(x) => { return Err(x); },
-        };
+        });
 
         // determine next cop index based on the opcode 0b010_0xx are the copN instructions
-        self.next_cop_index = if (self.next_instruction >> 29) == 0b010 { (self.next_instruction >> 26) & 0b011 } else { 0 };
+        self.next_cop_index = if (self.next_instruction.unwrap() >> 29) == 0b010 { (self.next_instruction.unwrap() >> 26) & 0b011 } else { 0 };
 
         // update and increment PC
         // current_instruction_pc is set twice, once at the beginning in case an external factor
@@ -2657,7 +2678,7 @@ impl Cpu {
                 // on error, restore the previous instruction since it didn't complete
                 self.pc -= 4;
                 self.next_instruction_pc = self.current_instruction_pc;
-                self.next_instruction = self.inst.v;
+                self.next_instruction = Some(self.inst.v);
                 result
             },
         };

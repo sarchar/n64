@@ -255,6 +255,8 @@ pub struct Game {
 
     last_cpu_cycle_time: Instant,
     last_cpu_cycle_count: usize,
+    last_prefetch_count: usize,
+    last_prefetch_reset_time: Instant,
 
     last_interrupt_time: Instant,
 }
@@ -891,6 +893,8 @@ impl App for Game {
 
             last_cpu_cycle_time: Instant::now(),
             last_cpu_cycle_count: 0,
+            last_prefetch_count: 0,
+            last_prefetch_reset_time: Instant::now(),
 
             last_interrupt_time: Instant::now(),
         };
@@ -1319,11 +1323,16 @@ impl App for Game {
                       ui.text(format!("GAME FPS: {:.2}", self.game_fps));
                       ui.text(format!("VIEW    : {:?} (Ctrl+V)", self.view_mode));
                       ui.text(format!("CPU     : {:.4} MIPS", (((total_cpu_steps - self.last_cpu_cycle_count) as f64) / duration) / 1_000_000.0));
+                      ui.text(format!("PFCNT   : {}/s", self.last_prefetch_count));
                   }
             );
             if duration >= 0.2 { // arbitrary time for resetting the freq timer
-                self.last_cpu_cycle_time = std::time::Instant::now();
+                self.last_cpu_cycle_time = Instant::now();
                 self.last_cpu_cycle_count = total_cpu_steps;
+            }
+            if self.last_prefetch_reset_time.elapsed().as_secs_f64() >= 1.0 {
+                self.last_prefetch_count = self.comms.reset_prefetch_counter();
+                self.last_prefetch_reset_time = Instant::now();
             }
         }
 

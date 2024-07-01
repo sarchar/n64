@@ -148,7 +148,7 @@ impl Debugger {
                 let cpu = self.system.cpu.borrow();
                 let next_instruction_pc = *cpu.next_instruction_pc();
                 if last_printed_pc != next_instruction_pc {
-                    let inst = cpu::Cpu::disassemble(next_instruction_pc, *cpu.next_instruction(), true);
+                    let inst = cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true);
                     print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
                     if *cpu.next_is_delay_slot() {
                         print!(" (delay slot)");
