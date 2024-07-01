@@ -474,6 +474,7 @@ pub struct Cpu {
 
     cp0gpr: [u64; 32],
     cp0gpr_latch: u64,
+    cp0gpr_random_delay: i64,
     tlb: [TlbEntry; 32],
     cp2gpr_latch: u64,
 
@@ -513,8 +514,10 @@ pub struct Cpu {
     jit_executing: bool, // true when inside run_block()
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
     jit_run_limit: u64, // starting run limit for each block that's run
-    cp0_count_tracker: u64, // used to calculating Cop0_Count increment in JIT
+    jit_block_uses_hilo: bool, // true during compilation if an instruction that modifies HI/LO is seen
+    cp0_count_tracker: u64, // used to calculate Cop0_Count increment in JIT
     cp0_compare_distance: u32, // used to determine when the timer interrupt occurs in JIT
+    cp0_random_tracker: u64, // used to calculate Cop0_Random decrement in JIT
 }
 
 // It may be worth mentioning that cpu exceptions are not InstructionFaults 
@@ -564,6 +567,7 @@ impl Cpu {
 
             cp0gpr: [0u64; 32],
             cp0gpr_latch: 0,
+            cp0gpr_random_delay: 0,
             tlb: [TlbEntry::default(); 32],
             cp2gpr_latch: 0,
             kernel_64bit_addressing: false,
@@ -655,8 +659,10 @@ impl Cpu {
             jit_executing: false,
             jit_other_exception: false,
             jit_run_limit: 0,
+            jit_block_uses_hilo: false,
             cp0_count_tracker: 0,
             cp0_compare_distance: 0,
+            cp0_random_tracker: 0,
         };
         
         let _ = cpu.reset(false);
@@ -675,6 +681,7 @@ impl Cpu {
         // TODO see section 6.4.4 Cold Reset for a complete list of initial register values
         self.cp0gpr[Cop0_Wired] = 0;
         self.cp0gpr[Cop0_Random] = 0x1F; // set to the upper bound (31) on reset
+        self.cp0gpr_random_delay = 0;    
         self.cp0gpr[Cop0_PRId] = 0x0B22;
         self.cp0gpr[Cop0_Config] = 0x7006E463; // EC=1:15, EP=0, BE=1 (big endian), CU=0 (RFU?), K0=3 (kseg0 cache enabled)
         self.cp0gpr[Cop0_Status] = (1 << 22) | (1 << 2) | if is_soft { 1 << 20 } else { 0 }; // BEV=1, ERL=1, SR=0 (SR will be 1 on soft reset), IE=0
@@ -1939,8 +1946,9 @@ impl Cpu {
                 continue;
             }
 
-            // Cop0_Count tracker start value
+            // Cop0_Count and Cop0_Random tracker start value
             self.cp0_count_tracker = self.num_steps & !1;
+            self.cp0_random_tracker = self.num_steps;
 
             // determine how many cycles until Cop0_Compare would be hit, a value of 0 would mean
             // means there's actually 0x1_0000_0000 cycles until the exception triggers again, but
@@ -1991,6 +1999,9 @@ impl Cpu {
                     let _ = self.timer_interrupt();
                 }
             }
+
+            // reuse update_cop0_random despite its unsafeness
+            let _ = unsafe { Cpu::update_cop0_random(self, 0, false) };
         }
 
         Ok(self.num_steps - steps_start)
@@ -2049,6 +2060,7 @@ impl Cpu {
         self.jit_jump = false;
         self.jit_jump_no_delay = false;
         self.jit_conditional_branch = None;
+        self.jit_block_uses_hilo = false;
 
         let block_id = self.next_block_id;
         self.next_block_id += 1;
@@ -2208,22 +2220,21 @@ impl Cpu {
                     } else if jit_conditional_branch.is_some() {
                         let (branch_offset, is_branch_likely) = jit_conditional_branch.unwrap();
 
-                        // TODO support likely branch
                         if is_branch_likely { 
                             letsgo!(assembler
                                 // this no_branch label is incorrect; if the branch isn't taken, this
                                 // "uncompilable" instruction isn't even executed, so we can skip it
                                 // entirely
                                 ;no_branch:
-                                ;   mov rax, QWORD 0xFEDD_B0B0_0000_9999u64 as _
                                 ;   int3
+                                ;   mov rax, QWORD 0xFEDD_B0B0_0000_9999u64 as _
                             );
                         }
 
                         // this goes into PC
                         let branch_target = (self.current_instruction_pc as i64).wrapping_add(branch_offset);
 
-                        // TODO r_cond determines what we set PC to
+                        // r_cond determines what we set PC to
                         letsgo!(assembler
                             ;   dec r_cond
                             ;   jz >okay
@@ -2240,20 +2251,23 @@ impl Cpu {
                         panic!("unhandled Cant situation");
                     }
 
+                    // the current instruction needs to be replayed in step()
                     letsgo!(assembler
-                        // current_instruction_pc needs to be replayed
+                        // current_instruction_pc goes back into next_instruction_pc
                         ;   mov rax, QWORD self.current_instruction_pc as u64 as _
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32], rax
                         // the current opcode is self.inst.v, place back in next_instruction via set_next_instruction
+                        // rdx is the second argument
                         ;   mov edx, DWORD self.inst.v as u32 as _
-                        // the current delay slot state back into next
+                        // the current delay slot state back into next_is_delay_slot
                         ;   mov BYTE [r_cpu + offset_of!(Cpu, next_is_delay_slot) as i32], BYTE self.is_delay_slot as u8 as _
                     );
 
-                    // need to set next_instruction to current opcode
+                    // set next_instruction
                     unsafe extern "win64" fn set_next_instruction(cpu: *mut Cpu, inst: u32) {
                         (*cpu).next_instruction = Some(inst);
                     }
+
                     letscall!(assembler, set_next_instruction);
 
                     // exit the block
@@ -2273,10 +2287,11 @@ impl Cpu {
             );
 
             if jit_jump || self.jit_jump_no_delay {
-                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // TODO delay slot also a branch
-                self.jit_jump_no_delay = false;
-
+                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // will never happen (CompileInstructionResult::Cant will occur
+                                                                                    // with a jump in the delay slot)
                 trace!(target: "JIT-BUILD", "** performing jump");
+
+                self.jit_jump_no_delay = false;
 
                 // move jump target value into self.pc, call self.prefetch and gtfo
                 letsgo!(assembler
@@ -2391,21 +2406,27 @@ impl Cpu {
         }
         letscall!(assembler, Cpu::prefetch_bridge); // setup next_instruction_pc
 
-        // Restore the stack in reverse order and set return value in rax
         letsgo!(assembler
             ;epilog:
+        );
+
+        // Save HI/LO if they were used
+        if self.jit_block_uses_hilo {
+            letsgo!(assembler
                 // save self.lo
-                // TODO: we could theoretically omit saving hi/lo if there were no
-                // instructions that modified them in this block
-            ;   mov v_tmp, QWORD [rsp+s_lo]
-            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                ;   mov v_tmp, QWORD [rsp+s_lo]
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
                 // save self.hi
-            ;   mov v_tmp, QWORD [rsp+s_hi]
-            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
-                // cycle count to return value
-            ;   mov v_tmp_32, DWORD [rsp+s_cycle_count]
-            ;   movsxd rax, v_tmp_32 // return value
-                // restore stack
+                ;   mov v_tmp, QWORD [rsp+s_hi]
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
+            );
+        }
+
+        // Restore the stack in reverse order and set return value in rax
+        letsgo!(assembler
+            // cycle count to return value
+            ;   mov eax, DWORD [rsp+s_cycle_count]
+            // restore stack
             ;   add rsp, BYTE 0x28 // must match the sub rsp in the prologue
             ;   pop r_cond_64
             ;   pop r_cpu
@@ -2484,22 +2505,26 @@ impl Cpu {
     // return number of instructions executed
     fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> Result<u64, InstructionFault> {
         // place &self into rax
-        let call_block: extern "win64" fn(u32, u64) -> i64 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        let call_block: extern "win64" fn(u32, u64) -> i32 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
 
         // find the nth instruction in the block, which is the offset divided by 4
         let instruction_index = (execution_address - compiled_block.start_address) >> 2;
 
         self.jit_executing = true;
-        let res = match call_block(self.jit_run_limit as u32, instruction_index) {
-            // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
-            // jit_run_limit can change during the course of the run (when we need to reduce the
-            // length of the run due to Compare value changes)
-            i if i >= -2147483648 => Ok((self.jit_run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
+        // blocks can run beyond their run limit so the return value of call_block could be negative
+        let res = (self.jit_run_limit as i64) - (call_block(self.jit_run_limit as u32, instruction_index) as i64);
 
-            i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
-                todo!("execution error code: {}", i as u32);
-            },
-        };
+        // TODO maybe, return error codes here
+        //let res = match call_block(self.jit_run_limit as u32, instruction_index) {
+        //    // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
+        //    // jit_run_limit can change during the course of the run (when we need to reduce the
+        //    // length of the run due to Compare value changes)
+        //    i if i >= -2147483648 => Ok((self.jit_run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
+
+        //    i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
+        //        todo!("execution error code: {}", i as u32);
+        //    },
+        //};
 
         self.jit_executing = false;
 
@@ -2507,7 +2532,7 @@ impl Cpu {
         // if self.jit_other_exception { ... // if an exception occurred that caused the block to exit... 
         self.jit_other_exception = false;
 
-        res
+        Ok(res as u64)
     }
 
     #[inline]
@@ -2537,17 +2562,16 @@ impl Cpu {
             let _ = self.timer_interrupt();
         }
 
-        // decrement Random every cycle
-        // when Wired bit 5 is set, Random runs 0..63 with no wired limit
-        self.cp0gpr[Cop0_Random] = if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 || ((self.cp0gpr[Cop0_Random] ^ self.cp0gpr[Cop0_Wired]) & 0x1F) != 0 {
-            (self.cp0gpr[Cop0_Random] & 0x3F).wrapping_sub(1) & 0x3F
-        } else {
-            if (self.cp0gpr[Cop0_Wired] & 0x20) != 0 {
-                0x3F
+        // decrement Random every instruction, leaving bit 5 alone
+        // mtc0 does have a delay before the register is is latched though
+        self.cp0gpr_random_delay -= 1;
+        if self.cp0gpr_random_delay <= 0 {
+            if self.cp0gpr[Cop0_Random] == self.cp0gpr[Cop0_Wired] {
+                self.cp0gpr[Cop0_Random] = 31;
             } else {
-                0x1F
+                self.cp0gpr[Cop0_Random] = self.cp0gpr[Cop0_Random].wrapping_sub(1) & 0x3F;
             }
-        };
+        }
 
         // For address and TLB exceptions, the current_instruction_pc needs to point to
         // the address being fetched. This lets Cop0_EPC be set to the correct PC
@@ -2980,14 +3004,15 @@ impl Cpu {
             },
 
             Cop0_Wired => {
-                // Cop0_Random is set to the upper bound when Cop0_Wired is written
-                self.cp0gpr[Cop0_Random] = 0x1F | (value & 0x20);
+                // Cop0_Random is set to the upper bound of 31 when Cop0_Wired is written
+                self.cp0gpr[Cop0_Random] = 0x1F;
+                self.cp0gpr_random_delay = 3;
                 value & 0x3F
             },
 
             Cop0_Random => {
-                // only bit 5 is writeable
-                (self.cp0gpr[Cop0_Random] & 0x1F) | (value & 0x20)
+                // read-only register, return the current contents 
+                self.cp0gpr[Cop0_Random] & 0x3F
             },
 
             Cop0_Config => {
@@ -3402,6 +3427,8 @@ impl Cpu {
                         self.cp0gpr_latch
                     },
 
+                    //Cop0_Random => self.cp0gpr[Cop0_Random] | self.cp0gpr_random_bit5,
+
                     _ => self.cp0gpr[self.inst.rd],
                 } as i32) as u64;
             },
@@ -3411,6 +3438,8 @@ impl Cpu {
                     7 | 21 | 22 | 23 | 24 | 25 | 31 => {
                         self.cp0gpr_latch
                     },
+
+                    //Cop0_Random => self.cp0gpr[Cop0_Random] | self.cp0gpr_random_bit5,
 
                     _ => self.cp0gpr[self.inst.rd],
                 };
@@ -3435,11 +3464,6 @@ impl Cpu {
                         }
                     }
                 }
-
-                // TODO debugging crash in LoZ
-                //.if self.inst.rd == Cop0_EPC {
-                //.    println!("changing EPC To ${:08X} at pc=${:08X} (exception)", self.cp0gpr[self.inst.rd], self.current_instruction_pc);
-                //.}
             },
 
             0b00_101 => { // DMTC
@@ -3593,15 +3617,24 @@ impl Cpu {
                             );
                         },
 
+                        Cop0_Random => {
+                            // we need to update Cop0_Random
+                            letsgo!(assembler
+                                ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                                ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                            );
+
+                            // return value is current Random value
+                            letscall!(assembler, Cpu::update_cop0_random);
+
+                            letsgo!(assembler
+                                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
+                            );
+                        },
+
                         _ => {
                             letsgo!(assembler
                                 ;   mov v_tmp_32, DWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
-                                // TODO debugging LoZ crash
-                                // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
-                                // ;   jne >fjffj
-                                // ;   int3
-                                // ;   mov rax, DWORD 0x1234_1234 as _
-                                // ;fjffj:
                                 ;   movsxd v_tmp2, v_tmp_32
                                 ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp2
                             );
@@ -3634,6 +3667,20 @@ impl Cpu {
                             );
                         },
 
+                        Cop0_Random => {
+                            // we need to update Cop0_Random before reads
+                            letsgo!(assembler
+                                ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                                ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                            );
+
+                            letscall!(assembler, Cpu::update_cop0_random);
+
+                            letsgo!(assembler
+                                ;   mov rax, QWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
+                            );
+                        },
+
                         _ => {
                             letsgo!(assembler
                                 ;   mov rax, QWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
@@ -3659,8 +3706,6 @@ impl Cpu {
                     // And both cases may affect how many cycles can be run in the rest of this block
                     Cop0_Count => {
                         letsgo!(assembler
-                            //;   int3
-                            //;   mov edx, DWORD 2 as _
                             // cycle count in rdx
                             ;   mov edx, DWORD [rsp+s_cycle_count]
                             // value in r8
@@ -3754,6 +3799,29 @@ impl Cpu {
                         );
                     },
 
+                    Cop0_Random | Cop0_Wired => {
+                        // we need to update Cop0_Random when these registers change, since the
+                        // starting value will change and so will the cp0_random_tracker value
+                        // 'true' in dl, compute_num_steps
+                        letsgo!(assembler
+                            ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                            ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                        );
+
+                        letscall!(assembler, Cpu::update_cop0_random);
+
+                        letssetupexcept!(self, assembler, false);
+
+                        // opcode in arg 2
+                        letsgo!(assembler
+                            ;   mov edx, DWORD self.inst.v as _
+                        );
+
+                        // do the write
+                        letscall!(assembler, Cpu::inst_cop0_bridge);
+                        letscheck!(assembler);
+                    },
+
                     _ => {
                         // setup exception values
                         letssetupexcept!(self, assembler, false);
@@ -3779,9 +3847,9 @@ impl Cpu {
                          self.inst.rd, self.inst.rt);
 
                 match self.inst.rd {
-                    Cop0_Count => {
-                        panic!();
-                    },
+                    Cop0_Count => todo!(),
+
+                    Cop0_Random | Cop0_Wired => todo!(),
 
                     _ => {
                         // setup exception values
@@ -3953,6 +4021,60 @@ impl Cpu {
         cpu.cp0_compare_distance = cpu.cp0_compare_distance.saturating_sub(cp0_count_tracker_delta as u32);
         // return the computed Count value in rax, sign-extended
         (cpu.cp0gpr[Cop0_Count] as i32) as u64
+    }
+
+    // Similar to Cop0_Count, Random has not been updated within the currently executing block
+    #[inline(always)]
+    unsafe extern "win64" fn update_cop0_random(cpu: *mut Cpu, cycles_remaining: i32, compute_num_steps: bool) -> u64 {
+        let cpu = &mut *cpu;
+        // compute the current step number
+        let cur_steps = if !compute_num_steps { cpu.num_steps } else { cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64 };
+        // Cop0_Random decrements at 1 per instruction, but wraps between 31 and Wired
+        let mut cp0_random_decrement = cur_steps - cpu.cp0_random_tracker;
+        if cpu.cp0gpr_random_delay > 0 { 
+            if (cp0_random_decrement as i64) < cpu.cp0gpr_random_delay {
+                cpu.cp0gpr_random_delay -= cp0_random_decrement as i64;
+                cp0_random_decrement = 0;
+            } else {
+                cp0_random_decrement -= cpu.cp0gpr_random_delay as u64;
+                cpu.cp0gpr_random_delay = 0;
+                // need to perform one decrement on the cycle that cp0gpr_random_delay becomes 0
+                cp0_random_decrement += 1;
+            }
+        }
+
+        // size of the Random/Wired cycle
+        let cp0_random_distance = if cpu.cp0gpr[Cop0_Wired] <= 31 {
+            32 - cpu.cp0gpr[Cop0_Wired]
+        } else {
+            32 + (64 - cpu.cp0gpr[Cop0_Wired])
+        };
+
+        // remove all full random cycles
+        cp0_random_decrement = cp0_random_decrement % cp0_random_distance;
+
+        // calculate the # steps until we would need to reset Random
+        let cp0_random_remaining = if cpu.cp0gpr[Cop0_Random] < cpu.cp0gpr[Cop0_Wired] {
+            // Random has to go to 0, and then from 63 down to wired, plus 1 cycle for reset
+            cpu.cp0gpr[Cop0_Random] + 1 + (63 - cpu.cp0gpr[Cop0_Wired])
+        } else {
+            // Random just has to drop to Wired, plus 1 cycle for reset
+            cpu.cp0gpr[Cop0_Random] - cpu.cp0gpr[Cop0_Wired]
+        };
+
+        // will the remaining decrement be enough to reset?
+        if cp0_random_decrement >= (cp0_random_remaining + 1) {
+            // reset it
+            cpu.cp0gpr[Cop0_Random] = 31;
+            cp0_random_decrement -= cp0_random_remaining + 1; // 1 cycle used for reset
+        }
+
+        // update cp0_random_tracker jic this function is called repeatedly
+        cpu.cp0_random_tracker = cur_steps;
+
+        // now we just need to subtract cp0_random_decrement from Random with underflow
+        cpu.cp0gpr[Cop0_Random] = cpu.cp0gpr[Cop0_Random].wrapping_sub(cp0_random_decrement) & 0x3F;
+        cpu.cp0gpr[Cop0_Random]
     }
 
     fn inst_cop2(&mut self) -> Result<(), InstructionFault> {
@@ -6503,6 +6625,8 @@ impl Cpu {
             ;   mov QWORD [rsp + s_hi], rdx
         );
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -6548,6 +6672,8 @@ impl Cpu {
             ;   mov QWORD [rsp + s_lo], rax
             ;   mov QWORD [rsp + s_hi], rdx
         );
+
+        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6606,6 +6732,8 @@ impl Cpu {
             ;   mov QWORD [rsp + s_hi], v_tmp // .
         );
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -6660,6 +6788,8 @@ impl Cpu {
             ;   mov QWORD [rsp + s_hi], v_tmp // .
         );
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -6697,6 +6827,8 @@ impl Cpu {
             );
         }
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -6733,6 +6865,8 @@ impl Cpu {
                 ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits from rdx
             );
         }
+
+        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7251,6 +7385,8 @@ impl Cpu {
             );
         }
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -7272,6 +7408,8 @@ impl Cpu {
                 ;   mov QWORD [rsp + s_lo], v_tmp
             );
         }
+
+        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7316,6 +7454,8 @@ impl Cpu {
             );
         }
 
+        self.jit_block_uses_hilo = true;
+
         CompileInstructionResult::Continue
     }
 
@@ -7355,6 +7495,8 @@ impl Cpu {
                 ;   mov QWORD [rsp + s_hi], v_tmp    // .
             );
         }
+
+        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
