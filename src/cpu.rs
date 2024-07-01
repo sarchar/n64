@@ -2003,10 +2003,29 @@ impl Cpu {
 
         let entry_point = assembler.offset();
 
+        // get a copy of the rdram with instructions we're going to build
+        let physical_address = self.translate_address(start_address, false, false)?.unwrap().physical_address;
+        let source_buffer = if physical_address < 0x80_0000 {
+            let access = self.comms.rdram.read().unwrap();
+            let rdram: &[u32] = access.as_ref().unwrap();
+            let start = (physical_address >> 2) as usize;
+            let end   = start + JIT_BLOCK_MAX_INSTRUCTION_COUNT;
+            if end > rdram.len() {
+                panic!("read from ${:08X} length {} reads outside of RDRAM", start << 2, JIT_BLOCK_MAX_INSTRUCTION_COUNT);
+            }
+            Some(rdram[start..end].to_owned())
+        } else {
+            None
+        };
+
         // make sure next_instruction is valid
         if self.next_instruction.is_none() {
-            self.next_instruction = Some(self.read_u32((self.next_instruction_pc) as usize).unwrap());
-            self.comms.increment_prefetch_counter();
+            self.next_instruction = Some(if source_buffer.is_some() {
+                source_buffer.as_ref().unwrap()[0]
+            } else { 
+                self.comms.increment_prefetch_counter();
+                self.read_u32((self.next_instruction_pc) as usize).unwrap()
+            });
         }
 
         // set global block start address to the correct pc
@@ -2014,8 +2033,7 @@ impl Cpu {
 
         // determine the start index into the cached block map
         // the physical address and index must be valid since we're in build_block()
-        let physical_address = self.translate_address(start_address, false, false)?.unwrap();
-        let cached_block_map_index = self.get_cached_block_map_index(physical_address.physical_address).unwrap();
+        let cached_block_map_index = self.get_cached_block_map_index(physical_address).unwrap();
 
         // must first invalidate any block that might be referenced by an AddressReference at this location
         if let Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) = self.cached_block_map[cached_block_map_index] {
@@ -2098,8 +2116,12 @@ impl Cpu {
             // setup self.inst
             self.decode_instruction(self.next_instruction.unwrap());
 
-            // next instruction prefetch TODO: abstract out the match block from step() instead of unwrap()
-            self.next_instruction = Some(self.read_u32(self.pc as usize).unwrap());
+            // next instruction prefetch
+            self.next_instruction = Some(if source_buffer.is_some() && (instruction_index + 1) < source_buffer.as_ref().unwrap().len() {
+                source_buffer.as_ref().unwrap()[instruction_index + 1]
+            } else { 
+                self.read_u32((self.pc) as usize).unwrap()
+            });
 
             // update and increment PC (perhaps this should also be part of next instruction prefetch)
             self.current_instruction_pc = self.next_instruction_pc;
