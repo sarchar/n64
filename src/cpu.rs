@@ -191,15 +191,13 @@ macro_rules! letsgo {
 
 pub(crate) use letsgo;
 
-// stack storage offsets, currently 0x28 bytes
+// stack storage offsets, currently 0x18 bytes
 // the trampoline uses call to jump into JIT code, so rip is sitting at the stack pointer, thus all these numbers have 8 added 
 const s_jump_target: i32 = 0x00+8;  // pc jump target for jumps (64-bit)
 const s_cycle_count: i32 = 0x08+8;  // number of r4300 instructions executed (32-bit)
-const _s_unused    : i32 = 0x0C+8;  // unused space (32-bit)
-const s_lo         : i32 = 0x10+8;  // self.hi (64-bit)
-const s_hi         : i32 = 0x18+8;  // self.lo (64-bit)
-const s_tmp0       : i32 = 0x20+8;  // temp storage (64-bit)
-const _s_next      : i32 = 0x28+8;  // next stack offset (dont forget to increase stack space)
+const _s_unused    : i32 = 0x0C+8;  // unused space/padding (32-bit)
+const s_tmp0       : i32 = 0x10+8;  // temp storage (64-bit)
+const _s_next      : i32 = 0x18+8;  // next stack offset (dont forget to increase stack space)
 
 // trigger a debugger breakpoint
 #[allow(unused_macros)]
@@ -517,7 +515,6 @@ pub struct Cpu {
     jit_executing: bool, // true when inside run_block()
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
     jit_run_limit: u64, // starting run limit for each block that's run
-    jit_block_uses_hilo: bool, // true during compilation if an instruction that modifies HI/LO is seen
     cp0_count_tracker: u64, // used to calculate Cop0_Count increment in JIT
     cp0_compare_distance: u32, // used to determine when the timer interrupt occurs in JIT
     cp0_random_tracker: u64, // used to calculate Cop0_Random decrement in JIT
@@ -664,7 +661,6 @@ impl Cpu {
             jit_executing: false,
             jit_other_exception: false,
             jit_run_limit: 0,
-            jit_block_uses_hilo: false,
             cp0_count_tracker: 0,
             cp0_compare_distance: 0,
             cp0_random_tracker: 0,
@@ -685,25 +681,19 @@ impl Cpu {
             // shortcuts to gpr and cp0gpr
             ;   lea r_gpr, [r_cpu + offset_of!(Cpu, gpr) as i32]
             ;   lea r_cp0gpr, [r_cpu + offset_of!(Cpu, cp0gpr) as i32]
-            // the stack is offset by 8 due to rip being pushed, so we will leave it that way
-            // and the next call will align the stack to 0x10
-            ;   sub rsp, BYTE 0x30 // setup the stack so function calls are aligned
-                                   // 0x30 bytes is enough room for the s_* variables
+            // the stack is currently offset by 8 due to rip being pushed, so we will leave it that way
+            // and the call below will align the stack to 0x10
+            ;   sub rsp, BYTE 0x20 // setup the stack so function calls are aligned
+                                   // 0x20 bytes is enough room for the s_* variables
             // run_limit in r8d
             // NOTE: 8 is subtracted from the stack pointers because we're not inside the `call rdx` (JIT code) below
             ;   mov DWORD [rsp+(s_cycle_count-8)], r8d
-            // copy self.lo to the stack
-            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, lo) as i32]
-            ;   mov QWORD [rsp+(s_lo-8)], v_tmp
-            // copy self.hi to the stack
-            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, hi) as i32]
-            ;   mov QWORD [rsp+(s_hi-8)], v_tmp
             // rdx contains the address of the target JIT code
             ;   call rdx
             // cycle count to return value
             ;   mov eax, DWORD [rsp+(s_cycle_count-8)]
             // restore the stack in reverse order
-            ;   add rsp, BYTE 0x30 // must match the sub rsp in the prologue
+            ;   add rsp, BYTE 0x20 // must match the sub rsp in the prologue
             ;   pop r_cond_64
             ;   pop r_cpu
             ;   pop r_cp0gpr
@@ -2116,7 +2106,6 @@ impl Cpu {
         self.jit_jump = false;
         self.jit_jump_no_delay = false;
         self.jit_conditional_branch = None;
-        self.jit_block_uses_hilo = false;
 
         let block_id = self.next_block_id;
         self.next_block_id += 1;
@@ -2436,18 +2425,6 @@ impl Cpu {
             ;epilog:
         );
 
-        // Save HI/LO if they were used
-        if self.jit_block_uses_hilo {
-            letsgo!(assembler
-                // save self.lo
-                ;   mov v_tmp, QWORD [rsp+s_lo]
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
-                // save self.hi
-                ;   mov v_tmp, QWORD [rsp+s_hi]
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
-            );
-        }
-
         // return to the trampoline
         letsgo!(assembler
             ;   ret
@@ -2494,18 +2471,6 @@ impl Cpu {
             // save a copy of rdx
             ;   mov [rsp+s_tmp0], rdx
         );
-
-        // Save HI/LO if they were used
-        if self.jit_block_uses_hilo {
-            letsgo!(assembler
-                // save self.lo
-                ;   mov v_tmp, QWORD [rsp+s_lo]
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
-                // save self.hi
-                ;   mov v_tmp, QWORD [rsp+s_hi]
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
-            );
-        }
 
         // call lookup_compiled_instruction_address with pc in rdx
         // if the return value is non-zero, we have a valid jump destination and we can just jump to it and be done
@@ -6699,11 +6664,9 @@ impl Cpu {
 
         // store quotient in LO, remainder in HI
         letsgo!(assembler
-            ;   mov QWORD [rsp + s_lo], rax
-            ;   mov QWORD [rsp + s_hi], rdx
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], rax
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], rdx
         );
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6747,11 +6710,9 @@ impl Cpu {
 
         // store quotient in LO, remainder in HI
         letsgo!(assembler
-            ;   mov QWORD [rsp + s_lo], rax
-            ;   mov QWORD [rsp + s_hi], rdx
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], rax
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], rdx
         );
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6804,13 +6765,11 @@ impl Cpu {
 
         // store quotient in LO, remainder in HI
         letsgo!(assembler
-            ;   movsxd v_tmp, eax             // sign-extend 32-bit
-            ;   mov QWORD [rsp + s_lo], v_tmp // .
-            ;   movsxd v_tmp, edx             // sign-extend 32-bit
-            ;   mov QWORD [rsp + s_hi], v_tmp // .
+            ;   movsxd v_tmp, eax                                     // sign-extend 32-bit
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp // .
+            ;   movsxd v_tmp, edx                                     // sign-extend 32-bit
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp // .
         );
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6860,13 +6819,11 @@ impl Cpu {
 
         // store quotient in LO, remainder in HI
         letsgo!(assembler
-            ;   movsxd v_tmp, eax             // sign-extend 32-bit
-            ;   mov QWORD [rsp + s_lo], v_tmp // .
-            ;   movsxd v_tmp, edx             // sign-extend 32-bit
-            ;   mov QWORD [rsp + s_hi], v_tmp // .
+            ;   movsxd v_tmp, eax                                     // sign-extend 32-bit
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp // .
+            ;   movsxd v_tmp, edx                                     // sign-extend 32-bit
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp // .
         );
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6891,8 +6848,8 @@ impl Cpu {
         if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
             letsgo!(assembler
                 ;   xor v_tmp, v_tmp
-                ;   mov QWORD [rsp + s_lo], v_tmp
-                ;   mov QWORD [rsp + s_hi], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
             );
         } else {
             letsgo!(assembler
@@ -6900,12 +6857,10 @@ impl Cpu {
                 ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // second 64-bit operand sign-extended into rdx
                 ;   imul rdx                // 64-bit signed multiply
                                             // result in rdx:rax (both are caller saved)
-                ;   mov QWORD [rsp + s_lo], rax    // low 64-bits in LO
-                ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits in HI
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], rax    // low 64-bits in LO
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], rdx    // high 64-bits in HI
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -6930,8 +6885,8 @@ impl Cpu {
         if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
             letsgo!(assembler
                 ;   xor v_tmp, v_tmp
-                ;   mov QWORD [rsp + s_lo], v_tmp
-                ;   mov QWORD [rsp + s_hi], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
             );
         } else {
             letsgo!(assembler
@@ -6939,12 +6894,10 @@ impl Cpu {
                 ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]   // second operand in rdx
                 ;   mul rdx            // 64-bit multiply
                                        // 128-bit result in rdx:rax (both are caller saved)
-                ;   mov QWORD [rsp + s_lo], rax    // low 64-bits from rax
-                ;   mov QWORD [rsp + s_hi], rdx    // high 64-bits from rdx
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], rax    // low 64-bits from rax
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], rdx    // high 64-bits from rdx
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7418,7 +7371,7 @@ impl Cpu {
                  
         if self.inst.rd != 0 {
             letsgo!(assembler
-                ;   mov v_tmp, QWORD [rsp + s_hi]
+                ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, hi) as i32]
                 ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
             );
         }
@@ -7436,7 +7389,7 @@ impl Cpu {
                  
         if self.inst.rd != 0 {
             letsgo!(assembler
-                ;   mov v_tmp, QWORD [rsp + s_lo]
+                ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, lo) as i32]
                 ;   mov QWORD [r_gpr + (self.inst.rd * 8) as i32], v_tmp
             );
         }
@@ -7454,16 +7407,14 @@ impl Cpu {
 
         if self.inst.rd == 0 {
             letsgo!(assembler
-                ;   mov QWORD [rsp + s_hi], DWORD 0u32 as _
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], DWORD 0u32 as _
             );
         } else {
             letsgo!(assembler
                 ;   mov v_tmp, QWORD [r_gpr + (self.inst.rd * 8) as i32]
-                ;   mov QWORD [rsp + s_hi], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7478,16 +7429,14 @@ impl Cpu {
 
         if self.inst.rd == 0 {
             letsgo!(assembler
-                ;   mov QWORD [rsp + s_lo], DWORD 0u32 as _
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], DWORD 0u32 as _
             );
         } else {
             letsgo!(assembler
                 ;   mov v_tmp, QWORD [r_gpr + (self.inst.rd * 8) as i32]
-                ;   mov QWORD [rsp + s_lo], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7513,8 +7462,8 @@ impl Cpu {
         if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
             letsgo!(assembler
                 ;   xor v_tmp, v_tmp
-                ;   mov QWORD [rsp + s_lo], v_tmp
-                ;   mov QWORD [rsp + s_hi], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
             );
         } else {
             letsgo!(assembler
@@ -7524,15 +7473,13 @@ impl Cpu {
                 ;   movsxd rdx, v_tmp_32                                      // .
                 ;   mul rdx                 // 64-bit unsigned multiply
                                             // result in rdx:rax (both are caller saved)
-                ;   mov v_tmp_32, eax                // zero-extend lo/hi
-                ;   mov QWORD [rsp + s_lo], v_tmp    // .
-                ;   shr rax, BYTE 32u8 as _          // high dword of rax
-                ;   mov v_tmp_32, eax                // . (zero-extend v_tmp here)
-                ;   mov QWORD [rsp + s_hi], v_tmp    // .
+                ;   mov v_tmp_32, eax                                        // zero-extend lo/hi
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp    // .
+                ;   shr rax, BYTE 32u8 as _                                  // high dword of rax
+                ;   mov v_tmp_32, eax                                        // . (zero-extend v_tmp here)
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp    // .
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
@@ -7557,8 +7504,8 @@ impl Cpu {
         if self.inst.rs == 0 || self.inst.rt == 0 { // set hi/lo to zero
             letsgo!(assembler
                 ;   xor v_tmp, v_tmp
-                ;   mov QWORD [rsp + s_lo], v_tmp
-                ;   mov QWORD [rsp + s_hi], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
             );
         } else {
             letsgo!(assembler
@@ -7566,15 +7513,13 @@ impl Cpu {
                 ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]   // second operand in edx (zero-extend into rdx)
                 ;   mul rdx            // 64-bit multiply
                                        // result in rdx:rax (both are caller saved)
-                ;   mov v_tmp_32, eax                // zero-extend lo/hi
-                ;   mov QWORD [rsp + s_lo], v_tmp    // .
-                ;   shr rax, BYTE 32u8 as _          // high dword of rax
-                ;   mov v_tmp_32, eax                // . (zero-extend v_tmp here)
-                ;   mov QWORD [rsp + s_hi], v_tmp    // .
+                ;   mov v_tmp_32, eax                                        // zero-extend lo/hi
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp    // .
+                ;   shr rax, BYTE 32u8 as _                                  // high dword of rax
+                ;   mov v_tmp_32, eax                                        // . (zero-extend v_tmp here)
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp    // .
             );
         }
-
-        self.jit_block_uses_hilo = true;
 
         CompileInstructionResult::Continue
     }
