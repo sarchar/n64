@@ -132,9 +132,9 @@ enum CachedBlockReference {
 struct CompiledBlock {
     id: u64, // unique ID
     start_address: u64,
-    entry_point: dynasmrt::AssemblyOffset,
-    code_buffer: dynasmrt::mmap::ExecutableBuffer,
-    _jump_table: Pin<Box<Vec<u64>>>,
+    _entry_point: dynasmrt::AssemblyOffset,
+    _code_buffer: dynasmrt::mmap::ExecutableBuffer,
+    jump_table: Pin<Box<Vec<u64>>>,
 }
 
 enum CachedBlockStatus {
@@ -191,14 +191,15 @@ macro_rules! letsgo {
 
 pub(crate) use letsgo;
 
-// stack storage offsets
-const s_jump_target: i32 = 0x00;  // pc jump target for jumps (64-bit)
-const s_cycle_count: i32 = 0x08;  // number of r4300 instructions executed (32-bit)
-const _s_unused    : i32 = 0x0C;  // unused space (32-bit)
-const s_lo         : i32 = 0x10;  // self.hi (64-bit)
-const s_hi         : i32 = 0x18;  // self.lo (64-bit)
-const s_tmp0       : i32 = 0x20;  // temp storage (64-bit)
-const _s_next      : i32 = 0x28;  // next stack offset (dont forget to increase stack space)
+// stack storage offsets, currently 0x28 bytes
+// the trampoline uses call to jump into JIT code, so rip is sitting at the stack pointer, thus all these numbers have 8 added 
+const s_jump_target: i32 = 0x00+8;  // pc jump target for jumps (64-bit)
+const s_cycle_count: i32 = 0x08+8;  // number of r4300 instructions executed (32-bit)
+const _s_unused    : i32 = 0x0C+8;  // unused space (32-bit)
+const s_lo         : i32 = 0x10+8;  // self.hi (64-bit)
+const s_hi         : i32 = 0x18+8;  // self.lo (64-bit)
+const s_tmp0       : i32 = 0x20+8;  // temp storage (64-bit)
+const _s_next      : i32 = 0x28+8;  // next stack offset (dont forget to increase stack space)
 
 // trigger a debugger breakpoint
 #[allow(unused_macros)]
@@ -503,6 +504,8 @@ pub struct Cpu {
     // 8KiB for I/DMEM
     cached_block_map: Vec<Option<CachedBlockReference>>,
 
+    jit_trampoline: Option<dynasmrt::mmap::ExecutableBuffer>,
+    jit_trampoline_entry_point: dynasmrt::AssemblyOffset,
     jit_instruction_table: [CpuInstructionBuilder; 64],
     jit_special_table: [CpuInstructionBuilder; 64],
     jit_regimm_table: [CpuInstructionBuilder; 32],
@@ -618,6 +621,8 @@ impl Cpu {
             cached_block_map: vec![None; CACHED_BLOCK_MAP_SIZE],
             next_block_id: 0,
 
+            jit_trampoline: None,
+            jit_trampoline_entry_point: dynasmrt::AssemblyOffset(0),
             jit_instruction_table: [ 
                //  _000                     _001                     _010                     _011                     _100                     _101                     _110                     _111
     /* 000_ */  Cpu::build_inst_special, Cpu::build_inst_regimm , Cpu::build_inst_j      , Cpu::build_inst_jal     , Cpu::build_inst_beq     , Cpu::build_inst_bne     , Cpu::build_inst_blez    , Cpu::build_inst_bgtz    ,
@@ -665,6 +670,50 @@ impl Cpu {
             cp0_random_tracker: 0,
         };
         
+        let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
+        let trampoline_entry_offset = assembler.offset(); // is this always 0 ?
+
+        // build the trampoline code
+        // trampoline(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> cycles_ran: u32
+        letsgo!(assembler
+            ;   push r_gpr
+            ;   push r_cp0gpr
+            ;   push r_cpu
+            ;   push r_cond_64
+            // self: *mut Self comes in rcx
+            ;   mov r_cpu, rcx
+            // shortcuts to gpr and cp0gpr
+            ;   lea r_gpr, [r_cpu + offset_of!(Cpu, gpr) as i32]
+            ;   lea r_cp0gpr, [r_cpu + offset_of!(Cpu, cp0gpr) as i32]
+            // the stack is offset by 8 due to rip being pushed, so we will leave it that way
+            // and the next call will align the stack to 0x10
+            ;   sub rsp, BYTE 0x30 // setup the stack so function calls are aligned
+                                   // 0x30 bytes is enough room for the s_* variables
+            // run_limit in r8d
+            // NOTE: 8 is subtracted from the stack pointers because we're not inside the `call rdx` (JIT code) below
+            ;   mov DWORD [rsp+(s_cycle_count-8)], r8d
+            // copy self.lo to the stack
+            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, lo) as i32]
+            ;   mov QWORD [rsp+(s_lo-8)], v_tmp
+            // copy self.hi to the stack
+            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, hi) as i32]
+            ;   mov QWORD [rsp+(s_hi-8)], v_tmp
+            // rdx contains the address of the target JIT code
+            ;   call rdx
+            // cycle count to return value
+            ;   mov eax, DWORD [rsp+(s_cycle_count-8)]
+            // restore the stack in reverse order
+            ;   add rsp, BYTE 0x30 // must match the sub rsp in the prologue
+            ;   pop r_cond_64
+            ;   pop r_cpu
+            ;   pop r_cp0gpr
+            ;   pop r_gpr
+            ;   ret
+        );
+
+        cpu.jit_trampoline = Some(assembler.finalize().unwrap());
+        cpu.jit_trampoline_entry_point = trampoline_entry_offset;
+
         let _ = cpu.reset(false);
         cpu
     }
@@ -709,24 +758,24 @@ impl Cpu {
         Ok(())
     }
 
-    pub fn num_steps(&self) -> &u64 {
-        &self.num_steps
+    pub fn num_steps(&self) -> u64 {
+        self.num_steps
     }
 
-    pub fn current_instruction_pc(&self) -> &u64 {
-        &self.current_instruction_pc
+    pub fn current_instruction_pc(&self) -> u64 {
+        self.current_instruction_pc
     }
 
-    pub fn next_instruction(&self) -> &Option<u32> {
-        &self.next_instruction
+    pub fn next_instruction(&self) -> Option<u32> {
+        self.next_instruction
     }
 
-    pub fn next_instruction_pc(&self) -> &u64 {
-        &self.next_instruction_pc
+    pub fn next_instruction_pc(&self) -> u64 {
+        self.next_instruction_pc
     }
 
-    pub fn next_is_delay_slot(&self) -> &bool {
-        &self.next_is_delay_slot
+    pub fn next_is_delay_slot(&self) -> bool {
+        self.next_is_delay_slot
     }
 
     pub fn regs(&self) -> &[u64] {
@@ -802,13 +851,20 @@ impl Cpu {
         value
     }
 
-    unsafe extern "win64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u8 {
+    unsafe extern "win64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
         //trace!(target: "JIT", "read_u8_bridge from ${:08X}", virtual_address as u32);
 
         let cpu = { &mut *cpu };
         //if virtual_address == 2 { std::arch::asm!("int3"); }
         match cpu.read_u8(virtual_address as usize) {
-            Ok(value) => value,
+            Ok(value) => (value as u8) as u32,
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                assert!(exception_code == ExceptionCode_TLBL); // only valid exceptions here
+                cpu.jit_other_exception = true;
+                exception_code as u32
+            }
+
             Err(e) => {
                 // TODO handle errors better
                 error!("error in read_u8_bridge: {:?}", e);
@@ -1872,7 +1928,7 @@ impl Cpu {
         }
     }
 
-    fn lookup_cached_block<'a>(&'a mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
+    fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
         if let Some(physical_address) = self.translate_address(virtual_address, false, false)? {
             trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
             //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
@@ -1968,13 +2024,13 @@ impl Cpu {
                     let compiled_block = compiled_block_ref.borrow();
 
                     // execute the block
-                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.next_instruction_pc-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     let compiled_block = compiled_block.borrow();
-                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=TODO cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.next_instruction_pc-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     self.num_steps += self.run_block(&*compiled_block, self.next_instruction_pc)?; // start execution at an offset into the block
                 }
 
@@ -2068,40 +2124,9 @@ impl Cpu {
         // allocate space for the jump table and pin it in place
         // we can already use the pointer in the prologue
         let mut jump_table = Box::pin(Vec::<u64>::with_capacity(JIT_BLOCK_MAX_INSTRUCTION_COUNT + 8));
-        let jump_table_ptr = jump_table.as_ref().get_ref().as_ptr();
 
         // break before executing
         //letsbreak!(assembler);
-
-        // TODO: prologue
-        // Save r_ registers, and load values into s_ storage
-        // the last digit of the rsp allocation needs to be 8
-        // so right now 0x28 bytes are used, if even 1 extra byte is used, increase the number to 0x38
-        // be sure to adjust the epilog as well
-        letsgo!(assembler
-            ;   push r_gpr
-            ;   push r_cp0gpr
-            ;   push r_cpu
-            ;   push r_cond_64
-            ;   mov r_cpu, QWORD self as *mut Self as _
-            ;   mov r_gpr, QWORD self.gpr.as_mut_ptr() as _
-            ;   mov r_cp0gpr, QWORD self.cp0gpr.as_mut_ptr() as _
-            ;   sub rsp, BYTE 0x28 // setup the stack so function calls are aligned
-                                   // 0x28 bytes is enough room for the s_* variables
-                                   // since we pushed 0x28 bytes rsp should be 0x10 aligned now
-            // run_limit in ecx
-            ;   mov DWORD [rsp+s_cycle_count], ecx
-            // copy self.lo to the stack
-            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, lo) as i32]
-            ;   mov QWORD [rsp+s_lo], v_tmp
-            // copy self.hi to the stack
-            ;   mov v_tmp, QWORD [r_cpu + offset_of!(Cpu, hi) as i32]
-            ;   mov QWORD [rsp+s_hi], v_tmp
-            // do the jump to desired instruction using the jump table, instruction_index in rdx
-            ;   mov v_tmp, QWORD jump_table_ptr as *const _ as _
-            ;   mov rax, QWORD [v_tmp + rdx*8]
-            ;   jmp rax
-        );
 
         let mut instruction_start_offsets = HashMap::new();
         let mut jit_fixups = Vec::new();
@@ -2384,28 +2409,29 @@ impl Cpu {
             debug!(target: "JIT-BUILD", "[terminating block compilation after {} nops]", num_nops);
         }
 
-        // If we fall through into epilog, we need to store self.pc before returning.
-        // Thankfully, self.pc has been updating and currently points to the next instruction
-        // This kind of seems silly, but recall that the value in self.pc is translated to a
-        // constant in the generated code.
+        // If we fall through execution here instead of jumping to epilog, then we basically need
+        // to continue execution of game code.
+        //
+        // Thankfully, self.next_instruction_pc has been updating and currently points to the next instruction,
+        // so we try linking to a block and otherwise exiting.
+        //
         // And technically, we shouldn't exit a block right before a delay slot instruction
         // So it should never be true here
         assert!(!self.next_is_delay_slot);
-        letsgo!(assembler
-            ;restore_pc:
-        );
-        if (self.next_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+        if ((self.next_instruction_pc as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
             letsgo!(assembler
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD self.next_instruction_pc as i32 as _
+                ;   mov rdx, DWORD self.next_instruction_pc as i32 as _ // sign-extend address
             );
         } else {
             letsgo!(assembler
-                ;   mov v_tmp, QWORD self.next_instruction_pc as _
-                ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], v_tmp
+                ;   mov rdx, QWORD self.next_instruction_pc as i64 as _
             );
         }
-        letscall!(assembler, Cpu::prefetch_bridge); // setup next_instruction_pc
+        letsgo!(assembler
+            ;   jmp >try_block_link
+        );
 
+        // Finally the "epilog", which just restores hi/lo and returns
         letsgo!(assembler
             ;epilog:
         );
@@ -2422,16 +2448,8 @@ impl Cpu {
             );
         }
 
-        // Restore the stack in reverse order and set return value in rax
+        // return to the trampoline
         letsgo!(assembler
-            // cycle count to return value
-            ;   mov eax, DWORD [rsp+s_cycle_count]
-            // restore stack
-            ;   add rsp, BYTE 0x28 // must match the sub rsp in the prologue
-            ;   pop r_cond_64
-            ;   pop r_cpu
-            ;   pop r_cp0gpr
-            ;   pop r_gpr
             ;   ret
         );
 
@@ -2443,28 +2461,23 @@ impl Cpu {
                 // update the dynamic label to use that offset
                 let _ = assembler.labels_mut().define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(*target_instruction_offset)).unwrap();
             } else {
-                // whatever the branch target was supposed to be needs to be loaded into PC and then we jump to the epilog
+                // see if the target has a compiled block at that location. we need to check at
+                // block-run time, since branch destinations can be invalidated or changed
                 let code_start_offset = assembler.offset();
 
-                trace!(target: "JIT-BUILD", "** creating unknown branch target handler for branch to ${:16X}", branch_target);
+                trace!(target: "JIT-BUILD", "** creating external block branch target handler for branch to ${:16X}", branch_target);
                 if ((branch_target as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
                     letsgo!(assembler
-                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], DWORD branch_target as i32 as _ // sign-extend address
+                        ;   mov rdx, DWORD branch_target as i32 as _ // sign-extend address
                     );
                 } else {
                     letsgo!(assembler
-                        ;   mov rax, QWORD branch_target as i64 as _
+                        ;   mov rdx, QWORD branch_target as i64 as _
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                     );
                 }
-
-                // no arguments to prefetch_bridge
-                // TODO this should actually be skipped if the jump target is already compiled
-                // otherwise, we're doing an unnecessary read_u32() on every jump
-                letscall!(assembler, Cpu::prefetch_bridge);
-
                 letsgo!(assembler
-                    ;   jmp <epilog
+                    ;   jmp >try_block_link
                 );
 
                 // set the dynamic_label to jump here
@@ -2475,11 +2488,46 @@ impl Cpu {
             }
         }
 
+        // try linking to a block directly, destination pc in rdx
+        letsgo!(assembler
+            ;try_block_link:
+            // save a copy of rdx
+            ;   mov [rsp+s_tmp0], rdx
+        );
+
+        // Save HI/LO if they were used
+        if self.jit_block_uses_hilo {
+            letsgo!(assembler
+                // save self.lo
+                ;   mov v_tmp, QWORD [rsp+s_lo]
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, lo) as i32], v_tmp
+                // save self.hi
+                ;   mov v_tmp, QWORD [rsp+s_hi]
+                ;   mov QWORD [r_cpu + offset_of!(Cpu, hi) as i32], v_tmp
+            );
+        }
+
+        // call lookup_compiled_instruction_address with pc in rdx
+        // if the return value is non-zero, we have a valid jump destination and we can just jump to it and be done
+        letscall!(assembler, Cpu::lookup_compiled_instruction_address);
+        letsgo!(assembler
+            ;   test rax, rax
+            ;   jz >notfound
+            ;   jmp rax // weee
+            ;notfound: // otherwise, put branch destination into self.pc, prefetch, and exit the block
+            ;   mov rax, QWORD [rsp+s_tmp0]
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
+        );
+
+        letscall!(assembler, Cpu::prefetch_bridge);
+        letsgo!(assembler
+            ;   ret
+        );
+
         // finalize the block
         let executable_buffer = assembler.finalize().unwrap();
 
-        // with the buffer finalized, we know where it is in memory, we can update the jump table
-        // offsets to be absolute addresses
+        // with the buffer finalized, we know where it is in memory, we can update the jump table offsets to be absolute addresses
         for entry in jump_table.as_mut().get_mut().iter_mut() {
             *entry = executable_buffer.ptr(dynasmrt::AssemblyOffset(*entry as usize)) as u64;
         }
@@ -2487,11 +2535,9 @@ impl Cpu {
         let compiled_block = CompiledBlock {
             id           : block_id,
             start_address: start_address,
-            entry_point  : entry_point,
-            code_buffer  : executable_buffer,
-
-            // keep the jump_table from being freed, but we never directly access it after this point
-            _jump_table: jump_table,
+            _entry_point : entry_point,
+            _code_buffer : executable_buffer,
+            jump_table   : jump_table,
         };
 
         // insert into block cache
@@ -2504,15 +2550,20 @@ impl Cpu {
 
     // return number of instructions executed
     fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> Result<u64, InstructionFault> {
-        // place &self into rax
-        let call_block: extern "win64" fn(u32, u64) -> i32 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+        let trampoline: extern "win64" fn(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> i32 = unsafe {
+            std::mem::transmute(self.jit_trampoline.as_ref().unwrap().ptr(self.jit_trampoline_entry_point))
+        };
 
-        // find the nth instruction in the block, which is the offset divided by 4
+        // place &self into rax
+        //let call_block: extern "win64" fn(u32, u64) -> i32 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
+
+        // find the nth instruction in the block, which is the offset divided by sizeof(u32)
         let instruction_index = (execution_address - compiled_block.start_address) >> 2;
+        let compiled_instruction_address = compiled_block.jump_table[instruction_index as usize];
 
         self.jit_executing = true;
         // blocks can run beyond their run limit so the return value of call_block could be negative
-        let res = (self.jit_run_limit as i64) - (call_block(self.jit_run_limit as u32, instruction_index) as i64);
+        let res = (self.jit_run_limit as i64) - (trampoline(self as *mut Cpu, compiled_instruction_address, self.jit_run_limit as u32) as i64);
 
         // TODO maybe, return error codes here
         //let res = match call_block(self.jit_run_limit as u32, instruction_index) {
@@ -2533,6 +2584,21 @@ impl Cpu {
         self.jit_other_exception = false;
 
         Ok(res as u64)
+    }
+
+    // since this function is used by assembly, a return value of 0 indicates "not present",
+    // instead of using Option<>.
+    #[inline(always)]
+    extern "win64" fn lookup_compiled_instruction_address(cpu: *mut Cpu, virtual_address: u64) -> u64 {
+        let cpu = unsafe { &mut *cpu };
+        match cpu.lookup_cached_block(virtual_address) {
+            Ok(CachedBlockStatus::Cached(compiled_block)) => {
+                let borrow = compiled_block.borrow();
+                let instruction_index = (virtual_address - borrow.start_address) >> 2;
+                borrow.jump_table[instruction_index as usize]
+            },
+            _ => 0,
+        }
     }
 
     #[inline]
@@ -4463,11 +4529,17 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup for exceptions
+        letssetupexcept!(self, assembler, false);
+
         // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // rdx contains address
         letscall!(assembler, Cpu::read_u8_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4492,11 +4564,17 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lbu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup for exceptions
+        letssetupexcept!(self, assembler, false);
+
         // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         // rdx contains address
         letscall!(assembler, Cpu::read_u8_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 

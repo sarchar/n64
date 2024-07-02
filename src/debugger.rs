@@ -146,11 +146,11 @@ impl Debugger {
         while self.alive {
             let readline = { // context for dropping cpu
                 let cpu = self.system.cpu.borrow();
-                let next_instruction_pc = *cpu.next_instruction_pc();
+                let next_instruction_pc = cpu.next_instruction_pc();
                 if last_printed_pc != next_instruction_pc {
                     let inst = cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true);
                     print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
-                    if *cpu.next_is_delay_slot() {
+                    if cpu.next_is_delay_slot() {
                         print!(" (delay slot)");
                     }
                     println!("");
@@ -253,7 +253,7 @@ impl Debugger {
             };
         }
 
-        let start_steps = *self.system.cpu.borrow().num_steps();
+        let start_steps = self.system.cpu.borrow().num_steps();
         let now = std::time::Instant::now();
 
         while self.cpu_running.load(Ordering::SeqCst) {
@@ -267,7 +267,7 @@ impl Debugger {
             }
 
             // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
+            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
                 println!("Breakpoint ${:016X} hit", breakpoint.address);
                 self.cpu_running.store(false, Ordering::SeqCst);
             }
@@ -275,7 +275,7 @@ impl Debugger {
             // Check run until
             match self.cpu_run_til {
                 Some(v) => {
-                    if *self.system.cpu.borrow().next_instruction_pc() == v {
+                    if self.system.cpu.borrow().next_instruction_pc() == v {
                         self.cpu_running.store(false, Ordering::SeqCst);
                     }
                 },
@@ -283,7 +283,7 @@ impl Debugger {
             };
         }
 
-        let steps = *self.system.cpu.borrow().num_steps() - start_steps;
+        let steps = self.system.cpu.borrow().num_steps() - start_steps;
         let elapsed = now.elapsed();
         let duration = (elapsed.as_secs() as f64) + (elapsed.subsec_micros() as f64) / 1000000.0;
 
@@ -315,7 +315,7 @@ impl Debugger {
             count -= 1;
 
             // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((*self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
+            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
                 println!("Breakpoint ${:016X} hit", breakpoint.address);
                 self.cpu_running.store(false, Ordering::SeqCst);
             }
@@ -469,7 +469,7 @@ impl Debugger {
                 print!("<unaccessable>");
             }
 
-            if addr == *cpu.next_instruction_pc() {
+            if addr == cpu.next_instruction_pc() {
                 print!(" <-");
             }
 
