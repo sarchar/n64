@@ -406,12 +406,9 @@ macro_rules! letsbranch {
         );
 
         // if both operands are zero we know the result of the branch in advance
-        if $self.inst.rs == 0 && $self.inst.rt == 0 {
-            if $branch_taken_on_zero_zero {
-                letsgo!($ops
-                    ;   inc r_cond      // set r_cond to 1 (take branch)
-                );
-            }
+        let mut is_unconditional = false;
+        if $self.inst.rs == 0 && $self.inst.rt == 0 && $branch_taken_on_zero_zero {
+            is_unconditional = true;
         } else {
             // rs!=0 and rt==0 is a common scenario
             if $self.inst.rs != 0 && $self.inst.rt == 0 {
@@ -449,7 +446,7 @@ macro_rules! letsbranch {
             );
         }
 
-        $self.jit_conditional_branch = Some((($self.inst.signed_imm as i64) << 2, $is_likely as bool));
+        $self.jit_conditional_branch = Some((($self.inst.signed_imm as i64) << 2, $is_likely as bool, is_unconditional));
         $self.next_is_delay_slot = true;
     }
 }
@@ -510,7 +507,7 @@ pub struct Cpu {
     jit_block_start_pc: u64,
     jit_jump: bool, // true when a jump is happening
     jit_jump_no_delay: bool, // true when a jump happens without a delay slot
-    jit_conditional_branch: Option<(i64, bool)>, // branch_offset, is_branch_likely
+    jit_conditional_branch: Option<(i64, bool, bool)>, // branch_offset, is_branch_likely, is_unconditional
     jit_current_assembler_offset: usize,
     jit_executing: bool, // true when inside run_block()
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
@@ -2197,9 +2194,9 @@ impl Cpu {
             }
 
             // for branch likely instructions, skip the delay slot instruction if the branch is not taken
-            if let Some((_, is_branch_likely)) = jit_conditional_branch {
+            if let Some((_, is_branch_likely, is_unconditional)) = jit_conditional_branch {
                 assert!(self.is_delay_slot); // always the case when jit_conditional_branch is set
-                if is_branch_likely {
+                if is_branch_likely && !is_unconditional { // don't check r_cond with is_unconditional, as we are taking the branch
                     trace!(target: "JIT-BUILD", "** previous instruction was a branch_likely, checking r_cond..");
                     // if the branch is not taken (r_cond == 0), we skip over the next compiled instruction
                     letsgo!(assembler
@@ -2232,7 +2229,7 @@ impl Cpu {
                             ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                         );
                     } else if jit_conditional_branch.is_some() {
-                        let (branch_offset, is_branch_likely) = jit_conditional_branch.unwrap();
+                        let (branch_offset, is_branch_likely, is_unconditional) = jit_conditional_branch.unwrap();
 
                         if is_branch_likely { 
                             letsgo!(assembler
@@ -2249,12 +2246,14 @@ impl Cpu {
                         let branch_target = (self.current_instruction_pc as i64).wrapping_add(branch_offset);
 
                         // r_cond determines what we set PC to
-                        letsgo!(assembler
-                            ;   dec r_cond
-                            ;   jz >okay
-                            ;   int3
-                            ;okay:
-                        );
+                        if !is_unconditional {
+                            letsgo!(assembler
+                                ;   dec r_cond
+                                ;   jz >okay
+                                ;   int3
+                                ;okay:
+                            );
+                        }
 
                         letsgo!(assembler
                             ;   mov rax, QWORD branch_target as u64 as _
@@ -2323,7 +2322,7 @@ impl Cpu {
                 letsgo!(assembler
                     ;   jmp >epilog
                 );
-            } else if let Some((branch_offset, is_branch_likely)) = jit_conditional_branch {
+            } else if let Some((branch_offset, is_branch_likely, is_unconditional)) = jit_conditional_branch {
                 assert!(!self.jit_jump && self.jit_conditional_branch.is_none()); // no branches within delay slots
 
                 // TODO we can actually return from block execution here if branch_offset is
@@ -2338,8 +2337,8 @@ impl Cpu {
 
                 // if we are executing code here, we're either not using branch_likely (and we have
                 // to check r_cond), or we are using branch_likely and know that we're taking the
-                // branch
-                if is_branch_likely {
+                // branch. alternatively, if the branch is uncondtional (always taken) we jump here
+                if is_branch_likely || is_unconditional {
                     trace!(target: "JIT-BUILD", "** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
 
                     // test if we need to break out of the block before the branch
@@ -3391,7 +3390,7 @@ impl Cpu {
                                 ;skip_set:
                             );
 
-                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, false)); // not a `likely` branch
+                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, false, false)); // not a `likely` branch
                         },
 
                         0b00_001 => { // BCzT
@@ -3404,7 +3403,7 @@ impl Cpu {
                                 ;skip_set:
                             );
 
-                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, false)); // not a `likely` branch
+                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, false, false)); // not a `likely` branch
                         },
 
                         0b00_010 => { // BCzFL
@@ -3417,7 +3416,7 @@ impl Cpu {
                                 ;skip_set:
                             );
 
-                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, true)); // is a `likely` branch
+                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, true, false)); // is a `likely` branch
                         },
 
                         0b00_011 => { // BCzTL
@@ -3430,7 +3429,7 @@ impl Cpu {
                                 ;skip_set:
                             );
 
-                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, true)); // is a `likely` branch
+                            self.jit_conditional_branch = Some(((self.inst.signed_imm as i64) << 2, true, false)); // is a `likely` branch
                         },
 
                         _ => panic!("JIT: unknown branch function 0b{:02b}_{:03b} (called on cop{})", branch >> 3, branch & 7, copno),
@@ -4409,7 +4408,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn build_inst_j(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+    fn build_inst_j(&mut self, _assembler: &mut Assembler) -> CompileInstructionResult {
         let dest = ((self.pc - 4) & 0xFFFF_FFFF_F000_0000) | ((self.inst.target << 2) as u64);
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: j ${:08X}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, dest);
 
@@ -4417,17 +4416,10 @@ impl Cpu {
             return CompileInstructionResult::Cant;
         }
 
-        // since we have a known jump target, we can use the conditional branch code to always branch
-        // and make use of jumps within the same block
-        letsgo!(assembler
-            ;   xor r_cond, r_cond
-            ;   inc r_cond
-        );
-
         // first value of jit_conditional_branch is relative to the delay slot instruction, so since
         // `J` is absolute, compute the relative target
         let relative_branch = (dest as i64).wrapping_sub(self.next_instruction_pc as i64);
-        self.jit_conditional_branch = Some((relative_branch, false)); // not a `likely` branch
+        self.jit_conditional_branch = Some((relative_branch, false, true)); // not a `likely` branch
 
         self.next_is_delay_slot = true;
 
@@ -4466,17 +4458,10 @@ impl Cpu {
             );
         }
 
-        // since we have a known jump target, we can use the conditional branch code to always branch
-        // and make use of jumps within the same block
-        letsgo!(assembler
-            ;   xor r_cond, r_cond
-            ;   inc r_cond
-        );
-
         // first value of jit_conditional_branch is relative to the delay slot instruction, so since
         // `J` is absolute, compute the relative target
         let relative_branch = (dest as i64).wrapping_sub(self.next_instruction_pc as i64);
-        self.jit_conditional_branch = Some((relative_branch, false)); // not a `likely` branch
+        self.jit_conditional_branch = Some((relative_branch, false, true)); // not a `likely` branch
 
         self.next_is_delay_slot = true;
 
