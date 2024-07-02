@@ -155,7 +155,8 @@ enum CompileInstructionResult {
 // TODO important: fpcsr is nonvolatile (callee saved), which controls fp rounding
 // rax is return value
 // rsp is the stack pointer and must be 0x10 (16) bytes aligned before a function call
-// rcx, rdx, r8, and r9 are the first four arguments to a function call
+// rcx, rdx, r8, and r9 are the first four arguments to a function call -- these should never be
+// aliased to r_ or v_ names, since they are used directly for function call parameters.
 // further arguments are pushed to the stack in right-to-left order (left-most arguments are closer to rsp)
 // xmm0l, xmm1l, xmm2l, and xmmr3l are the first four floating point arguments
 // at the end of a function, rsp must be equal to what it was at the beginning of a function, 
@@ -512,6 +513,7 @@ pub struct Cpu {
     jit_executing: bool, // true when inside run_block()
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
     jit_run_limit: u64, // starting run limit for each block that's run
+    jit_idle_loop_detected: bool, // true if we exited a block due to an idle loop
     cp0_count_tracker: u64, // used to calculate Cop0_Count increment in JIT
     cp0_compare_distance: u32, // used to determine when the timer interrupt occurs in JIT
     cp0_random_tracker: u64, // used to calculate Cop0_Random decrement in JIT
@@ -658,6 +660,7 @@ impl Cpu {
             jit_executing: false,
             jit_other_exception: false,
             jit_run_limit: 0,
+            jit_idle_loop_detected: false,
             cp0_count_tracker: 0,
             cp0_compare_distance: 0,
             cp0_random_tracker: 0,
@@ -673,13 +676,13 @@ impl Cpu {
             ;   push r_cp0gpr
             ;   push r_cpu
             ;   push r_cond_64
-            // self: *mut Self comes in rcx
+            // cpu: *mut Cpu comes in rcx
             ;   mov r_cpu, rcx
             // shortcuts to gpr and cp0gpr
             ;   lea r_gpr, [r_cpu + offset_of!(Cpu, gpr) as i32]
             ;   lea r_cp0gpr, [r_cpu + offset_of!(Cpu, cp0gpr) as i32]
-            // the stack is currently offset by 8 due to rip being pushed, so we will leave it that way
-            // and the call below will align the stack to 0x10
+            // the stack is currently offset by 28 due to rip being pushed plus 4 register pushes, so we will leave it that way
+            // the call below will push rip and align the stack to 0x10
             ;   sub rsp, BYTE 0x20 // setup the stack so function calls are aligned
                                    // 0x20 bytes is enough room for the s_* variables
             // run_limit in r8d
@@ -690,7 +693,7 @@ impl Cpu {
             // cycle count to return value
             ;   mov eax, DWORD [rsp+(s_cycle_count-8)]
             // restore the stack in reverse order
-            ;   add rsp, BYTE 0x20 // must match the sub rsp in the prologue
+            ;   add rsp, BYTE 0x20 // must match the sub rsp above
             ;   pop r_cond_64
             ;   pop r_cpu
             ;   pop r_cp0gpr
@@ -2000,6 +2003,7 @@ impl Cpu {
             if self.cp0_compare_distance == 0 { self.cp0_compare_distance = 0x7FFF_FFFF; }
 
             // for calcuating how many cycles have executed in the middle of a block
+            let num_steps_before = self.num_steps;
             self.jit_run_limit = std::cmp::min(2 * self.cp0_compare_distance as u64, (steps_start + max_cycles) - self.num_steps);
 
             match self.lookup_cached_block(self.next_instruction_pc)? {
@@ -2024,6 +2028,17 @@ impl Cpu {
                 _ => {
                     todo!("address ${:08X} is Uncompilable", self.next_instruction_pc);
                 },
+            }
+
+            // if we broke out due to an idle loop, fast-forward time
+            if self.jit_idle_loop_detected {
+                // we could only have incremented by as many as jit_run_limit steps would allow, but we need to know how many steps were taken
+                let steps_taken = self.num_steps - num_steps_before; 
+                let steps_remaining = self.jit_run_limit.saturating_sub(steps_taken);
+
+                trace!(target: "JIT-RUN", "skipping idle loop at ${:08X}, steps remaining={}", self.next_instruction_pc, steps_remaining);
+                self.num_steps += steps_remaining;
+                self.jit_idle_loop_detected = false; 
             }
 
             // PC and next_instruction_pc have changed, update current_instruction_pc for code that
@@ -2339,6 +2354,13 @@ impl Cpu {
                 // to check r_cond), or we are using branch_likely and know that we're taking the
                 // branch. alternatively, if the branch is uncondtional (always taken) we jump here
                 if is_branch_likely || is_unconditional {
+                    if is_unconditional && branch_offset == -4 && self.inst.v == 0 {
+                        trace!(target: "JIT-BUILD", "** idle loop detected at ${:08X}, exiting block", branch_target);
+                        letsgo!(assembler
+                            ;   mov BYTE [r_cpu + offset_of!(Cpu, jit_idle_loop_detected) as i32], BYTE 1u8 as _
+                            ;   jmp >break_out
+                        );
+                    }
                     trace!(target: "JIT-BUILD", "** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
 
                     // test if we need to break out of the block before the branch

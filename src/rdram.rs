@@ -170,9 +170,8 @@ impl Addressable for RdramInterface {
             let ram = access.as_ref().unwrap();
 
             // why doesn't std::vec have copy_into(offset, source_slice)?
-            let (_, right) = ram.split_at(offset >> 2);
-            let (left, _) = right.split_at((length >> 2) as usize);
-            Ok(left.to_owned())
+            let slice: &[u32] = &ram[offset >> 2..][..(length >> 2) as usize];
+            Ok(slice.to_owned())
         } else if offset < 0x03FF_FFFF {
             // some bytes in 0-8KiB every 512KiB apparently contains non-zero values, everything else is zero
             if (offset & 0x0007_FFFF) < 0x0000_2000 {
@@ -191,9 +190,8 @@ impl Addressable for RdramInterface {
 
             // why doesn't std::vec have copy_into(offset, source_slice)?
             let count = (length >> 2) as usize;
-            let (_, right) = ram.split_at_mut(offset >> 2);
-            let (left, _) = right.split_at_mut(count);
-            left.copy_from_slice(&block[0..count]);
+            let slice = &mut ram[offset >> 2..][..count]; 
+            slice.copy_from_slice(&block[..count]);
 
             // if we're DMAing less than a multiple of 4..
             match length & 3 {
