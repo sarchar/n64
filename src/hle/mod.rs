@@ -626,6 +626,7 @@ impl Hle {
             0xB54E7F93 => HleRspSoftwareVersion::S3DEX2, // Nintendo 64 demos
             0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
             0x3F7247FB => HleRspSoftwareVersion::S3DEX2, // Tetrisphere
+            0xE41EC47E => HleRspSoftwareVersion::S3DEX2, // MK Trilogy
 
             0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
             0x22099872 => HleRspSoftwareVersion::F3DEX2, // Zelda MM Release
@@ -635,7 +636,16 @@ impl Hle {
             0x21F91834 => HleRspSoftwareVersion::F3DEX2, // Paper Mario, (NuSys?), 
             0xBC45382E => HleRspSoftwareVersion::F3DEX2, // Kirby 64
             0x65201989 => HleRspSoftwareVersion::F3DEX2, // Gauntlet Legends
+            0xCB8C9B6C => HleRspSoftwareVersion::F3DEX2, // NBA Live 99
+            0x9551177B => HleRspSoftwareVersion::F3DEX2, // NHL 99
 
+            // F3DEX1
+            //0xA346A5CC => HleRspSoftwareVersion::F3DEX1, // Bomberman 64
+            //0x8805FFEA => HleRspSoftwareVersion::F3DEX1, // Mario Kart
+            //0x6EAA1DA8 => HleRspSoftwareVersion::F3DEX1, // Rayman 2
+            //0xEE47381B => HleRspSoftwareVersion::F3DEX1, // Hexen 64
+
+            //0x86B1593E => HleRspSoftwareVersion:: ???  , // Star Wars Rogue Squadron
 
             _ => HleRspSoftwareVersion::Unknown,
         };

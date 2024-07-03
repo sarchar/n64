@@ -1132,20 +1132,11 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn prefetch_bridge(cpu: *mut Self) -> u64 {
-        let cpu = { &mut *cpu };
+    extern "win64" fn prefetch_bridge(cpu: *mut Self) {
+        let cpu = unsafe { &mut *cpu };
         cpu.next_instruction = None;
         cpu.next_instruction_pc = cpu.pc;
         cpu.pc += 4;
-        0
-        //println!("DBG prefetching with pc=${:08X}", cpu.pc as u32);
-        //match cpu.prefetch() {
-        //    Ok(_) => 0,
-        //    Err(err) => {
-        //        // TODO handle rrors
-        //        todo!("prefetch error = {:?} on address ${:16X}", err, cpu.pc as u64);
-        //    }
-        //}
     }
 
     fn exception(&mut self, exception_code: u64, use_special: bool) -> Result<(), InstructionFault> {
@@ -1167,10 +1158,6 @@ impl Cpu {
         } else {
             self.current_instruction_pc
         } as i32) as u64;
-
-        // TODO debugging LoZ crash
-        //.if exception_code == ExceptionCode_CpU && self.current_instruction_pc <= 0x0500_0000 { panic!("pc = ${:08X}, BadVAddr=${:08X}", self.current_instruction_pc, self.cp0gpr[Cop0_BadVAddr]); }
-        //.println!("exception {}: pc = ${:08X}, EPC=${:08X}", exception_code, self.current_instruction_pc, self.cp0gpr[Cop0_EPC]);
 
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
         // TLB and XTLB miss are vectored to offsets 0 and 0x80, respectively
@@ -1918,45 +1905,43 @@ impl Cpu {
         }
     }
 
-    fn lookup_cached_block(&mut self, virtual_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
-        if let Some(physical_address) = self.translate_address(virtual_address, false, false)? {
-            trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
-            //println!("[looking up cached block @ physical_address=${:08X}]", physical_address.physical_address as u32);
+    fn lookup_cached_block(&mut self, physical_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
+        trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address as u32);
+        //println!("[looking up cached block @ physical_address=${:08X}]", physical_address as u32);
 
-            // determine where in the block map to look up the block
-            let cached_block_map_index = match self.get_cached_block_map_index(physical_address.physical_address) {
-                Some(v) => v,
-                None => return Ok(CachedBlockStatus::Uncompilable),
-            };
+        // determine where in the block map to look up the block
+        let cached_block_map_index = match self.get_cached_block_map_index(physical_address) {
+            Some(v) => v,
+            None => {
+                println!("uncompilable: ${:08X}", physical_address);
+                return Ok(CachedBlockStatus::Uncompilable);
+            },
+        };
 
-            match self.cached_block_map[cached_block_map_index] {
-                Some(CachedBlockReference::CachedBlock(block_id)) => {
-                    // block must exist (and block starts at the provided address)
-                    let cached_block = self.cached_blocks.get(&block_id).unwrap().clone();
-                    return Ok(CachedBlockStatus::Cached(cached_block));
-                },
+        match self.cached_block_map[cached_block_map_index] {
+            Some(CachedBlockReference::CachedBlock(block_id)) => {
+                // block must exist (and block starts at the provided address)
+                let cached_block = self.cached_blocks.get(&block_id).unwrap().clone();
+                return Ok(CachedBlockStatus::Cached(cached_block));
+            },
 
-                Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) => {
-                    if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
-                        if referenced_block_id == block_id_reference {
-                            //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address.physical_address);
-                            // block id must exist because this is a CachedBlock
-                            let cached_block = self.cached_blocks.get(&referenced_block_id).unwrap().clone();
-                            return Ok(CachedBlockStatus::Cached(cached_block));
-                        }
+            Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) => {
+                if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
+                    if referenced_block_id == block_id_reference {
+                        //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address);
+                        // block id must exist because this is a CachedBlock
+                        let cached_block = self.cached_blocks.get(&referenced_block_id).unwrap().clone();
+                        return Ok(CachedBlockStatus::Cached(cached_block));
                     }
-                    return Ok(CachedBlockStatus::NotCached);
-                },
-
-                // not found
-                None => {
-                    return Ok(CachedBlockStatus::NotCached);
                 }
+                return Ok(CachedBlockStatus::NotCached);
+            },
+
+            // not found
+            None => {
+                return Ok(CachedBlockStatus::NotCached);
             }
         }
-
-        // fallback to interpreter
-        Ok(CachedBlockStatus::Uncompilable)
     }
 
     // run the JIT core, return the number of cycles actually ran
@@ -2006,7 +1991,12 @@ impl Cpu {
             let num_steps_before = self.num_steps;
             self.jit_run_limit = std::cmp::min(2 * self.cp0_compare_distance as u64, (steps_start + max_cycles) - self.num_steps);
 
-            match self.lookup_cached_block(self.next_instruction_pc)? {
+            let physical_address = match self.translate_address(self.next_instruction_pc, false, false)? {
+                Some(address) => address.physical_address,
+                None => panic!("can't translate next_instruction_pc=${:08X}, self.pc=${:08X}", self.next_instruction_pc, self.pc),
+            };
+
+            match self.lookup_cached_block(physical_address)? {
                 CachedBlockStatus::NotCached => {
                     debug!(target: "JIT-BUILD", "[pc=${:08X} not found in block cache, compiling]", self.next_instruction_pc as u32);
 
@@ -2015,14 +2005,14 @@ impl Cpu {
                     let compiled_block = compiled_block_ref.borrow();
 
                     // execute the block
-                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.next_instruction_pc-compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     let compiled_block = compiled_block.borrow();
-                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, self.next_instruction_pc-compiled_block.start_address, self.num_steps, self.jit_run_limit);
-                    self.num_steps += self.run_block(&*compiled_block, self.next_instruction_pc)?; // start execution at an offset into the block
+                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    self.num_steps += self.run_block(&*compiled_block, physical_address)?; // start execution at an offset into the block
                 }
 
                 _ => {
@@ -2074,6 +2064,8 @@ impl Cpu {
 
         // get a copy of the rdram with instructions we're going to build
         let physical_address = self.translate_address(start_address, false, false)?.unwrap().physical_address;
+
+        // read a block of memory instead of read_u32() on each instruction
         let source_buffer = if physical_address < 0x80_0000 {
             let access = self.comms.rdram.read().unwrap();
             let rdram: &[u32] = access.as_ref().unwrap();
@@ -2520,7 +2512,7 @@ impl Cpu {
 
         let compiled_block = CompiledBlock {
             id           : block_id,
-            start_address: start_address,
+            start_address: physical_address,
             _entry_point : entry_point,
             _code_buffer : executable_buffer,
             jump_table   : jump_table,
@@ -2577,10 +2569,11 @@ impl Cpu {
     #[inline(always)]
     extern "win64" fn lookup_compiled_instruction_address(cpu: *mut Cpu, virtual_address: u64) -> u64 {
         let cpu = unsafe { &mut *cpu };
-        match cpu.lookup_cached_block(virtual_address) {
+        let physical_address = cpu.translate_address(virtual_address, false, false).unwrap().unwrap().physical_address;
+        match cpu.lookup_cached_block(physical_address) {
             Ok(CachedBlockStatus::Cached(compiled_block)) => {
                 let borrow = compiled_block.borrow();
-                let instruction_index = (virtual_address - borrow.start_address) >> 2;
+                let instruction_index = (physical_address - borrow.start_address) >> 2;
                 borrow.jump_table[instruction_index as usize]
             },
             _ => 0,
@@ -3948,7 +3941,7 @@ impl Cpu {
                     0b000_010 => { // tlbwi
                         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwi", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
-                        unsafe extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
+                        extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
                             trace!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                         cpu.cp0gpr[Cop0_Index], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
@@ -3961,10 +3954,18 @@ impl Cpu {
                     },
 
                     0b000_110 => { // tlbwr
-                        ////info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                        ////            self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
-                        //self.set_tlb_entry(self.cp0gpr[Cop0_Random] & 0x1F);
-                        todo!()
+                        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+
+                        extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
+                            let cpu = unsafe { &mut *cpu };
+                            info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                        cpu.cp0gpr[Cop0_Random], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
+                            cpu.set_tlb_entry(cpu.cp0gpr[Cop0_Random] & 0x1F);
+                        }
+
+                        letscall!(assembler, set_tlb_entry_bridge);
+
+                        CompileInstructionResult::Continue
                     },
 
                     0b001_000 => { // tlbp
@@ -4022,11 +4023,6 @@ impl Cpu {
                             ;no_erl:
                             // copy Cop0_EPC to the jump target
                             ;   mov v_tmp, QWORD [r_cp0gpr + (Cop0_EPC * 8) as i32]
-                            // TODO debugging LoZ
-                            // ;   cmp v_tmp_32, DWORD 0x04651E39 as _
-                            // ;   jne >asdf
-                            // ;   int3
-                            // ;asdf:
                             ;   mov QWORD [rsp+s_jump_target], v_tmp
                             // clear bit 0x02 of Cop0_Status
                             ;   and QWORD [r_cp0gpr + (Cop0_Status * 8) as i32], DWORD !0x0000_0002u32 as _ // clear bit (sign-extended DWORD)
@@ -4063,7 +4059,7 @@ impl Cpu {
         // compute the current step number
         let cur_steps = cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64;
         // compute the increment to Count and add it
-        let cp0_count_increment = (cpu.num_steps - cpu.cp0_count_tracker) >> 1;
+        let cp0_count_increment = (cur_steps - cpu.cp0_count_tracker) >> 1;
         cpu.cp0gpr[Cop0_Count] = ((cpu.cp0gpr[Cop0_Count] as u32) + (cp0_count_increment as u32)) as u64;
         // update the count tracker (so the next update is correct)
         let new_cp0_count_tracker = cur_steps & !1;
@@ -4954,15 +4950,6 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // TODO debugging a crash with LoZ
-        // if (self.current_instruction_pc as u32) == 0x80004168 { // print value of offset on this lw
-        //     unsafe extern "win64" fn print_offset(_cpu: *mut Cpu, offset: u64) {
-        //         println!("pc=0x80004168 offset=${:08X} (exception)", offset as u32);
-        //     }
-        //     letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
-        //     letscall!(assembler, print_offset);
-        // }
-
         // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
@@ -4988,27 +4975,6 @@ impl Cpu {
 
         // make the bridge call
         letscall!(assembler, Cpu::read_u32_bridge);
-
-        // TODO debugging crash LoZ
-        //.if (self.current_instruction_pc as u32) == 0x8000_4168 && self.inst.rt == 27 {
-        //.    letsgo!(assembler
-        //.        ;   cmp eax, DWORD 0x04651E39
-        //.        ;   jne >ffff
-        //.    );
-
-        //.    letssetupexcept!(self, assembler, false);
-        //.    letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
-
-        //.    unsafe extern "win64" fn ung(cpu: *mut Cpu, addr: u64) {
-        //.        panic!("reading from ${:08X} gave us 0x04651E39, cpu=${:08X}", addr, (*cpu).current_instruction_pc as u32);
-        //.    }
-
-        //.    letscall!(assembler, ung);
-
-        //.    letsgo!(assembler
-        //.        ;ffff:
-        //.    );
-        //.}
 
         // check the jit_other_exception flag after call to read_u32_bridge
         letscheck!(assembler);
@@ -5940,28 +5906,6 @@ impl Cpu {
         // place virtual address in the 3rd argument (r8)
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
 
-        // TODO debugging crash LoZ
-        //.letsgo!(assembler
-        //.    ;   cmp r8d, DWORD 0x8000AD7Cu32 as _
-        //.    ;   jne >jjjj
-        //.);
-
-        //.letsgo!(assembler
-        //.    ;   cmp edx, DWORD 0x04651E39 as _
-        //.    ;   jne >jjjj
-        //.);
-
-        //.unsafe extern "win64" fn ung(cpu: *mut Cpu) {
-        //.    panic!("writing 0x04651E39 to 0x8000AD7C at pc=${:08X}", (*cpu).current_instruction_pc);
-        //.}
-
-        //.letssetupexcept!(self, assembler, false);
-        //.letscall!(assembler, ung);
-
-        //.letsgo!(assembler
-        //.    ;jjjj:
-        //.);
-
         letsgo!(assembler
             ;   test r8b, BYTE 0x03         // check if address is valid (low two bits 00)
             ;   jz >valid                   // .
@@ -5970,29 +5914,6 @@ impl Cpu {
             ;   xor r8d, r8d
             ;   inc r8d           // is_write argument is true
         );
-
-        // break if address==DBG A:$807FFD9C V:$807FFDF8 
-        //letsgo!(assembler
-        //    ;   mov v_tmp, r8
-        //    ;   cmp v_tmp_32, DWORD 0x807F_FD9Cu32 as _
-        //    ;   jne >skip
-        //    ;   mov v_tmp_32, edx
-        //    ;   cmp v_tmp_32, DWORD 0x807F_FDF8u32 as _
-        //    ;   jne >skip
-        //    ;   mov rax, DWORD self.current_instruction_pc as i32 as _
-        //    ;   int3
-        //    ;skip:
-        //    // break if DBG A:$807FFD5C V:$0000001C
-        //    ;   mov v_tmp, r8
-        //    ;   cmp v_tmp_32, DWORD 0x807F_FD5Cu32 as _
-        //    ;   jne >skip
-        //    ;   mov v_tmp_32, edx
-        //    ;   cmp v_tmp_32, DWORD 0x0000_001Cu32 as _
-        //    ;   jne >skip
-        //    ;   mov rax, DWORD self.current_instruction_pc as i32 as _
-        //    ;   int3
-        //    ;skip:
-        //);
 
         // an address_exception occurred. rcx will get 'self', rdx has the virtual address
         // that caused the exception. we just set r8 to 1 for writes (above)
@@ -8195,7 +8116,7 @@ impl Cpu {
 
     fn build_special_sub(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sub r{}, r{}, r{}", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
-                 self.inst.rd, self.inst.rt, self.inst.rs);
+                 self.inst.rd, self.inst.rs, self.inst.rt);
 
         // start with v_tmp set to 0 if zero register is used
         if self.inst.rs == 0 {
@@ -8208,7 +8129,7 @@ impl Cpu {
             );
         }
 
-        // don't add anything if rt is zero (thus, no possible overflow)
+        // don't subtract anything if rt is zero (thus, no possible overflow)
         if self.inst.rt != 0 {
             letsgo!(assembler
                 ;   sub v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]

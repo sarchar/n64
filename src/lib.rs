@@ -199,6 +199,9 @@ pub struct SystemCommunication {
     // emulation flags that change the way emulation behaves
     pub settings: Arc<RwLock<Settings>>,
 
+    // disable CPU speed throttling
+    pub cpu_throttle: Arc<AtomicBool>,
+
     // tweakables -- fun for geeks
     pub tweakables: Arc<RwLock<Tweakables>>,
 }
@@ -219,6 +222,7 @@ impl SystemCommunication {
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
             controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
+            cpu_throttle      : Arc::new(AtomicBool::new(true)),
             settings          : Arc::new(RwLock::new(Settings::default())),
             tweakables        : Arc::new(RwLock::new(Tweakables::default())),
         }
@@ -248,6 +252,7 @@ pub struct System {
     pub cpu: RefCell<cpu::Cpu>,
 
     start_time: std::time::Instant,
+    last_cpu_steps: usize,
 }
 
 impl System {
@@ -272,6 +277,7 @@ impl System {
             cpu: cpu,
 
             start_time: std::time::Instant::now(),
+            last_cpu_steps: 0,
         }
     }
 
@@ -303,10 +309,15 @@ impl System {
             }
         } else {
             // delay...
-            //let mut cur_ips = 95_000_000.0;
-            //while cur_ips > 93_750_000.0 {
-            //    cur_ips = (self.comms.total_cpu_steps.get() as f64) / self.start_time.elapsed().as_secs_f64();
-            //}
+            if self.comms.cpu_throttle.load(Ordering::Relaxed) {
+                let mut cur_ips = 95_000_000.0;
+                while cur_ips > 93_750_000.0 {
+                    cur_ips = ((self.comms.total_cpu_steps.get() - self.last_cpu_steps) as f64) / self.start_time.elapsed().as_secs_f64();
+                }
+            } else {
+                self.last_cpu_steps = self.comms.total_cpu_steps.get();
+                self.start_time = std::time::Instant::now();
+            }
 
             if !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
                 cycles_ran += self.cpu.borrow_mut().run_for(cpu_cycles)?;

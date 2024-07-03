@@ -1072,6 +1072,9 @@ impl App for Game {
             // TODO reset rendering states
         }
 
+        // fast-forward
+        self.comms.cpu_throttle.store(!appwnd.input().key_held(KeyCode::Backquote), Ordering::Relaxed);
+
         // Show demo window
         if appwnd.input().key_pressed(KeyCode::F12) {
             self.demo_open = true;
@@ -1215,7 +1218,12 @@ impl App for Game {
                                                 image_data[iy] = u32::from_le_bytes(image_data[iy].to_be_bytes());
                                             },
                                             3 => { 
-                                                image_data[iy] = rdram[start+i] | 0xff;
+                                                let pix = rdram[start+i];
+                                                let b = (pix >> 24) & 0xFF;
+                                                let g = (pix >> 16) & 0xFF;
+                                                let r = (pix >>  8) & 0xFF;
+                                                let a = 0xFF;
+                                                image_data[iy] = (r << 24) | (g << 16) | (b << 8) | (a << 0)
                                             },
                                             _ => break,
                                         }
