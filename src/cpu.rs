@@ -3648,8 +3648,6 @@ impl Cpu {
                         Cop0_Count => {
                             // put the cycle count into edx
                             letsgo!(assembler
-                                //;   int3
-                                //;   mov edx, DWORD 1 as _
                                 ;   mov edx, DWORD [rsp+s_cycle_count]
                             );
 
