@@ -265,6 +265,18 @@ impl<'a> AppWindow<'a> {
                     //    println!("unhandled event {:?}", ev);
                     //}
                 }
+
+                if appwnd.gilrs.counter() % 1000 == 0 {
+                    let mut gamepads = Vec::new();
+                    for (id, _) in appwnd.gilrs.gamepads() {
+                        gamepads.push(id);
+                    }
+                    for id in gamepads {
+                        appwnd.gamepad_connected(id);
+                    }
+                }
+
+                appwnd.gilrs.inc();
             }
 
             if let Event::WindowEvent { event, .. } = &event {
