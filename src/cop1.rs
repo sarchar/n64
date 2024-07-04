@@ -198,16 +198,6 @@ type Cop1Instruction = fn(&mut Cop1) -> Result<(), InstructionFault>;
 
 impl Cop1 {
     pub fn new() -> Cop1 {
-        println!("fe_invalid={:x}", fe_invalid);
-        println!("fe_divbyzero={:x}", fe_divbyzero);
-        println!("fe_overflow={:x}", fe_overflow);
-        println!("fe_underflow={:x}", fe_underflow);
-        println!("fe_inexact={:x}", fe_inexact);
-        println!("fe_all_except={:x}", fe_all_except);
-        println!("fe_tonearest={:x}", fe_tonearest);
-        println!("fe_downward={:x}", fe_downward);
-        println!("fe_upward={:x}", fe_upward);
-        println!("fe_towardzero={:x}", fe_towardzero);
         init_csr();
 
         Cop1 {
