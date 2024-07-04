@@ -84,6 +84,14 @@ impl AudioInterface {
     pub fn step(&mut self) {
         while let Ok(_) = self.dma_completed_rx.try_recv() {}
 
+        // if cpu_throttle is disabled, kill all the audio playback
+        // we still need to cycle next_buffer and trigger interrupts though
+        let can_play = self.comms.cpu_throttle.load(Ordering::Relaxed);
+        if !can_play {
+            self.audio_queue.clear();
+            self.audio_queue.pause();
+        }
+
         // return if we don't need to be playing audio
         if !self.dma_enable { return; }
 
@@ -96,14 +104,16 @@ impl AudioInterface {
             // take the next buffer and replace it with an empty one
             let buffer = std::mem::replace(&mut self.next_buffer, Vec::new()); 
 
-            // queue the data into SDL
-            let buffer_slice: &[f32] = &buffer;
-            self.audio_queue.queue_audio(&buffer_slice).unwrap();
+            if can_play {
+                // queue the data into SDL
+                let buffer_slice: &[f32] = &buffer;
+                self.audio_queue.queue_audio(&buffer_slice).unwrap();
 
-            // make sure playback is enabled
-            self.play();
+                // make sure playback is enabled
+                self.play();
 
-            //println!("queued up audio buffer sample count={}", buffer.len());
+                //println!("queued up audio buffer sample count={}", buffer.len());
+            }
         } else {
             // there's no next buffer, technically audio could still be playing but we're not
             // queuing audio data any more
