@@ -1,5 +1,6 @@
 use std::fmt;
 use std::mem;
+use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 
 #[allow(unused_imports)]
@@ -95,7 +96,7 @@ pub struct Rcp {
 }
 
 impl Rcp {
-    pub fn new(mut comms: SystemCommunication, boot_rom: Vec<u8>, cartridge_rom: Vec<u8>) -> Rcp {
+    pub fn new<P: AsRef<Path>>(mut comms: SystemCommunication, boot_rom: Vec<u8>, rom_filename: P, cartridge_rom: Vec<u8>) -> Rcp {
         // create the start dma channel
         let (start_dma_tx, start_dma_rx) = mpsc::channel();
         comms.start_dma_tx = Some(start_dma_tx.clone());
@@ -105,7 +106,7 @@ impl Rcp {
         comms.mi_interrupts_tx = Some(mi.get_update_channel());
 
         // create the PI first
-        let mut pi = PeripheralInterface::new(comms.clone(), cartridge_rom);
+        let mut pi = PeripheralInterface::new(comms.clone(), rom_filename, cartridge_rom);
 
         // the PIF-ROM needs to know what CIC chip the cartridge is using, so we pass it along
         let pif = PifRom::new(comms.clone(), boot_rom, &mut pi);

@@ -1,3 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
+use std::time::Instant;
+
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
@@ -25,7 +29,7 @@ enum CicType {
     UnknownPAL,  // uses the 7101 seed
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum Eeprom {
     None,
     _4KiB,
@@ -45,6 +49,9 @@ pub struct PifRom {
     seed: u32,
     _cic_type: CicType,
     eeprom: Eeprom,
+    eeprom_file: PathBuf,
+    eeprom_data: Option<Vec<u8>>,
+    eeprom_dirty: Option<Instant>,
 }
 
 impl PifRom {
@@ -86,6 +93,22 @@ impl PifRom {
             _ => Eeprom::None,
         };
 
+        // base the eeprom filename on the sram filename
+        let mut eeprom_file = pi.get_sram_file().clone();
+        eeprom_file.set_extension("eeprom");
+
+        let eeprom_data = if eeprom != Eeprom::None {
+            match fs::read(&eeprom_file) {
+                Ok(data) => {
+                    info!(target: "PIF", "loaded {} bytes from {:?}", data.len(), eeprom_file);
+                    Some(data)
+                },
+                Err(_)   => None,
+            }
+        } else {
+            None
+        };
+
         PifRom {
             comms: comms,
 
@@ -96,6 +119,9 @@ impl PifRom {
             seed: seed,
             _cic_type: cic_type,
             eeprom: eeprom,
+            eeprom_file: eeprom_file,
+            eeprom_data: eeprom_data,
+            eeprom_dirty: None,
         }
     }
 
@@ -263,6 +289,21 @@ impl PifRom {
         }
     }
 
+    pub fn step(&mut self) {
+        if let Some(dirty_time) = self.eeprom_dirty {
+            let elapsed = dirty_time.elapsed().as_secs_f64();
+            if elapsed >= 1.0 {
+                self.save_eeprom();
+                self.eeprom_dirty = None;
+            }
+        }
+    }
+
+    pub fn save_eeprom(&mut self) {
+        std::fs::write(&self.eeprom_file, self.eeprom_data.as_ref().unwrap()).expect("could not save EEPROM data");
+        info!(target: "PIF", "saved EEPROM to {:?}", self.eeprom_file);
+    }
+
     fn do_joybus(&mut self) {
         trace!(target: "PIF", "running joybus protocol");
 
@@ -363,7 +404,7 @@ impl PifRom {
                         },
 
                         JOYBUS_COMMAND_READ => { // read button state
-                            trace!(target: "JOY", "{}: JOYBUS_COMMAND_READ channel={}, res_addr={}", cmd_count - 1, channel, res_addr - 0x7C0);
+                            trace!(target: "JOY", "{}: JOYBUS_COMMAND_READ channel={}, cmd_length={}, res_addr={}", cmd_count - 1, channel, cmd_length, res_addr - 0x7C0);
                             if cmd_length != 1 || res_length != 4 {
                                 error!(target: "JOY", "unsupported/incorrect cmd_length ({}) or res_length ({})", cmd_length, res_length);
                                 break 'cmd_loop;
@@ -414,11 +455,51 @@ impl PifRom {
                         JOYBUS_COMMAND_READ_EEPROM => { // read EEPROM block
                             let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
                             warn!(target: "JOY", "{}: JOYBUS_COMMAND_READ_EEPROM channel={}, block={}, res_addr={}", cmd_count - 1, channel, block, res_addr - 0x7C0);
+
+                            if self.eeprom_data.is_some() {
+                                for i in 0..8usize {
+                                    let d = self.eeprom_data.as_ref().unwrap()[((block * 8) as usize) + i];
+                                    self.write_u8_correct(d as u32, res_addr + i).unwrap();
+                                }
+                            } else {
+                                // fill response with 0's
+                                for i in 0..8usize {
+                                    self.write_u8_correct(0, res_addr + i).unwrap();
+                                }
+                            }
                         },
 
                         JOYBUS_COMMAND_WRITE_EEPROM => { // write EEPROM block
-                            let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
-                            warn!(target: "JOY", "{}: JOYBUS_COMMAND_WRITE_EEPROM channel={}, block={}, res_addr={}", cmd_count - 1, channel, block, res_addr - 0x7C0);
+                            let mut block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
+                            warn!(target: "JOY", "{}: JOYBUS_COMMAND_WRITE_EEPROM channel={}, block={}, cmd_length={}, res_addr={}", cmd_count - 1, channel, block, cmd_length, res_addr - 0x7C0);
+
+                            if self.eeprom_data.is_none() {
+                                match self.eeprom {
+                                    Eeprom::_4KiB => {
+                                        self.eeprom_data = Some(Vec::new());
+                                        self.eeprom_data.as_mut().unwrap().resize(4*1024/8, 0);
+                                        block &= 0x3F; // mask out high two bits for 4KiB eeproms
+                                    },
+                                    Eeprom::_16KiB => {
+                                        self.eeprom_data = Some(Vec::new());
+                                        self.eeprom_data.as_mut().unwrap().resize(16*1024/8, 0);
+                                    },
+                                    Eeprom::None => {},
+                                }
+                            }
+
+                            if self.eeprom_data.is_some() {
+                                for i in 0..8usize {
+                                    let d = self.read_u8(cmd_start + COMMAND_OFFSET + 2 + i).unwrap();
+                                    self.eeprom_data.as_mut().unwrap()[((block * 8) as usize) + i] = d;
+                                }
+
+                                // mark eeprom as dirty
+                                self.eeprom_dirty = Some(Instant::now());
+                            }
+
+                            // writing 0 indicates to the game that the eeprom was not busy
+                            self.write_u8_correct(0, res_addr + 0).unwrap();
                         },
 
                         _ => {

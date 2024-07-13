@@ -1,4 +1,6 @@
 use std::cmp;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::mpsc;
 
@@ -36,10 +38,15 @@ pub struct PeripheralInterface {
 
     // Timing
     test_start: Option<std::time::Instant>,
+
+    // SRAM
+    sram_file: PathBuf,
+    sram: Option<Vec<u32>>,
+    sram_dirty: Option<std::time::Instant>,
 }
 
 impl PeripheralInterface {
-    pub fn new(comms: SystemCommunication, cartridge_rom: Vec<u8>) -> PeripheralInterface {
+    pub fn new<P: AsRef<Path>>(comms: SystemCommunication, rom_filename: P, cartridge_rom: Vec<u8>) -> PeripheralInterface {
         // convert cartridge_rom to u32
         let mut word_rom = vec![];
         for i in (0..((cartridge_rom.len() / 4) * 4)).step_by(4) {
@@ -48,6 +55,23 @@ impl PeripheralInterface {
 
         // need some dma completed channels
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
+
+        // try loading SRAM data if it exists
+        let savedata_dir = get_savedata_dir();
+        let mut sram_file = savedata_dir.join(rom_filename);
+        sram_file.set_extension("sram");
+
+        let sram = match fs::read(&sram_file) {
+            Ok(data) => { // convert to words
+                assert!((data.len() % 4) == 0);
+                let mut words = Vec::new();
+                for chunk in data.chunks(4) {
+                    words.push(((chunk[0] as u32) << 24) | ((chunk[1] as u32) << 16) | ((chunk[2] as u32) << 8) | (chunk[3] as u32));
+                }
+                Some(words)
+            },
+            Err(_) => None,
+        };
 
         PeripheralInterface {
             comms: comms,
@@ -72,7 +96,15 @@ impl PeripheralInterface {
             is_write_pos: 0,
 
             test_start: None,
+
+            sram_file: sram_file.into(),
+            sram: sram,
+            sram_dirty: None,
         }
+    }
+
+    pub fn get_sram_file(&self) -> &PathBuf {
+        &self.sram_file
     }
 
     pub fn reset(&mut self) {
@@ -98,6 +130,25 @@ impl PeripheralInterface {
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_PI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
         }
+
+        if let Some(dirty_time) = self.sram_dirty {
+            let elapsed = dirty_time.elapsed().as_secs_f64();
+            if elapsed >= 1.0 {
+                self.save_sram();
+                self.sram_dirty = None;
+            }
+        }
+    }
+
+    pub fn save_sram(&mut self) {
+        {
+            let mut fp = std::fs::File::create(&self.sram_file).expect("could not save SRAM data");
+            for word in self.sram.as_ref().unwrap() {
+                let _ = fp.write(&word.to_be_bytes()).expect("could not save SRAM data");
+            }
+        }
+
+        info!(target: "SRAM", "saved SRAM to {:?}", self.sram_file);
     }
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
@@ -379,6 +430,7 @@ impl Addressable for PeripheralInterface {
             info!(target: "PI", "read32 N64DD IPL rom offset=${:08X}", offset);
             Ok(0)
         } else if offset < 0x1000_0000 {
+            todo!();
             error!(target: "PI", "unimplemented Cartridge SRAM/FlashRAM read");
             Ok(0)
         } else if offset == 0x13FF_0000 { // ISViewer magic
@@ -561,7 +613,21 @@ impl Addressable for PeripheralInterface {
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
             info!(target: "SRAM", "read_block {} bytes from ${:08X}", length, offset);
             let length = if length > (256*1024) { 256 * 1024 } else { length };
-            Ok(vec![0u32; (length >> 2) as usize])
+            match self.sram {
+                None => { // return all 0 while self.sram is None
+                    Ok(vec![0u32; (length >> 2) as usize])
+                },
+                // if the sram exists, make sure it's the right size and return a chunk
+                Some(ref mut sram_data) => {
+                    let offset = offset - 0x0800_0000;
+                    let end = (offset + length as usize) >> 2;
+                    if end > sram_data.len() {
+                        info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                        sram_data.resize(end, 0);
+                    }
+                    Ok(sram_data[offset >> 2..][..(length >> 2) as usize].to_owned())
+                },
+            }
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
             let length = (length + 3) & !3; // round length up to a multiple of 4 for the read
             if (offset & 0x02) != 0 { // 16-bit aligned DMA, slow for now but I think not too common
@@ -592,11 +658,36 @@ impl Addressable for PeripheralInterface {
 
     fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
         if (block.len() * 4) as u32 != length { todo!(); }
+        let length = if length > (256*1024) { 256 * 1024 } else { length };
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
-            info!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len(), offset);
+            info!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len() * 4, offset);
+            let offset = offset - 0x0800_0000;
+
+            if self.sram.is_none() {
+                self.sram = Some(Vec::new());
+            }
+    
+            let end = (offset + length as usize) >> 2;
+            if end > self.sram.as_ref().unwrap().len() {
+                info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                self.sram.as_mut().unwrap().resize(end, 0);
+            }
+
+            // copy block[:length] into sram
+            self.sram.as_mut().unwrap()[offset >> 2..][..(length >> 2) as usize].copy_from_slice(&block[..(length >> 2) as usize]);
+            self.sram_dirty = Some(std::time::Instant::now());
+        } else {
+            unimplemented!("PI: unknown DMA to ${:08X}", offset);
         }
         Ok(WriteReturnSignal::None)
     }
 }
 
-
+impl Drop for PeripheralInterface {
+    fn drop(&mut self) {
+        todo!();
+        //if self.sram_dirty.is_some() {
+        //    self.save_sram();
+        //}
+    }
+}

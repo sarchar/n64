@@ -51,6 +51,8 @@ impl SerialInterface {
             self.interrupt_flag = true;
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();
         }
+
+        self.pif.step();
     }
 
     pub fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {

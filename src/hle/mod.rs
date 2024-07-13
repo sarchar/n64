@@ -2368,6 +2368,7 @@ impl Hle {
 
         // calculate row stride of the source texture data, not always the same as width
         let line_bytes = (current_tile.line as u32) * 8;
+        if line_bytes == 0 { return; }
 
         // TODO we really shouldn't use lr coordinates if clamp or wrapping
         // isn't set. We could just use padded_width to map the width of the texture,

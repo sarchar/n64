@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::fs;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,6 +11,7 @@ use std::sync::mpsc;
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 
 use atomic_counter::{AtomicCounter, RelaxedCounter};
+use directories_next::ProjectDirs;
 
 pub mod audio;
 pub mod avx512f_wrapper;
@@ -26,6 +28,10 @@ pub mod rdram;
 pub mod rsp;
 pub mod serial;
 pub mod video;
+
+pub const APP_QUALIFIER   : &'static str = "org";
+pub const APP_ORGANIZATION: &'static str = "sarcharsoftware";
+pub const APP_NAME        : &'static str = "Sarchars n64 Emulator";
 
 pub enum WriteReturnSignal {
     InvalidateBlockCache { physical_address: u64, length: usize },
@@ -264,7 +270,7 @@ impl System {
         let boot_rom = fs::read(boot_rom_file_name).expect("Boot rom not found");
 
         // create the RCP and start it
-        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(comms.clone(), boot_rom, cartridge_rom)));
+        let rcp = Rc::new(RefCell::new(rcp::Rcp::new(comms.clone(), boot_rom, PathBuf::from(cartridge_file_name).file_name().unwrap(), cartridge_rom)));
         rcp.borrow_mut().start();
 
         // create the CPU with reference to the bus
@@ -398,3 +404,18 @@ pub struct ControllerState {
     pub x_axis   : f32,
     pub y_axis   : f32,
 }
+
+pub fn get_savedata_dir() -> std::path::PathBuf {
+    let project_dir = ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME).expect("could not get project directory");
+    let savedata_dir = project_dir.data_dir().join("savedata");
+    fs::create_dir_all(&savedata_dir).expect("could not create savedata directory");
+    savedata_dir.into()
+}
+
+pub fn get_config_dir() -> std::path::PathBuf {
+    let project_dirs = ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME).expect("could not get project directory");
+    let config_dir = project_dirs.config_dir();
+    fs::create_dir_all(&config_dir).expect("could not create config directory");
+    config_dir.into()
+}
+

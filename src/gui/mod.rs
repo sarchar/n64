@@ -345,7 +345,9 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     let mut imgui = imgui::Context::create();
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
     platform.attach_window(imgui.io_mut(), appwnd.window(), imgui_winit_support::HiDpiMode::Default);
-    imgui.set_ini_filename(std::path::PathBuf::from("gui.ini"));
+
+    let config_dir = n64::get_config_dir();
+    imgui.set_ini_filename(config_dir.join("imgui.ini"));
 
     // create the imgui font atlas and default font
     let scale_factor = appwnd.window_scale_factor();

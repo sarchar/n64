@@ -401,16 +401,21 @@ macro_rules! letsbranch {
             return CompileInstructionResult::Cant;
         }
 
-        // clear r_cond
-        letsgo!($ops
-            ;   xor r_cond, r_cond
-        );
-
         // if both operands are zero we know the result of the branch in advance
         let mut is_unconditional = false;
-        if $self.inst.rs == 0 && $self.inst.rt == 0 && $branch_taken_on_zero_zero {
-            is_unconditional = true;
+        if $self.inst.rs == 0 && $self.inst.rt == 0 {
+            is_unconditional = $branch_taken_on_zero_zero;
+            if !is_unconditional {
+                letsgo!($ops
+                    ;   xor r_cond, r_cond
+                );
+            }
         } else {
+            // clear r_cond
+            letsgo!($ops
+                ;   xor r_cond, r_cond
+            );
+
             // rs!=0 and rt==0 is a common scenario
             if $self.inst.rs != 0 && $self.inst.rt == 0 {
                 letsgo!($ops
@@ -428,16 +433,9 @@ macro_rules! letsbranch {
                     );
                 }
 
-                // if rt is zero, use faster compare
-                if $self.inst.rt == 0 {
-                    letsgo!($ops
-                        ;   cmp v_tmp, BYTE 0u8 as _
-                    );
-                } else {
-                    letsgo!($ops
-                        ;   cmp v_tmp, QWORD [r_gpr + ($self.inst.rt * 8) as i32] // compare gpr[rs] to gpr[rt]
-                    );
-                }
+                letsgo!($ops
+                    ;   cmp v_tmp, QWORD [r_gpr + ($self.inst.rt * 8) as i32] // compare gpr[rs] to gpr[rt]
+                );
             }
 
             letsgo!($ops
