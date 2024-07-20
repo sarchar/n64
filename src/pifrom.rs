@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use chrono::prelude::*;
+
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
@@ -315,11 +317,13 @@ impl PifRom {
         const RESLEN_OFFSET: usize = 1;
         const COMMAND_OFFSET: usize = 2;
 
-        const JOYBUS_COMMAND_ID: u8 = 0x00;
-        const JOYBUS_COMMAND_READ: u8 = 0x01;
+        const JOYBUS_COMMAND_ID             : u8 = 0x00;
+        const JOYBUS_COMMAND_READ           : u8 = 0x01;
         const JOYBUS_COMMAND_WRITE_ACCESSORY: u8 = 0x03;
-        const JOYBUS_COMMAND_READ_EEPROM: u8 = 0x04;
-        const JOYBUS_COMMAND_WRITE_EEPROM: u8 = 0x05;
+        const JOYBUS_COMMAND_READ_EEPROM    : u8 = 0x04;
+        const JOYBUS_COMMAND_WRITE_EEPROM   : u8 = 0x05;
+        const JOYBUS_COMMAND_RTC_INFO       : u8 = 0x06;
+        const JOYBUS_COMMAND_RTC_READ_BLOCK : u8 = 0x07;
         const JOYBUS_COMMAND_RESET: u8 = 0xFF;
 
         // copy over current ram with the joybus memory copy
@@ -500,6 +504,45 @@ impl PifRom {
 
                             // writing 0 indicates to the game that the eeprom was not busy
                             self.write_u8_correct(0, res_addr + 0).unwrap();
+                        },
+
+                        JOYBUS_COMMAND_RTC_INFO => { // read RTC info
+                            // write 0x0010 as the two byte identifier
+                            self.write_u8_correct(0x00, res_addr + 0).unwrap();
+                            self.write_u8_correct(0x10, res_addr + 1).unwrap();
+                            // write the status byte after
+                            let status = 0;
+                            self.write_u8_correct(status, res_addr + 2).unwrap();
+                        },
+
+                        JOYBUS_COMMAND_RTC_READ_BLOCK => { // read from RTC (8 byte response)
+                            let block = self.read_u8(cmd_start + COMMAND_OFFSET + 1).unwrap();
+                            match block {
+                                0 => todo!(), // control registers
+                                1 => unimplemented!(), // "sram" ?
+                                                       //
+                                2 => { // actual time data
+                                    // TODO: let the user specify datetime
+                                    // TODO: keep it in sync with real time
+                                    let timestamp: DateTime<Local> = Local::now();
+                                    self.write_u8_correct(timestamp.second() , res_addr + 0).unwrap(); // seconds 
+                                    self.write_u8_correct(timestamp.minute() , res_addr + 1).unwrap(); // minute 
+                                    self.write_u8_correct(timestamp.hour()   , res_addr + 2).unwrap(); // hour 
+                                    self.write_u8_correct(timestamp.day()    , res_addr + 3).unwrap(); // dom (1-31)
+                                    self.write_u8_correct(timestamp.weekday().num_days_from_sunday(), res_addr + 4).unwrap(); // dow (0-6)
+                                    self.write_u8_correct(timestamp.month()  , res_addr + 5).unwrap();   // month  (1-12)
+                                    let (_, year) = timestamp.year_ce();
+                                    self.write_u8_correct(year % 100         , res_addr + 6).unwrap();   // year xxYY  (0-99)
+                                    self.write_u8_correct((year / 100).saturating_sub(19), res_addr + 7).unwrap();   // century 0.. (for 1900..)
+                                },
+
+                                3 => { // zeroes
+                                    for i in 0..8 {
+                                        self.write_u8_correct(0, res_addr + i).unwrap();
+                                    }
+                                },
+                                _ => panic!(),
+                            }
                         },
 
                         _ => {

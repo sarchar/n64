@@ -188,29 +188,66 @@ impl Addressable for RdramInterface {
             let mut access = self.ram.write().unwrap();
             let ram = access.as_deref_mut().unwrap();
 
-            // why doesn't std::vec have copy_into(offset, source_slice)?
-            let count = (length >> 2) as usize;
-            let slice = &mut ram[offset >> 2..][..count]; 
-            slice.copy_from_slice(&block[..count]);
-
-            // if we're DMAing less than a multiple of 4..
-            match length & 3 {
-                1 => {
-                    ram[(offset >> 2) + count] = block[count] & 0xFF00_0000 | (ram[(offset >> 2) + count] & 0x00FF_FFFF);
-                }
-                2 => {
-                    ram[(offset >> 2) + count] = block[count] & 0xFFFF_0000 | (ram[(offset >> 2) + count] & 0x0000_FFFF);
-                }
-                3 => {
-                    ram[(offset >> 2) + count] = block[count] & 0xFFFF_FF00 | (ram[(offset >> 2) + count] & 0x0000_00FF);
-                }
-                _ => {},
-            }
-
-            Ok(WriteReturnSignal::InvalidateBlockCache { 
+            let ret = WriteReturnSignal::InvalidateBlockCache { 
                 physical_address: offset as u64,
                 length          : length as usize,
-            })
+            };
+
+            let mut offset = offset;
+            let mut length = length;
+            match offset & 0x03 {
+                2 => { // half-word misaligned
+                    let mut read_index = 0;
+                    let mut write_shift = 0; // write offset starts at 2
+                    // the final incomplete half word doesn't seem to get written to ram
+                    while length >= 2 {
+                        if (read_index & 0x02) == 0 {
+                            ram[(offset & !0x03) >> 2] = (ram[(offset & !0x03) >> 2] & (0xFFFF_0000 >> write_shift)) | ((block[(read_index & !0x03) >> 2] & 0xFFFF_0000) >> 16);
+                        } else {
+                            ram[(offset & !0x03) >> 2] = (ram[(offset & !0x03) >> 2] & (0xFFFF_0000 >> write_shift)) | ((block[(read_index & !0x03) >> 2] & 0x0000_FFFF) << 16);
+                        }
+                        write_shift ^= 16;
+                        offset += 2;
+                        read_index += 2;
+                        length -= 2;
+                    }
+
+                    // if there's one more byte, write it
+                    if length == 1 {
+                        if (read_index & 0x02) == 0 {
+                            ram[(offset & !0x03) >> 2] = (ram[(offset & !0x03) >> 2] & !(0x0000_FF00 << write_shift)) | ((block[(read_index & !0x03) >> 2] & 0xFF00_0000) >> 16);
+                        } else {
+                            ram[(offset & !0x03) >> 2] = (ram[(offset & !0x03) >> 2] & !(0x0000_FF00 << write_shift)) | ((block[(read_index & !0x03) >> 2] & 0x0000_FF00) << 16);
+                        }
+                    }
+                },
+
+                0 => { // aligned dma, use fast memcpy
+                    // why doesn't std::vec have copy_into(offset, source_slice)?
+                    let count = (length >> 2) as usize;
+                    let slice = &mut ram[offset >> 2..][..count]; 
+                    slice.copy_from_slice(&block[..count]);
+
+                    // if we're DMAing less than a multiple of 4..
+                    match length & 3 {
+                        1 => {
+                            ram[(offset >> 2) + count] = block[count] & 0xFF00_0000 | (ram[(offset >> 2) + count] & 0x00FF_FFFF);
+                        }
+                        2 => {
+                            ram[(offset >> 2) + count] = block[count] & 0xFFFF_0000 | (ram[(offset >> 2) + count] & 0x0000_FFFF);
+                        }
+                        3 => {
+                            ram[(offset >> 2) + count] = block[count] & 0xFFFF_FF00 | (ram[(offset >> 2) + count] & 0x0000_00FF);
+                        }
+                        _ => {},
+                    }
+                },
+
+                // misalignments of 1 or 3 bytes not yet implemented, and may never need to be
+                _ => unimplemented!(),
+            }
+
+            Ok(ret)
         } else {
             todo!("DMA write to rdram offset ${:08X}: not likely", offset);
         }

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt;
 use std::mem;
 use std::path::Path;
@@ -18,6 +19,10 @@ use crate::rsp::Rsp;
 use crate::serial::SerialInterface;
 use crate::video::VideoInterface;
 
+pub trait DmaInfoUserData: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
 pub struct DmaInfo {
     pub initiator     : &'static str, // for debugging
     pub source_address: u32, // RCP physical address
@@ -30,6 +35,8 @@ pub struct DmaInfo {
     pub dest_mask     : u32, // address mask after incrementing
     pub source_bits   : u32, // address bits to always OR in after incrementing source
     pub dest_bits     : u32, // address bits to always OR in after incrementing dest
+
+    pub user_data     : Option<Box<dyn DmaInfoUserData>>, // any extra number you need
 
     // callback function to let the initiator know the DMA has completed
     pub completed     : Option<mpsc::Sender<DmaInfo>>,
@@ -52,6 +59,7 @@ impl Default for DmaInfo {
             dest_mask     : 0xFFFF_FFFF,
             source_bits   : 0,
             dest_bits     : 0,
+            user_data     : None,
             completed     : None,
             created_at    : std::time::Instant::now(),
         }

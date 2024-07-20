@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::cmp;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,15 @@ pub struct PeripheralInterface {
     sram_file: PathBuf,
     sram: Option<Vec<u32>>,
     sram_dirty: Option<std::time::Instant>,
+}
+
+struct DmaInfoUserData  {
+    incomplete     : bool,
+    actual_rom_size: u32,
+}
+
+impl rcp::DmaInfoUserData for DmaInfoUserData {
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 impl PeripheralInterface {
@@ -124,8 +134,30 @@ impl PeripheralInterface {
 
     pub fn step(&mut self) {
         // if dma is running, check for dma completed
-        if let Ok(_) = self.dma_completed_rx.try_recv() {
+        while let Ok(dma_info) = self.dma_completed_rx.try_recv() {
             if (self.dma_status & 0x01) != 0 {
+                // update cart_addr
+                let actual_rom_size = if dma_info.user_data.is_some() {
+                    let user_info_ref = dma_info.user_data.as_ref().unwrap();
+                    let user_info = user_info_ref.as_any().downcast_ref::<DmaInfoUserData>().unwrap();
+
+                    // if this is an incomplete DMA, skip all field updates
+                    if user_info.incomplete { continue; }
+
+                    user_info.actual_rom_size
+                } else {
+                    dma_info.length
+                };
+                self.cart_addr = (self.cart_addr + ((actual_rom_size + 1) & !1)) & 0xFFFF_FFFE;
+
+                // update dram_addr
+                let dram_misalignment = self.dram_addr & 0x07;
+                //let old_dram_addr = self.dram_addr;
+                let dram_increment = ((dma_info.length + dram_misalignment + 7) & !7).saturating_sub(dram_misalignment);
+                self.dram_addr = (self.dram_addr + dram_increment & !7) & 0x00FF_FFFE;
+                //if dram_misalignment != 0 { println!("misalignment = {}, dram_addr before={:08X} after={:08X}", dram_misalignment, old_dram_addr, self.dram_addr); }
+
+                // set state and trigger PI interrupt
                 self.dma_status = 0x08;
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_PI, InterruptUpdateMode::SetInterrupt)).unwrap();
             }
@@ -162,6 +194,18 @@ impl PeripheralInterface {
             0x0_0004 => {
                 Ok(self.cart_addr)
             },
+
+            // PI_RD_LEN
+            // reading this register appears to always return 0x7F
+            0x0_0008 => {
+                Ok(0x7F)
+            }
+
+            // PI_WR_LEN
+            // reading this register usually returns 0x7F
+            0x0_000C => {
+                Ok(0x7F)
+            }
 
             // PI_STATUS
             0x0_0010 => {
@@ -232,7 +276,7 @@ impl PeripheralInterface {
             // PI_DRAM_ADDR
             0x0_0000 => {
                 trace!(target: "PI", "write PI_DRAM_ADDR value=${:08X}", value);
-                self.dram_addr = value & 0x00FF_FFFF;
+                self.dram_addr = value & 0x00FF_FFFE;
 
                 WriteReturnSignal::None
             },
@@ -240,7 +284,7 @@ impl PeripheralInterface {
             // PI_CART_ADDR
             0x0_0004 => {
                 trace!(target: "PI", "write PI_CART_ADDR value=${:08X}", value);
-                self.cart_addr = value;
+                self.cart_addr = value & 0xFFFF_FFFE;
 
                 WriteReturnSignal::None
             },
@@ -319,23 +363,90 @@ impl PeripheralInterface {
                         WriteReturnSignal::None
                     } else {
                         let start = self.cart_addr & !0xF000_0000;
-                        let mut end = start + value + 1;
+                        let requested_size = value + 1;
+
+                        // determine the usage of the internal based on rdram page size (with 64-bit aligned access)
+                        let internal_buffer_size = std::cmp::min(128, 0x800 - (self.dram_addr & 0x7F8)); 
+
+                        // PI internal buffer is weird. I guess misaligned first blocks always have
+                        // that last byte written, but less than that works as expected.
+                        let dram_misalignment = self.dram_addr & 0x07;
+
+                        let actual_rom_size = if requested_size >= (std::cmp::max(8, internal_buffer_size - 2) - dram_misalignment) {
+                            (requested_size + 1) & !1
+                        } else {
+                            requested_size
+                        };
+
+                        let actual_transfer_size = if actual_rom_size < (internal_buffer_size - dram_misalignment) {
+                            actual_rom_size.saturating_sub(dram_misalignment)
+                        } else {
+                            actual_rom_size
+                        };
+
+                        //if dram_misalignment == 2 && actual_transfer_size >= 134 {
+                        //    actual_transfer_size += 2;
+                        //} else if dram_misalignment == 6 && actual_transfer_size >= 124 {
+                        //    actual_transfer_size += 6;
+                        //}
+
+                        let mut end = start + actual_transfer_size;
+                        //if dram_misalignment != 0 { println!("starting dma with dram misalignment = {}, length = {} value={}", dram_misalignment, actual_transfer_size, value); }
                         if (start as usize) <= self.cartridge_rom.len() * 4 {
                             // truncate dma
                             end = cmp::min((self.cartridge_rom.len() * 4) as u32, end);
 
-                            let dma_info = DmaInfo {
-                                initiator     : "PI-CART",
-                                source_address: self.cart_addr,
-                                dest_address  : self.dram_addr,
-                                count         : 1,
-                                length        : end - start,
-                                completed     : Some(self.dma_completed_tx.clone()),
-                                ..Default::default()
-                            };
+                            // there's a "gap" of writing in the area internal_buffer_size-2*dram_misalignment..internal_buffer_size-1*dram_misalignment
+                            // simulated here with two DMAs...
+                            if dram_misalignment == 0 || actual_transfer_size < internal_buffer_size - 2*dram_misalignment {
+                                let dma_info = DmaInfo {
+                                    initiator     : "PI-CART",
+                                    source_address: self.cart_addr,
+                                    dest_address  : self.dram_addr,
+                                    count         : 1,
+                                    length        : end - start,
+                                    completed     : Some(self.dma_completed_tx.clone()),
+                                    user_data     : Some(Box::new(DmaInfoUserData {
+                                        incomplete     : false,
+                                        actual_rom_size: actual_rom_size,
+                                    })),
+                                    ..Default::default()
+                                };
+                                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            } else {
+                                let dma_info = DmaInfo {
+                                    initiator     : "PI-CART(1/2)",
+                                    source_address: self.cart_addr,
+                                    dest_address  : self.dram_addr,
+                                    count         : 1,
+                                    length        : internal_buffer_size - 2*dram_misalignment,
+                                    completed     : Some(self.dma_completed_tx.clone()),
+                                    user_data     : Some(Box::new(DmaInfoUserData {
+                                        incomplete     : true,
+                                        actual_rom_size: 0,
+                                    })),
+                                    ..Default::default()
+                                };
+                                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+
+                                self.dram_addr += internal_buffer_size - 1*dram_misalignment;
+                                let dma_info = DmaInfo {
+                                    initiator     : "PI-CART(2/2)",
+                                    source_address: self.cart_addr + internal_buffer_size - 1*dram_misalignment,
+                                    dest_address  : self.dram_addr,
+                                    count         : 1,
+                                    length        : (end - start).saturating_sub(internal_buffer_size - 1*dram_misalignment),
+                                    completed     : Some(self.dma_completed_tx.clone()),
+                                    user_data     : Some(Box::new(DmaInfoUserData {
+                                        incomplete     : false,
+                                        actual_rom_size: actual_rom_size,
+                                    })),
+                                    ..Default::default()
+                                };
+                                self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
+                            }
 
                             self.dma_status |= 0x01;
-                            self.comms.start_dma_tx.as_ref().unwrap().send(dma_info).unwrap();
                             self.comms.break_cpu();
                             WriteReturnSignal::None
                         } else {
@@ -430,9 +541,18 @@ impl Addressable for PeripheralInterface {
             info!(target: "PI", "read32 N64DD IPL rom offset=${:08X}", offset);
             Ok(0)
         } else if offset < 0x1000_0000 {
-            todo!();
-            error!(target: "PI", "unimplemented Cartridge SRAM/FlashRAM read");
-            Ok(0)
+            match self.sram {
+                None => Ok(0),
+                Some(ref mut sram_data) => {
+                    let offset = offset - 0x0800_0000;
+                    let end = (offset + 4) >> 2;
+                    if end > sram_data.len() {
+                        info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                        sram_data.resize(end, 0);
+                    }
+                    Ok(sram_data[offset])
+                },
+            }
         } else if offset == 0x13FF_0000 { // ISViewer magic
             Ok(self.is_magic) // usually 'IS64'
         } else if offset == 0x13FF_0004 { // ISViewer get - get read position
@@ -499,6 +619,25 @@ impl Addressable for PeripheralInterface {
 
         if offset < 0x0500_0000 {
             self.write_register(value, offset)
+        } else if offset < 0x0800_0000 { // ...?
+            panic!("invalid");
+        } else if offset < 0x1000_0000 { // FlashRAM/SRAM
+            let offset = offset - 0x0800_0000;
+
+            if self.sram.is_none() {
+                self.sram = Some(Vec::new());
+            }
+
+            let end = (offset + 4) >> 2;
+            if end > self.sram.as_ref().unwrap().len() {
+                info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                self.sram.as_mut().unwrap().resize(end, 0);
+            }
+
+            self.sram.as_mut().unwrap()[offset >> 2] = value;
+            self.sram_dirty = Some(std::time::Instant::now());
+
+            Ok(WriteReturnSignal::None)
         } else if offset == 0x13FF_0000 { // ISViewer magic
             self.is_magic = value;
             Ok(WriteReturnSignal::None)

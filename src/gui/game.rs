@@ -188,6 +188,7 @@ pub struct Game {
     // texture for rendering the RDRAM framebuffer into
     rdram_framebuffer_texture: Option<wgpu::Texture>,
     rdram_framebuffer_texture_bind_group: Option<wgpu::BindGroup>,
+    rdram_framebuffer_format: (usize, usize, u32),
 
     // the color textures that the N64 game will render to
     game_color_textures: HashMap<u32, wgpu::Texture>,
@@ -839,6 +840,7 @@ impl App for Game {
             // render rdram
             rdram_framebuffer_texture: None,
             rdram_framebuffer_texture_bind_group: None,
+            rdram_framebuffer_format: (0, 0, 0),
 
             // game color and depth render target textures
             game_color_textures: HashMap::new(),
@@ -1184,10 +1186,12 @@ impl App for Game {
                         let format = self.comms.vi_format.load(Ordering::SeqCst);
                         //println!("width={} height={} format={}", width, height, format);
 
-                        if self.rdram_framebuffer_texture.is_none() {
+                        if self.rdram_framebuffer_texture.is_none() || self.rdram_framebuffer_format != (width, height, format) {
+                            //println!("(re-)creating framebuffer texture with height {}", height);
                             let (texture, bind_group) = self.create_color_texture(appwnd, format!("${:08X}", video_buffer).as_str(), width as u32, height as u32, true, false);
                             self.rdram_framebuffer_texture = Some(texture);
                             self.rdram_framebuffer_texture_bind_group = Some(bind_group);
+                            self.rdram_framebuffer_format = (width, height, format);
                         }
 
                         // access RDRAM directly
@@ -1207,23 +1211,28 @@ impl App for Game {
                                         let iy = (y * width) + x;
 
                                         match format {
-                                            2 => {
+                                            2 => { // RGB555
                                                 let shift = 16 - ((i & 1) << 4);
                                                 let pix = (rdram[start + (i >> 1)] >> shift) as u16;
-                                                let r = ((pix >> 11) & 0x1F) as u8;
-                                                let g = ((pix >>  6) & 0x1F) as u8;
-                                                let b = ((pix >>  1) & 0x1F) as u8;
-                                                let a = (pix & 0x01) as u8;
-                                                image_data[iy] = ((b as u32) << 27) | ((g as u32) << 19) | ((r as u32) << 11) | (if a == 1 { 0xFF } else { 0 });
-                                                image_data[iy] = u32::from_le_bytes(image_data[iy].to_be_bytes());
+                                                let mut r = ((pix >> 11) & 0x1F) as u8;
+                                                let rb = r & 0x01;
+                                                r = (r << 3) | (rb << 2) | (rb << 1) | rb;
+                                                let mut g = ((pix >>  6) & 0x1F) as u8;
+                                                let gb = g & 0x01;
+                                                g = (g << 3) | (gb << 2) | (gb << 1) | gb;
+                                                let mut b = ((pix >>  1) & 0x1F) as u8;
+                                                let bb = b & 0x01;
+                                                b = (b << 3) | (bb << 2) | (bb << 1) | bb;
+                                                let a = if (pix & 0x01) == 1 { 0xFF } else { 0 };
+                                                image_data[iy] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                                             },
-                                            3 => { 
+                                            3 => {  // RGBA32
                                                 let pix = rdram[start+i];
-                                                let b = (pix >> 24) & 0xFF;
+                                                let r = (pix >> 24) & 0xFF;
                                                 let g = (pix >> 16) & 0xFF;
-                                                let r = (pix >>  8) & 0xFF;
+                                                let b = (pix >>  8) & 0xFF;
                                                 let a = 0xFF;
-                                                image_data[iy] = (r << 24) | (g << 16) | (b << 8) | (a << 0)
+                                                image_data[iy] = (a << 24) | (r << 16) | (g << 8) | b;
                                             },
                                             _ => break,
                                         }

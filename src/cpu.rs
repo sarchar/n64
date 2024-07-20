@@ -433,6 +433,7 @@ macro_rules! letsbranch {
                     );
                 }
 
+                // rt won't be zero here
                 letsgo!($ops
                     ;   cmp v_tmp, QWORD [r_gpr + ($self.inst.rt * 8) as i32] // compare gpr[rs] to gpr[rt]
                 );
@@ -582,7 +583,7 @@ impl Cpu {
    /* 100_ */   Cpu::inst_lb     , Cpu::inst_lh    , Cpu::inst_lwl    , Cpu::inst_lw      , Cpu::inst_lbu     , Cpu::inst_lhu     , Cpu::inst_lwr     , Cpu::inst_lwu     ,
    /* 101_ */   Cpu::inst_sb     , Cpu::inst_sh    , Cpu::inst_swl    , Cpu::inst_sw      , Cpu::inst_sdl     , Cpu::inst_sdr     , Cpu::inst_swr     , Cpu::inst_cache   ,
    /* 110_ */   Cpu::inst_ll     , Cpu::inst_lwc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_lld     , Cpu::inst_ldc1    , Cpu::inst_unknown , Cpu::inst_ld      ,
-   /* 111_ */   Cpu::inst_sc     , Cpu::inst_swc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_unknown , Cpu::inst_sdc1    , Cpu::inst_unknown , Cpu::inst_sd
+   /* 111_ */   Cpu::inst_sc     , Cpu::inst_swc1  , Cpu::inst_unknown, Cpu::inst_reserved, Cpu::inst_scd     , Cpu::inst_sdc1    , Cpu::inst_unknown , Cpu::inst_sd
             ],
 
             special_table: [
@@ -625,8 +626,8 @@ impl Cpu {
     /* 011_ */  Cpu::build_inst_daddi  , Cpu::build_inst_daddiu , Cpu::build_inst_ldl    , Cpu::build_inst_ldr     , Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved, Cpu::build_inst_reserved,
     /* 100_ */  Cpu::build_inst_lb     , Cpu::build_inst_lh     , Cpu::build_inst_lwl    , Cpu::build_inst_lw      , Cpu::build_inst_lbu     , Cpu::build_inst_lhu     , Cpu::build_inst_lwr     , Cpu::build_inst_lwu     ,
     /* 101_ */  Cpu::build_inst_sb     , Cpu::build_inst_sh     , Cpu::build_inst_swl    , Cpu::build_inst_sw      , Cpu::build_inst_sdl     , Cpu::build_inst_sdr     , Cpu::build_inst_swr     , Cpu::build_inst_cache   ,
-    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown , Cpu::build_inst_ldc1    , Cpu::build_inst_unknown , Cpu::build_inst_ld      ,
-    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_unknown , Cpu::build_inst_sdc1    , Cpu::build_inst_unknown , Cpu::build_inst_sd      ,
+    /* 110_ */  Cpu::build_inst_ll     , Cpu::build_inst_lwc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_lld     , Cpu::build_inst_ldc1    , Cpu::build_inst_unknown , Cpu::build_inst_ld      ,
+    /* 111_ */  Cpu::build_inst_sc     , Cpu::build_inst_swc1   , Cpu::build_inst_unknown, Cpu::build_inst_unknown , Cpu::build_inst_scd     , Cpu::build_inst_sdc1    , Cpu::build_inst_unknown , Cpu::build_inst_sd      ,
             ],
 
             jit_special_table: [ 
@@ -952,10 +953,46 @@ impl Cpu {
     fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
         Ok(self.bus.borrow_mut().read_u32(address.physical_address as usize)?)
     }
+    
+    #[inline(always)]
+    fn read_u32_phys_direct(&mut self, physical_address: u64) -> Result<u32, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u32(physical_address as usize)?)
+    }
+
+    unsafe extern "win64" fn read_u32_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u32 {
+        //trace!(target: "JIT", "read_u32_phys_bridge from ${:08X}", virtual_address as u32);
+
+        let cpu = { &mut *cpu };
+        match cpu.read_u32_phys_direct(physical_address) {
+            Ok(value) => value,
+
+            Err(e) => {
+                panic!("error in read_u32_phys_bridge: {:?}", e);
+            }
+        }
+    }
 
     #[inline(always)]
     fn read_u64_phys(&mut self, address: Address) -> Result<u64, InstructionFault> {
         Ok(self.bus.borrow_mut().read_u64(address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn read_u64_phys_direct(&mut self, physical_address: u64) -> Result<u64, InstructionFault> {
+        Ok(self.bus.borrow_mut().read_u64(physical_address as usize)?)
+    }
+
+    unsafe extern "win64" fn read_u64_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u64 {
+        //trace!(target: "JIT", "read_u64_phys_bridge from ${:08X}", virtual_address as u32);
+
+        let cpu = { &mut *cpu };
+        match cpu.read_u64_phys_direct(physical_address) {
+            Ok(value) => value,
+
+            Err(e) => {
+                panic!("error in read_u64_phys_bridge: {:?}", e);
+            }
+        }
     }
 
     #[inline(always)]
@@ -1114,8 +1151,42 @@ impl Cpu {
     }
 
     #[inline(always)]
+    fn write_u32_phys_direct(&mut self, value: u32, physical_address: u64) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u32(value, physical_address as usize)?)
+    }
+
+    unsafe extern "win64" fn write_u32_phys_bridge(cpu: *mut Cpu, value: u32, physical_address: u64) -> u32 {
+        //trace!(target: "JIT", "write_u32_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
+        let cpu = { &mut *cpu };
+        match cpu.write_u32_phys_direct(value, physical_address) {
+            Ok(_) => 0,
+
+            Err(e) => {
+                panic!("error in write_u32_phys_bridge: {:?}", e);
+            }
+        }
+    }
+
+    #[inline(always)]
     fn write_u64_phys(&mut self, value: u64, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
         Ok(self.bus.borrow_mut().write_u64(value, address.physical_address as usize)?)
+    }
+
+    #[inline(always)]
+    fn write_u64_phys_direct(&mut self, value: u64, physical_address: u64) -> Result<WriteReturnSignal, InstructionFault> {
+        Ok(self.bus.borrow_mut().write_u64(value, physical_address as usize)?)
+    }
+
+    unsafe extern "win64" fn write_u64_phys_bridge(cpu: *mut Cpu, value: u64, physical_address: u64) -> u32 {
+        //trace!(target: "JIT", "write_u64_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
+        let cpu = { &mut *cpu };
+        match cpu.write_u64_phys_direct(value, physical_address) {
+            Ok(_) => 0,
+
+            Err(e) => {
+                panic!("error in write_u64_phys_bridge: {:?}", e);
+            }
+        }
     }
 
     // prefetch the next instruction
@@ -1172,7 +1243,11 @@ impl Cpu {
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.next_is_delay_slot = false;
-        self.prefetch()?;
+        //if self.jit_executing {
+        //    Cpu::prefetch_bridge(self);
+        //} else {
+            self.prefetch()?;
+        //}
 
         // break out of all processing
         Err(InstructionFault::OtherException(exception_code))
@@ -1217,7 +1292,6 @@ impl Cpu {
             }
         }
     }
-
 
     fn tlb_miss(&mut self, address: Address, is_write: bool) -> Result<(), InstructionFault> {
         //info!(target: "CPU", "TLB miss exception virtual_address=${:016X} is_write={} 32-bits={}!", address.virtual_address, is_write, !self.kernel_64bit_addressing);
@@ -1890,6 +1964,28 @@ impl Cpu {
         Ok(None)
     }
 
+    unsafe extern "win64" fn translate_address_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> u64 {
+        let cpu = { &mut *cpu };
+
+        // do the actual exception, setting self.pc, and Cop0 state, etc
+        match cpu.translate_address(virtual_address, true, is_write) {
+            Ok(Some(address)) => address.physical_address as u64,
+
+            // address wasn't translatable?
+            Ok(None) => todo!(),
+
+            Err(InstructionFault::OtherException(exception_code)) => {
+                cpu.jit_other_exception = true;
+                exception_code as u64
+            },
+
+            Err(err) => {
+                // TODO handle rrors
+                todo!("translate_address_bridge error = {:?}", err);
+            }
+        }
+    }
+
     fn get_cached_block_map_index(&mut self, physical_address: u64) -> Option<usize> {
         // Using the physical_address, determine where the memory came from
         if physical_address < 0x0080_0000 { // RDRAM
@@ -1911,7 +2007,7 @@ impl Cpu {
         let cached_block_map_index = match self.get_cached_block_map_index(physical_address) {
             Some(v) => v,
             None => {
-                println!("uncompilable: ${:08X}", physical_address);
+                //println!("uncompilable: ${:08X}", physical_address);
                 return Ok(CachedBlockStatus::Uncompilable);
             },
         };
@@ -1989,9 +2085,13 @@ impl Cpu {
             let num_steps_before = self.num_steps;
             self.jit_run_limit = std::cmp::min(2 * self.cp0_compare_distance as u64, (steps_start + max_cycles) - self.num_steps);
 
-            let physical_address = match self.translate_address(self.next_instruction_pc, false, false)? {
-                Some(address) => address.physical_address,
-                None => panic!("can't translate next_instruction_pc=${:08X}, self.pc=${:08X}", self.next_instruction_pc, self.pc),
+            let physical_address = match self.translate_address(self.next_instruction_pc, true, false) {
+                Ok(Some(address)) => address.physical_address,
+                Ok(None) => panic!("can't translate next_instruction_pc=${:08X}, self.pc=${:08X}", self.next_instruction_pc, self.pc),
+                Err(_) => {
+                    // PC has changed due to an exception in translate_address. restart processing
+                    break;
+                }
             };
 
             match self.lookup_cached_block(physical_address)? {
@@ -2013,8 +2113,17 @@ impl Cpu {
                     self.num_steps += self.run_block(&*compiled_block, physical_address)?; // start execution at an offset into the block
                 }
 
-                _ => {
-                    todo!("address ${:08X} is Uncompilable", self.next_instruction_pc);
+                CachedBlockStatus::Uncompilable => { // interpret some instructions and try again
+                    if self.next_instruction.is_none() {
+                        self.next_instruction = Some(self.read_u32((self.next_instruction_pc) as usize).unwrap());
+                        self.comms.increment_prefetch_counter();
+                    }
+
+                    for _ in 0..32 {
+                        self.step()?;
+                    }
+
+                    continue;
                 },
             }
 
@@ -2068,10 +2177,7 @@ impl Cpu {
             let access = self.comms.rdram.read().unwrap();
             let rdram: &[u32] = access.as_ref().unwrap();
             let start = (physical_address >> 2) as usize;
-            let end   = start + JIT_BLOCK_MAX_INSTRUCTION_COUNT;
-            if end > rdram.len() {
-                panic!("read from ${:08X} length {} reads outside of RDRAM", start << 2, JIT_BLOCK_MAX_INSTRUCTION_COUNT);
-            }
+            let end   = std::cmp::min(start + JIT_BLOCK_MAX_INSTRUCTION_COUNT, 0x80_0000 >> 2);
             Some(rdram[start..end].to_owned())
         } else {
             None
@@ -4840,38 +4946,49 @@ impl Cpu {
     }
 
     fn build_inst_ll(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        // TODO this function is implemented at its bare minimum right now
-        // TODO needs to perform the address exceptions that the above version does
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ll r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
-
-        //if self.current_instruction_pc == 0x80005D50 { letsbreak!(assembler); }
 
         // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
         letsgo!(assembler
-            ;   mov v_tmp, rdx             // check if address is valid (low two bits 00)
-            ;   and v_tmp, BYTE 0x03       // .
+            // setup arguments to address_exception_bridge _and_ translate_address (r8d = false)
+            ;   xor r8d, r8d               // .
+            ;   test rdx, BYTE 0x03        // check if address is valid (low two bits 00)
             ;   jz >valid                  // .
-            ;   int3           // call self.address_exception
-            ;   int3           // end current run_block
-            ;valid:
-            // set Cop0_LLAddr to physical addr
-            ;   mov eax, edx                    // address to 32-bit eax, clearing upper dword
-            ;   and eax, DWORD 0x7FFF_FFFF as _ // "physical address"
-            ;   shr eax, BYTE 4 as _            // shift right 32-bit
-            ;   mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax  // move 64-bit addr to Cop0_LLAddr
+        );
+
+        // generate the exception
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
+
+        letsgo!(assembler
+            ;   valid:
+        );
+
+        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=false
+        letscall!(assembler, Cpu::translate_address_bridge);
+
+        // check if exception occurred
+        letscheck!(assembler);
+
+        // rax now has the physical_address, store in Cop0_LLAddr
+        letsgo!(assembler
+            // put the physical address into rdx for read_u32_phys_bridge
+            ;   mov rdx, rax
+            // shift physical_address right by 4 for Cop0_LLAddr
+            ;   shr rax, BYTE 4 as _    
+            ;   mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax
             // set llbit true
             ;   mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 1i8 as _
         );
 
-        // rdx contains address
-        letscall!(assembler, Cpu::read_u32_bridge);
+        // physical_address in rdx
+        letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
-            // result of call to self.read_u32_bridge() is in eax, and needs to be sign extended into rt
+            // result of call to self.read_u32_phys_bridge() is in eax, and needs to be sign extended into rt
             letsgo!(assembler
                 ;   movsxd v_tmp, eax   // sign-extend eax into v_tmp
                 ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], v_tmp
@@ -4905,6 +5022,58 @@ impl Cpu {
         self.llbit = true;
 
         Ok(())
+    }
+
+    fn build_inst_lld(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lld r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // rdx is used for the 2nd parameter to Cpu::read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        letsgo!(assembler
+            // setup arguments to address_exception_bridge _and_ translate_address (r8d = false)
+            ;   xor r8d, r8d               // .
+            ;   test rdx, BYTE 0x07        // check if address is valid (low three bits 000)
+            ;   jz >valid                  // .
+        );
+
+        // generate the exception
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
+
+        letsgo!(assembler
+            ;   valid:
+        );
+
+        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=false
+        letscall!(assembler, Cpu::translate_address_bridge);
+
+        // check if exception occurred
+        letscheck!(assembler);
+
+        // rax now has the physical_address, store in Cop0_LLAddr
+        letsgo!(assembler
+            // put the physical address into rdx for read_u32_phys_bridge
+            ;   mov rdx, rax
+            // shift physical_address right by 4 for Cop0_LLAddr
+            ;   shr rax, BYTE 4 as _    
+            ;   mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax
+            // set llbit true
+            ;   mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 1i8 as _
+        );
+
+        // physical_address in rdx
+        letscall!(assembler, Cpu::read_u64_phys_bridge);
+
+        // if destination register is 0, we still do the read (above) but don't store the result
+        if self.inst.rt != 0 { 
+            // result of call to self.read_u64_phys_bridge() is in rax
+            letsgo!(assembler
+                ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
+            );
+        }
+
+        CompileInstructionResult::Continue
     }
 
     fn inst_lui(&mut self) -> Result<(), InstructionFault> {
@@ -5394,15 +5563,15 @@ impl Cpu {
         }
 
         // translate the address here
-        let address = match self.translate_address(virtual_address, true, false)? {
+        let address = match self.translate_address(virtual_address, true, true)? {
             Some(address) => address,
             None => {
                 // this shouldn't happen
-                return self.address_exception(virtual_address, false);
+                return self.address_exception(virtual_address, true);
             }
         };
 
-        if self.llbit && ((address.physical_address >> 4) == self.cp0gpr[Cop0_LLAddr]) {
+        if self.llbit {
             self.write_u32_phys(self.gpr[self.inst.rt] as u32, address)?;
             self.gpr[self.inst.rt] = 1;
         } else {
@@ -5411,25 +5580,151 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_sc_bridge(cpu: *mut Cpu, inst: u32) -> i32 {
-        let cpu = { &mut *cpu };
-        cpu.decode_instruction(inst);
-        match cpu.inst_sc() {
-            Ok(_) => 0, // TODO pass WriteReturnSignal along
-            Err(e) => {
-                // TODO handle errors better
-                panic!("error in inst_sc_bridge: {:?}", e);
-            }
+    fn build_inst_sc(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sc r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+                 self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
+        letsgo!(assembler
+            // setup arguments to address_exception_bridge _and_ translate_address (r8d = true)
+            ;   mov r8d, DWORD 1 as _      // .
+            ;   test rdx, BYTE 0x03        // check if address is valid (low two bits 00)
+            ;   jz >valid                  // .
+        );
+
+        // generate the exception
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
+
+        letsgo!(assembler
+            ;   valid:
+        );
+
+        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=true
+        letscall!(assembler, Cpu::translate_address_bridge);
+
+        // check if exception occurred
+        letscheck!(assembler);
+
+        // do the write if the physical_address matches Cop0_LLAddr and llbit is set
+        letsgo!(assembler
+            // preserve the physical_address in r8 for the call write_u32_phys_bridge
+            ;   mov r8, rax
+            // check if llbit is set
+            ;   test BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 0xFFu8 as _
+            ;   jz >not_valid
+        );
+
+        // the value to be written to memory is in rt and needs to be in edx
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor edx, edx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+            );
         }
+
+        // make the write call -- edx contains the value to write, r8 the physical_address 
+        letscall!(assembler, Cpu::write_u32_phys_bridge);
+
+        // set rt to 0 or 1 based on whether the store was successful or not
+        letsgo!(assembler
+            ;   mov DWORD [r_gpr + (self.inst.rt * 8) as i32], BYTE 1 as _
+            ;   jmp >done
+            ;not_valid:
+            ;   mov DWORD [r_gpr + (self.inst.rt * 8) as i32], BYTE 0 as _
+            ;done:
+        );
+
+        CompileInstructionResult::Continue
     }
 
-    fn build_inst_sc(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sc r{}, ${:04X}(r{}) // TODO THIS FUNCTION IS NOT DONE", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
+    fn inst_scd(&mut self) -> Result<(), InstructionFault> {
+        let virtual_address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
+        if (virtual_address & 0x07) != 0 {
+            self.address_exception(virtual_address, true)?;
+        }
+
+        // translate the address here
+        let address = match self.translate_address(virtual_address, true, false)? {
+            Some(address) => address,
+            None => {
+                // this shouldn't happen
+                return self.address_exception(virtual_address, true);
+            }
+        };
+
+        if self.llbit && ((address.physical_address >> 4) == self.cp0gpr[Cop0_LLAddr]) {
+            self.write_u64_phys(self.gpr[self.inst.rt], address)?;
+            self.gpr[self.inst.rt] = 1;
+        } else {
+            self.gpr[self.inst.rt] = 0;
+        }
+        Ok(())
+    }
+
+    fn build_inst_scd(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
+        trace!(target: "JIT-BUILD", "${:08X}[{:5}]: scd r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
+
+        // rdx is used for the 2nd parameter to Cpu::read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            // setup arguments to address_exception_bridge _and_ translate_address (r8d = true)
+            ;   mov r8d, DWORD 1 as _      // .
+            ;   test rdx, BYTE 0x07        // check if address is valid (low three bits 000)
+            ;   jz >valid                  // .
         );
-        letscall!(assembler, Cpu::inst_sc_bridge);
+
+        // generate the exception
+        letsexcept!(self, assembler, Cpu::address_exception_bridge);
+
+        letsgo!(assembler
+            ;   valid:
+        );
+
+        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=true
+        letscall!(assembler, Cpu::translate_address_bridge);
+
+        // check if exception occurred
+        letscheck!(assembler);
+
+        // do the write if the physical_address matches Cop0_LLAddr and llbit is set
+        letsgo!(assembler
+            // preserve the physical_address in r8 for the call write_u64_phys_bridge
+            ;   mov r8, rax
+            // check if llbit is set
+            ;   test BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 0xFFu8 as _
+            ;   jz >not_valid
+        );
+
+        // the value to be written to memory is in rt and needs to be in rdx
+        if self.inst.rt == 0 {
+            letsgo!(assembler
+                ;   xor edx, edx
+            );
+        } else {
+            letsgo!(assembler
+                ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            );
+        }
+
+        // make the write call -- edx contains the value to write, r8 the physical_address 
+        letscall!(assembler, Cpu::write_u64_phys_bridge);
+
+        // set rt to 0 or 1 based on whether the store was successful or not
+        letsgo!(assembler
+            ;   mov DWORD [r_gpr + (self.inst.rt * 8) as i32], BYTE 1 as _
+            ;   jmp >done
+            ;not_valid:
+            ;   mov DWORD [r_gpr + (self.inst.rt * 8) as i32], BYTE 0 as _
+            ;done:
+        );
+
         CompileInstructionResult::Continue
     }
 
@@ -5596,10 +5891,19 @@ impl Cpu {
 
 
     fn inst_sdl(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
 
-        // need to fetch data on cache misses but not uncachable addresses
-        let mem = self.read_u64(address & !0x07)?;
+        // fetch the u64 at the specified address
+        // we need the TLB exception to happen with is_write=true, so we translate here
+        let mem = match self.translate_address(address, true, true)? {
+            Some(mut address) => {
+                address.physical_address &= !7;
+                self.read_u64_phys(address)?
+            },
+            None => { // shouldn't happen
+                return self.address_exception(address, true);
+            }
+        };
 
         // combine register and mem
         let shift = (address & 0x07) << 3;
@@ -5610,7 +5914,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64(new, address & !0x07)?;
+        self.write_u64(new, (address as usize) & !0x07)?;
         Ok(())
     }
 
@@ -5624,8 +5928,22 @@ impl Cpu {
         // rdx is the 2nd parameter to read_u64_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
+        // setup parameters for translate_address_bridge
+        letsgo!(assembler
+            // is_write = true
+            ;   mov r8d, BYTE 1 as _
+        );
+
+        // translate the original address, which might cause a TLB miss
+        letscall!(assembler, Cpu::translate_address_bridge);
+        
+        // check for exceptions
+        letscheck!(assembler);
+
         // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
+            // move physical_address into rdx
+            ;   mov rdx, rax
             // compute 32-shift
             ;   mov BYTE [rsp+s_tmp0], dl
             ;   and BYTE [rsp+s_tmp0], BYTE 0x07 as _
@@ -5634,11 +5952,8 @@ impl Cpu {
             ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u64()
-        letscall!(assembler, Cpu::read_u64_bridge);
-
-        // check for exceptions
-        letscheck!(assembler);
+        // call read_u64_phys()
+        letscall!(assembler, Cpu::read_u64_phys_bridge);
 
         // rax contains the result
         // we place the computation in rdx, as it's the second parameter to write_u64_bridge
@@ -5679,10 +5994,19 @@ impl Cpu {
     }
 
     fn inst_sdr(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
 
-        // need to fetch data on cache misses but not uncachable addresses
-        let mem = self.read_u64(address & !0x07)?;
+        // fetch the u64 at the specified address
+        // we need the TLB exception to happen with is_write=true, so we translate here
+        let mem = match self.translate_address(address, true, true)? {
+            Some(mut address) => {
+                address.physical_address &= !7;
+                self.read_u64_phys(address)?
+            },
+            None => { // shouldn't happen
+                return self.address_exception(address, true);
+            }
+        };
 
         // combine register and mem
         let shift = 56 - ((address & 0x07) << 3);
@@ -5693,7 +6017,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u64(new, address & !0x07)?;
+        self.write_u64(new, (address as usize) & !0x07)?;
         Ok(())
     }
 
@@ -5707,8 +6031,22 @@ impl Cpu {
         // rdx is the 2nd parameter to read_u64_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
+        // setup parameters for translate_address_bridge
+        letsgo!(assembler
+            // is_write = true
+            ;   mov r8d, BYTE 1 as _
+        );
+
+        // translate the original address, which might cause a TLB miss
+        letscall!(assembler, Cpu::translate_address_bridge);
+        
+        // check for exceptions
+        letscheck!(assembler);
+
         // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
+            // move physical_address into rdx
+            ;   mov rdx, rax
             // compute 32-shift
             ;   mov cl, dl
             ;   and cl, BYTE 0x07 as _
@@ -5719,11 +6057,8 @@ impl Cpu {
             ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u64()
-        letscall!(assembler, Cpu::read_u64_bridge);
-
-        // check for exceptions
-        letscheck!(assembler);
+        // call read_u64_phys()
+        letscall!(assembler, Cpu::read_u64_phys_bridge);
 
         // rax contains the result
         // we place the computation in rdx, as it's the second parameter to write_u64_bridge
@@ -5935,10 +6270,19 @@ impl Cpu {
     }
 
     fn inst_swl(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
 
         // fetch the u32 at the specified address
-        let mem = self.read_u32(address & !0x03)?;
+        // we need the TLB exception to happen with is_write=true, so we translate here
+        let mem = match self.translate_address(address, true, true)? {
+            Some(mut address) => {
+                address.physical_address &= !3;
+                self.read_u32_phys(address)?
+            },
+            None => { // shouldn't happen
+                return self.address_exception(address, true);
+            }
+        };
 
         // combine register and mem
         let shift = (address & 0x03) << 3;
@@ -5949,7 +6293,7 @@ impl Cpu {
         };
 
         // write mem value
-        self.write_u32(new, address & !0x03)?;
+        self.write_u32(new, (address as usize) & !0x03)?;
         Ok(())
     }
 
@@ -5960,22 +6304,33 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u32_bridge
+        // rdx is the 2nd parameter to translate_address_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // setup parameters for translate_address_bridge
         letsgo!(assembler
+            // is_write = true
+            ;   mov r8d, BYTE 1 as _
+        );
+
+        // translate the original address, which might cause a TLB miss
+        letscall!(assembler, Cpu::translate_address_bridge);
+        
+        // check for exceptions
+        letscheck!(assembler);
+
+        letsgo!(assembler
+            // move physical_address to rdx
+            ;   mov rdx, rax
+            // get the shift amount from the address, and mask low bits out of rdx
             ;   mov BYTE [rsp+s_tmp0], dl
             ;   and BYTE [rsp+s_tmp0], BYTE 0x03u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
             ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u32()
-        letscall!(assembler, Cpu::read_u32_bridge);
-
-        // check for exceptions
-        letscheck!(assembler);
+        // call read_u32_phys()
+        letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // eax contains the result
         // we place the computation in rdx, as it's the second parameter to write_u32_bridge
@@ -6016,10 +6371,19 @@ impl Cpu {
     }
 
     fn inst_swr(&mut self) -> Result<(), InstructionFault> {
-        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm) as usize;
+        let address = self.gpr[self.inst.rs].wrapping_add(self.inst.signed_imm);
 
         // fetch the u32 at the specified address
-        let mem = self.read_u32(address & !0x03)?;
+        // we need the TLB exception to happen with is_write=true, so we translate here
+        let mem = match self.translate_address(address, true, true)? {
+            Some(mut address) => {
+                address.physical_address &= !3;
+                self.read_u32_phys(address)?
+            },
+            None => { // shouldn't happen
+                return self.address_exception(address, true);
+            }
+        };
 
         // combine register and mem
         let shift = 24 - ((address & 0x03) << 3);
@@ -6030,7 +6394,7 @@ impl Cpu {
         };
 
         // write new value
-        self.write_u32(new, address & !0x03)?;
+        self.write_u32(new, (address as usize) & !0x03)?;
         Ok(())
     }
 
@@ -6041,11 +6405,26 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u32_bridge
+        // rdx is the 2nd parameter to translate_address_bridge
         letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
 
+        // setup parameters for translate_address_bridge
+        letsgo!(assembler
+            // is_write = true
+            ;   mov r8d, BYTE 1 as _
+        );
+
+        // call translate_address_bridge() on the original address
+        letscall!(assembler, Cpu::translate_address_bridge);
+
+        // check for exceptions
+        letscheck!(assembler);
+
+        // physical address now in rax
         // get the shift amount from the address, and mask low bits out of rdx
         letsgo!(assembler
+            // move address into rdx for the call read_u32_phys
+            ;   mov rdx, rax
             // compute 32-shift
             ;   mov cl, dl
             ;   and cl, BYTE 0x03 as _
@@ -6056,11 +6435,7 @@ impl Cpu {
             ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u32()
-        letscall!(assembler, Cpu::read_u32_bridge);
-
-        // check for exceptions
-        letscheck!(assembler);
+        letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // eax contains the result
         // we place the computation in rdx, as it's the second parameter to write_u32_bridge

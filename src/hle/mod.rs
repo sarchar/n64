@@ -2381,8 +2381,7 @@ impl Hle {
             0 => line_bytes << 1, // 4b
             1 => line_bytes     , // 8b
             2 => line_bytes >> 1, // 16b
-            3 => line_bytes >> 1, // 32b have a width twice the line size due to the split
-                                  //     nature of the data
+            3 => line_bytes >> 1, // 32b have a width twice the line size due to the split nature of the data
             5 => todo!("SIZ_DD"),
             _ => { error!(target: "HLE", "invalid texture size"); 0 },
         };
