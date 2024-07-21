@@ -38,6 +38,12 @@ enum Eeprom {
     _16KiB,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Flash {
+    None,
+    _128KiB,
+}
+
 /// N64 PIF-ROM, where the boot rom is stored
 /// boot_rom is big endian data
 /// Essentially part of the PeripheralInterface but the PIF-ROM and features abstracted out
@@ -88,12 +94,29 @@ impl PifRom {
         info!(target: "PIF", "Game code: {}", game_code);
 
         let eeprom = match game_code.as_str() {
-            "NSM" => {
-                info!(target: "PIF", "Game has 4KiB EEPROM");
-                Eeprom::_4KiB
-            },
-            _ => Eeprom::None,
+            "NGE" => Eeprom::_4KiB, // GoldenEye 007
+            "NSM" => Eeprom::_4KiB, // Super Mario 64
+            _     => Eeprom::None,
         };
+
+        match eeprom {
+            Eeprom::_4KiB  => info!(target: "PIF", "Game has 4KiB EEPROM"),
+            Eeprom::_16KiB => info!(target: "PIF", "Game has 16KiB EEPROM"),
+            Eeprom::None   => {},
+        }
+
+        let flash = match game_code.as_str() {
+            "NZS" => Flash::_128KiB, // Legend of Zelda - Majora's Mask
+            "NM6" => Flash::_128KiB, // Mega Man 64
+            _     => Flash::None,
+        };
+
+        match flash {
+            Flash::_128KiB => info!(target: "PIF", "Game has 128KiB Flash RAM"),
+            Flash::None => {},
+        }
+
+        pi.set_flash(flash);
 
         // base the eeprom filename on the sram filename
         let mut eeprom_file = pi.get_sram_file().clone();

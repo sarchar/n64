@@ -13,6 +13,17 @@ use crate::*;
 use rcp::DmaInfo;
 use mips::{InterruptUpdate, InterruptUpdateMode, IMask_PI};
 
+use pifrom::Flash;
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum FlashMode {
+    Idle,
+    Status,
+    Erase,
+    Read,
+    Write
+}
+
 /// N64 Peripheral Interface
 /// Connects EEPROM, cartridge, controllers, and more
 pub struct PeripheralInterface {
@@ -44,6 +55,15 @@ pub struct PeripheralInterface {
     sram_file: PathBuf,
     sram: Option<Vec<u32>>,
     sram_dirty: Option<std::time::Instant>,
+
+    // FlashRAM
+    flash_file: PathBuf,
+    flash: Option<Vec<u32>>,
+    flash_dirty: Option<std::time::Instant>,
+    flash_mode: FlashMode,
+    flash_status: u64,
+    flash_offset: u32,
+    flash_buffer: Vec<u32>,
 }
 
 struct DmaInfoUserData  {
@@ -76,12 +96,17 @@ impl PeripheralInterface {
                 assert!((data.len() % 4) == 0);
                 let mut words = Vec::new();
                 for chunk in data.chunks(4) {
-                    words.push(((chunk[0] as u32) << 24) | ((chunk[1] as u32) << 16) | ((chunk[2] as u32) << 8) | (chunk[3] as u32));
+                    //words.push(((chunk[0] as u32) << 24) | ((chunk[1] as u32) << 16) | ((chunk[2] as u32) << 8) | (chunk[3] as u32));
+                    words.push(u32::from_be_bytes(chunk.try_into().unwrap()));
                 }
+                info!(target: "SRAM", "loaded {} bytes from {:?}", words.len()*4, sram_file);
                 Some(words)
             },
             Err(_) => None,
         };
+
+        let mut flash_file = sram_file.clone();
+        flash_file.set_extension("flash");
 
         PeripheralInterface {
             comms: comms,
@@ -110,11 +135,49 @@ impl PeripheralInterface {
             sram_file: sram_file.into(),
             sram: sram,
             sram_dirty: None,
+
+            flash_file: flash_file.into(),
+            flash: None,
+            flash_dirty: None,
+            flash_mode: FlashMode::Idle,
+            flash_status: 0,
+            flash_offset: 0,
+            flash_buffer: vec![0; 128 >> 2],
         }
     }
 
     pub fn get_sram_file(&self) -> &PathBuf {
         &self.sram_file
+    }
+
+    pub fn set_flash(&mut self, flash: Flash) {
+        let flash_size = match flash {
+            Flash::None => { return; },
+            Flash::_128KiB => 128 * 1024,
+        };
+
+        self.flash = match fs::read(&self.flash_file) {
+            Ok(data) => { // convert to words
+                assert!((data.len() % 4) == 0);
+                let mut words = Vec::new();
+                for chunk in data.chunks(4) {
+                    words.push(u32::from_be_bytes(chunk.try_into().unwrap()));
+                }
+                info!(target: "FLASH", "loaded {} bytes from {:?}", words.len()*4, self.flash_file);
+
+                if (words.len() * 4) != flash_size {
+                    warn!(target: "FLASH", "save file size was incorrect, resizing flash");
+                    words.resize(flash_size >> 2, 0);
+                }
+                Some(words)
+            },
+
+            Err(_) => {
+                let mut flash = Vec::new();            
+                flash.resize(flash_size >> 2, 0);
+                Some(flash)
+            },
+        };
     }
 
     pub fn reset(&mut self) {
@@ -128,6 +191,10 @@ impl PeripheralInterface {
         self.is_magic     = 0;
         self.is_write_pos = 0;
         self.cartridge_rom_write = None;
+        self.flash_mode   = FlashMode::Idle;
+        self.flash_status = 0;
+        self.flash_offset = 0;
+        self.flash_buffer.clear();
         
         while self.dma_completed_rx.try_recv().is_ok() {}
     }
@@ -170,6 +237,14 @@ impl PeripheralInterface {
                 self.sram_dirty = None;
             }
         }
+
+        if let Some(dirty_time) = self.flash_dirty {
+            let elapsed = dirty_time.elapsed().as_secs_f64();
+            if elapsed >= 1.0 {
+                self.save_flash();
+                self.flash_dirty = None;
+            }
+        }
     }
 
     pub fn save_sram(&mut self) {
@@ -180,7 +255,18 @@ impl PeripheralInterface {
             }
         }
 
-        info!(target: "SRAM", "saved SRAM to {:?}", self.sram_file);
+        info!(target: "SRAM", "saved to {:?}", self.sram_file);
+    }
+
+    pub fn save_flash(&mut self) {
+        {
+            let mut fp = std::fs::File::create(&self.flash_file).expect("could not save Flash RAM data");
+            for word in self.flash.as_ref().unwrap() {
+                let _ = fp.write(&word.to_be_bytes()).expect("could not save Flash RAM data");
+            }
+        }
+
+        info!(target: "FLASH", "saved to {:?}", self.sram_file);
     }
 
     fn read_register(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
@@ -526,6 +612,181 @@ impl PeripheralInterface {
 
         Ok(result)
     }
+
+    fn read_sram_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        trace!(target: "SRAM", "read_block {} bytes from ${:08X}", length, offset);
+
+        let length = if length > (256*1024) { 256 * 1024 } else { length };
+        match self.sram {
+            None => { // return all 0 while self.sram is None
+                Ok(vec![0u32; (length >> 2) as usize])
+            },
+
+            // if the sram exists, make sure it's the right size and return a chunk
+            Some(ref mut sram_data) => {
+                let offset = offset - 0x0800_0000;
+                let end = (offset + length as usize) >> 2;
+                if end > sram_data.len() {
+                    debug!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                    sram_data.resize(end, 0);
+                }
+                Ok(sram_data[offset >> 2..][..(length >> 2) as usize].to_owned())
+            },
+        }
+    }
+
+    fn write_sram_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        trace!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len() * 4, offset);
+
+        if self.sram.is_none() {
+            self.sram = Some(Vec::new());
+        }
+
+        let end = (offset + length as usize) >> 2;
+        if end > self.sram.as_ref().unwrap().len() {
+            debug!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+            self.sram.as_mut().unwrap().resize(end, 0);
+        }
+
+        // copy block[:length] into sram
+        self.sram.as_mut().unwrap()[offset >> 2..][..(length >> 2) as usize].copy_from_slice(&block[..(length >> 2) as usize]);
+        self.sram_dirty = Some(std::time::Instant::now());
+
+        Ok(WriteReturnSignal::None)
+    }
+
+    fn write_sram_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        trace!(target: "SRAM", "write32 value=${:08X} offset=${:08X}", value, offset);
+
+        if self.sram.is_none() {
+            self.sram = Some(Vec::new());
+        }
+
+        let end = (offset + 4) >> 2;
+        if end > self.sram.as_ref().unwrap().len() {
+            debug!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+            self.sram.as_mut().unwrap().resize(end, 0);
+        }
+
+        self.sram.as_mut().unwrap()[offset >> 2] = value;
+        self.sram_dirty = Some(std::time::Instant::now());
+
+        Ok(WriteReturnSignal::None)
+    }
+
+    fn read_flash_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        trace!(target: "FLASH", "read_block {} bytes from ${:08X}", length, offset);
+
+        match self.flash_mode {
+            FlashMode::Idle => {
+                let mut data = Vec::new();
+                data.resize(std::cmp::min(((length + 3) & !3) as usize, 1*1024*1024), 0);
+                Ok(data)
+            },
+
+            FlashMode::Status => {
+                let status_bytes = [(self.flash_status >> 32) as u32, self.flash_status as u32];
+                let length = std::cmp::min(((length + 3) & !3) as usize, status_bytes.len() * 4);
+
+                Ok((&status_bytes[0..length >> 2]).to_owned())
+            },
+
+            FlashMode::Read => {
+                let flash_data = self.flash.as_ref().unwrap();
+                Ok(flash_data[offset >> 2..][..(length >> 2) as usize].to_owned())
+            },
+
+            FlashMode::Erase | FlashMode::Write => unimplemented!(),
+        }
+    }
+
+    fn write_flash_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
+        trace!(target: "FLASH", "write_block {} bytes to ${:08X}", block.len() * 4, offset);
+
+        if self.flash_mode == FlashMode::Write { // DMA up to 128 bytes into flash internal storage
+            let remaining = (self.flash_buffer.len() * 4) - offset;
+            let write_size = std::cmp::min(remaining, length as usize);
+
+            // copy block[:write_size] into flash buffer at given offset
+            self.flash_buffer[offset >> 2..][..write_size >> 2].copy_from_slice(&block[..write_size >> 2]);
+        } else {
+            unimplemented!("unimplemented flash write");
+        }
+
+        Ok(WriteReturnSignal::None)
+    }
+
+    fn write_flash_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        trace!(target: "FLASH", "write32 value=${:08X} offset=${:08X}", value, offset);
+
+        // ignore writes to offset 0
+        if offset == 0 { 
+            debug!(target: "FLASH", "ignoring write ${:08X} to offset 0", value);
+            return Ok(WriteReturnSignal::None); 
+        }
+
+        match value >> 24 {
+            0x4B => { // Set Erase Offset
+                self.flash_offset = (value & 0x0000_FFFF) * 128;
+            },
+
+            0x78 => { // Set Mode to Erase
+                self.flash_mode = FlashMode::Erase;
+                self.flash_status = 0x1111_8008_00C2_001D;
+            },
+
+            0xB4 => { // Set Mode to Write
+                self.flash_mode = FlashMode::Write;
+                self.flash_status = 0x1111_8004_00C2_001D;
+            },
+
+            0xA5 => { // Set Write Offset
+                self.flash_offset = (value & 0x0000_FFFF) * 128;
+                self.flash_status = 0x1111_8004_00C2_001D;
+            },
+
+            0xD2 => { // Execute
+                debug!(target: "FLASH", "Execute mode = {:?}", self.flash_mode);
+                match self.flash_mode {
+                    FlashMode::Idle | FlashMode::Status => {},
+
+                    // Perform erase - set 128 bytes starting at self.flash_offset to 0
+                    FlashMode::Erase => {
+                        let flash_data = self.flash.as_mut().unwrap();
+                        flash_data[(self.flash_offset >> 2) as usize..][..128 >> 2].fill(0xFFFF_FFFF);
+                    },
+
+                    // Perform write - copy 128 bytes from the flash buffer into flash
+                    FlashMode::Write => {
+                        let flash_data = self.flash.as_mut().unwrap();
+                        flash_data[(self.flash_offset >> 2) as usize..][..128 >> 2].copy_from_slice(&self.flash_buffer);
+                        self.flash_dirty = Some(std::time::Instant::now());
+                    },
+
+                    _ => todo!("mode = {:?}", self.flash_mode),
+                }
+            },
+
+            0xE1 => { // Set Mode to Status
+                self.flash_mode = FlashMode::Status;
+                self.flash_status = 0x1111_8001_00C2_001D;
+            },
+
+            0xF0 => { // Set Mode to Read
+                self.flash_mode = FlashMode::Read;
+                self.flash_status = 0x1111_8004_F000_001D;
+            },
+
+            cmd @ _ => {
+                unimplemented!("FLASH command ${:02X} not implemented", cmd);
+            }
+        }
+
+        //self.flash.as_mut().unwrap()[offset >> 2] = value;
+        //self.sram_dirty = Some(std::time::Instant::now());
+
+        Ok(WriteReturnSignal::None)
+    }
 }
 
 impl Addressable for PeripheralInterface {
@@ -541,17 +802,25 @@ impl Addressable for PeripheralInterface {
             info!(target: "PI", "read32 N64DD IPL rom offset=${:08X}", offset);
             Ok(0)
         } else if offset < 0x1000_0000 {
-            match self.sram {
-                None => Ok(0),
-                Some(ref mut sram_data) => {
-                    let offset = offset - 0x0800_0000;
-                    let end = (offset + 4) >> 2;
-                    if end > sram_data.len() {
-                        info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
-                        sram_data.resize(end, 0);
-                    }
-                    Ok(sram_data[offset])
-                },
+            if self.flash.is_some() { // read_u32 is only available to read the Status register
+                Ok(match offset & 4 {
+                    0 => (self.flash_status >> 32) as u32,
+                    4 => self.flash_status as u32,
+                    _ => panic!(),
+                })
+            } else {
+                match self.sram {
+                    None => Ok(0),
+                    Some(ref mut sram_data) => {
+                        let offset = offset - 0x0800_0000;
+                        let end = (offset + 4) >> 2;
+                        if end > sram_data.len() {
+                            debug!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
+                            sram_data.resize(end, 0);
+                        }
+                        Ok(sram_data[offset])
+                    },
+                }
             }
         } else if offset == 0x13FF_0000 { // ISViewer magic
             Ok(self.is_magic) // usually 'IS64'
@@ -598,7 +867,7 @@ impl Addressable for PeripheralInterface {
     }
 
     fn read_u16(&mut self, offset: usize) -> Result<u16, ReadWriteFault> {
-        // 16-bit read from CART is buggy
+        // 16-bit reads from PI devices are buggy
         let i = (offset & 0x02) >> 1;
         let ret = ((self.read_u32((offset & !0x03) + (i << 2))? & 0xFFFF0000) >> 16) as u16;
         trace!(target: "PI", "read16 offset=${:08X} return=${:04X}", offset, ret);
@@ -624,20 +893,11 @@ impl Addressable for PeripheralInterface {
         } else if offset < 0x1000_0000 { // FlashRAM/SRAM
             let offset = offset - 0x0800_0000;
 
-            if self.sram.is_none() {
-                self.sram = Some(Vec::new());
+            if self.flash.is_some() {
+                self.write_flash_u32(value, offset)
+            } else {
+                self.write_sram_u32(value, offset)
             }
-
-            let end = (offset + 4) >> 2;
-            if end > self.sram.as_ref().unwrap().len() {
-                info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
-                self.sram.as_mut().unwrap().resize(end, 0);
-            }
-
-            self.sram.as_mut().unwrap()[offset >> 2] = value;
-            self.sram_dirty = Some(std::time::Instant::now());
-
-            Ok(WriteReturnSignal::None)
         } else if offset == 0x13FF_0000 { // ISViewer magic
             self.is_magic = value;
             Ok(WriteReturnSignal::None)
@@ -750,22 +1010,11 @@ impl Addressable for PeripheralInterface {
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
-            info!(target: "SRAM", "read_block {} bytes from ${:08X}", length, offset);
-            let length = if length > (256*1024) { 256 * 1024 } else { length };
-            match self.sram {
-                None => { // return all 0 while self.sram is None
-                    Ok(vec![0u32; (length >> 2) as usize])
-                },
-                // if the sram exists, make sure it's the right size and return a chunk
-                Some(ref mut sram_data) => {
-                    let offset = offset - 0x0800_0000;
-                    let end = (offset + length as usize) >> 2;
-                    if end > sram_data.len() {
-                        info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
-                        sram_data.resize(end, 0);
-                    }
-                    Ok(sram_data[offset >> 2..][..(length >> 2) as usize].to_owned())
-                },
+            let offset = offset & 0x07FF_FFFF;
+            if self.flash.is_some() {
+                self.read_flash_block(offset, length)
+            } else {
+                self.read_sram_block(offset, length)
             }
         } else if offset >= 0x1000_0000 && offset < 0x1FC0_0000 { // CART memory
             let length = (length + 3) & !3; // round length up to a multiple of 4 for the read
@@ -799,26 +1048,15 @@ impl Addressable for PeripheralInterface {
         if (block.len() * 4) as u32 != length { todo!(); }
         let length = if length > (256*1024) { 256 * 1024 } else { length };
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
-            info!(target: "SRAM", "write_block {} bytes to ${:08X}", block.len() * 4, offset);
-            let offset = offset - 0x0800_0000;
-
-            if self.sram.is_none() {
-                self.sram = Some(Vec::new());
+            let offset = offset & 0x07FF_FFFF;
+            if self.flash.is_some() {
+                self.write_flash_block(offset, block, length)
+            } else {
+                self.write_sram_block(offset, block, length)
             }
-    
-            let end = (offset + length as usize) >> 2;
-            if end > self.sram.as_ref().unwrap().len() {
-                info!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
-                self.sram.as_mut().unwrap().resize(end, 0);
-            }
-
-            // copy block[:length] into sram
-            self.sram.as_mut().unwrap()[offset >> 2..][..(length >> 2) as usize].copy_from_slice(&block[..(length >> 2) as usize]);
-            self.sram_dirty = Some(std::time::Instant::now());
         } else {
             unimplemented!("PI: unknown DMA to ${:08X}", offset);
         }
-        Ok(WriteReturnSignal::None)
     }
 }
 
