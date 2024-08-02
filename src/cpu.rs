@@ -90,7 +90,7 @@ pub struct InstructionDecode {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum MemorySpace {
+pub enum MemorySpace {
     User,
     Supervisor,
     XKPhys, // TODO
@@ -98,14 +98,14 @@ enum MemorySpace {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct Address {
-    virtual_address: u64,
-    physical_address: u64,
-    cached: bool,
-    mapped: bool,
-    space: MemorySpace,
-    tlb_index: Option<usize>, // tlb_index will be Some() when the virtual_address hits an EntryHi
-                              // in a mapped address
+pub struct Address {
+    pub virtual_address: u64,
+    pub physical_address: u64,
+    pub cached: bool,
+    pub mapped: bool,
+    pub space: MemorySpace,
+    pub tlb_index: Option<usize>, // tlb_index will be Some() when the virtual_address hits an EntryHi
+                                  // in a mapped address
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -1231,15 +1231,15 @@ impl Cpu {
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
         // TLB and XTLB miss are vectored to offsets 0 and 0x80, respectively
         // all others go to offset 0x180
-        self.pc = (if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 {  // check BEV==0
+        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 {  // check BEV==0
             0xFFFF_FFFF_8000_0000
         } else { 
             0xFFFF_FFFF_BFC0_0200
-        }) + (if use_special && previous_exl == 0 { // check EXL==0 and tlb miss
+        } + if use_special && previous_exl == 0 { // check EXL==0 and tlb miss
             if self.kernel_64bit_addressing { 0x080 } else { 0x000 }
         } else {
             0x180
-        });
+        };
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.next_is_delay_slot = false;
@@ -1257,8 +1257,7 @@ impl Cpu {
         //println!("CPU: address exception!");
 
         // set EntryHi to the vpn that caused the fault, preserving ASID and R
-        // the datasheet says the VPN value of EntryHi is undefined here, but the systemtests
-        // require it
+        // the datasheet says the VPN value of EntryHi is undefined here, but the systemtests require it
         self.cp0gpr[Cop0_EntryHi] = (virtual_address & 0xFF_FFFF_E000) | (self.cp0gpr[Cop0_EntryHi] & 0xFF) | (virtual_address & 0xC000_0000_0000_0000);
 
         self.cp0gpr[Cop0_BadVAddr] = virtual_address;
@@ -1866,7 +1865,7 @@ impl Cpu {
         return Ok(Some(address));
     }
 
-    fn translate_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, InstructionFault> {
+    pub fn translate_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, InstructionFault> {
         // create the Address struct by first classifying the virtual address
         let mut address = match self.classify_address(virtual_address, generate_exceptions, is_write)? {
             Some(v) => v,
@@ -1898,14 +1897,11 @@ impl Cpu {
         for tlb_index in 0..32 {
             let tlb = &self.tlb[tlb_index];
 
-            // the TLB entry is valid if either the ASID matches or the G flag is set
-            // check if G bit is set, and skip the entry if not
-            if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
+            // if the G bit is not set, the asid must match
+            if (tlb.entry_hi & 0x1000) == 0 && (tlb.entry_hi & 0xFF) != asid { continue; }
 
             // if the region (R) doesn't match, this entry isn't valid
             if ((tlb.entry_hi ^ address.virtual_address) >> 62) != 0 { continue; }
-
-            //info!(target: "CPU", "checking TLB entry {}", tlb_index);
 
             // PageMask is (either 0, 3, 5, 7, F, 3F) at bit position 13
             // So offset_mask will be a mask that can mask out the offset into the page from
@@ -1913,7 +1909,6 @@ impl Cpu {
             let offset_mask = (tlb.page_mask >> 1) | 0xFFF; // page mask is a set of 1s at bit 13
                                                             // and if it isn't, it's undefined
                                                             // behavior
-            //info!(target: "CPU", "TLB: offset_mask = ${:016X}, page_size = {}", offset_mask, (offset_mask + 1));
 
             // If the virtual address is referencing one of the two pages, it's a hit
             // notice that we keep PageMask in bit 13 rather shift it down
@@ -1921,7 +1916,6 @@ impl Cpu {
 
             // VPN2 is the virtual page number (divided by 2) this TLB entry covers
             let vpn2 = tlb.entry_hi & vpn_mask;
-            //info!(target: "CPU", "TLB: EntryHi vpn2 = ${:016X}, vpn_mask = ${:016X}", vpn2, vpn_mask);
 
             //info!(target: "CPU", "TLB: virtual_address & vpn_mask = ${:016X}", virtual_address & vpn_mask);
             if (virtual_address & vpn_mask) != vpn2 { continue; }
@@ -1930,7 +1924,6 @@ impl Cpu {
 
             // the odd bit is the 1 bit above the offset bits
             let odd_bit = virtual_address & (offset_mask + 1);
-            //info!(target: "CPU", "TLB: matched {} page", if odd_bit != 0 { "odd" } else { "even" });
 
             // get the correct EntryLo field based on the odd page bit
             let entry_lo = if odd_bit != 0 { tlb.entry_lo1 } else { tlb.entry_lo0 };
@@ -2731,11 +2724,29 @@ impl Cpu {
                                     // the prefetch has to generate the exception
         // check for invalid PC addresses
         if (self.pc & 0x03) != 0 {
+            if self.next_is_delay_slot && self.next_instruction.unwrap() != 0 {
+                self.decode_instruction(self.next_instruction.unwrap()); // prepare self.inst
+                match self.finish_delay_slot() {
+                    Ok(_) => {},
+
+                    Err(e) => {
+                        unimplemented!("an exception was generated in the delay slot during an address exception: {:?}", e);
+                    }
+                }
+
+                // fix values for address_exception()
+                self.current_instruction_pc = self.pc;
+                self.is_delay_slot = false;
+            }
+
             return self.address_exception(self.pc, false);
         }
 
         // current instruction decode
         self.decode_instruction(self.next_instruction.unwrap());
+
+        // if an exception occurs prefetching a jump target, we need to know if there was a pending delay slot
+        let next_was_delay_slot = self.next_is_delay_slot;
 
         // next instruction prefetch. we need to catch TLB misses
         self.next_instruction = Some(match self.read_u32(self.pc as usize) {
@@ -2813,6 +2824,22 @@ impl Cpu {
                     self.cp0gpr[Cop0_Cause] |= 0x8000_0000;
                 }
 
+                // the previous branch caused a TLBL on prefetch but there's still a delay slot instruction that still
+                // needs to be executed
+                if next_was_delay_slot && self.next_instruction.unwrap() != 0 {
+                    if is_branch {
+                        unimplemented!("TLBL caused by the prefix but we have a jump in the delay slot, this is ugly..");
+                    }
+
+                    // self.inst is already setup from before
+                    match self.finish_delay_slot() {
+                        Ok(_) => {},
+                        Err(e) => {
+                            unimplemented!("an exception was generated in the delay slot during an address exception: {:?}", e);
+                        }
+                    }
+                }
+
                 return Err(InstructionFault::OtherException(ExceptionCode_TLBL));
             }
 
@@ -2886,6 +2913,19 @@ impl Cpu {
         self.is_delay_slot = self.next_is_delay_slot;
 
         result
+    }
+
+    // self.inst should be set up via self.decode_instruction before calling this
+    fn finish_delay_slot(&mut self) -> Result<(), InstructionFault> {
+        //println!("flushing delay slot instruction ${:08X} at address ${:08X}", self.inst.v, self.next_instruction_pc);
+        self.current_instruction_pc = self.next_instruction_pc;
+        self.is_delay_slot = true;
+
+        match self.instruction_table[self.inst.op as usize](self) {
+            Ok(_) => Ok(()),
+
+            e @ Err(_) => e
+        }
     }
 
     fn inst_reserved(&mut self) -> Result<(), InstructionFault> {
@@ -3640,20 +3680,19 @@ impl Cpu {
                     },
 
                     0b000_010 => { // tlbwi
-                        //info!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                        //            self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        debug!(target: "CPU", "COP0: tlbwi,  index={:2}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                    self.cp0gpr[Cop0_Index], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                         self.set_tlb_entry(self.cp0gpr[Cop0_Index] & 0x1F);
                     },
 
                     0b000_110 => { // tlbwr
-                        //info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
-                        //            self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
+                        debug!(target: "CPU", "COP0: tlbwr, random={:2}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
+                                    self.cp0gpr[Cop0_Random], self.cp0gpr[Cop0_EntryHi], self.cp0gpr[Cop0_EntryLo0], self.cp0gpr[Cop0_EntryLo1], self.cp0gpr[Cop0_PageMask]);
                         self.set_tlb_entry(self.cp0gpr[Cop0_Random] & 0x1F);
                     },
 
                     0b001_000 => { // tlbp
-                        //info!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}",
-                        //            self.cp0gpr[Cop0_EntryHi]);
+                        //info!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}", self.cp0gpr[Cop0_EntryHi]);
                         self.cp0gpr[Cop0_Index] = 0x8000_0000;
                         let entry_hi = self.cp0gpr[Cop0_EntryHi];
                         let asid = entry_hi & 0xFF;
@@ -3686,13 +3725,20 @@ impl Cpu {
                             panic!("COP0: error bit set"); // TODO
                         } else {
                             self.pc = self.cp0gpr[Cop0_EPC];
+                            //println!("ERET: returning from handler to ${:08X}", self.pc);
+
                             self.cp0gpr[Cop0_Status] &= !0x02;
                         }
 
-                        self.prefetch()?;
-
                         // clear LLbit so that SC writes fail
                         self.llbit = false;
+
+                        // eret can return to an invalid address, so we need to have
+                        // current_instruction_pc correct just in case an exception occurs
+                        let old_current_instruction_pc = self.current_instruction_pc;
+                        self.current_instruction_pc = self.pc;
+                        self.prefetch()?;
+                        self.current_instruction_pc = old_current_instruction_pc;
                     },
 
                     _ => panic!("COP0: unknown cp0 function 0b{:03b}_{:03b}", special >> 3, special & 0x07),
@@ -4134,7 +4180,7 @@ impl Cpu {
 
                         self.jit_jump_no_delay = true;
 
-                        // there's code after an eret but usually eret isn't inside a conditional block?
+                        // there could be code after an eret but usually eret isn't inside a conditional block?
                         CompileInstructionResult::Stop
                     },
 
@@ -8639,7 +8685,7 @@ impl Cpu {
         let sa = (inst >> 6) & 0x1F;
         let func = inst & 0x3F;
         let imm = inst & 0xFFFF;
-        let target = inst & 0x00FFFFFF;
+        let target = inst & 0x03FFFFFF;
 
         let rname = |r| {
             if use_abi_names {
@@ -8716,7 +8762,13 @@ impl Cpu {
         match op {
             0b000_000 => {
                 match func {
-                    0b000_000 => r_type_rd_rt_sa("sll"),
+                    0b000_000 => {
+                        if inst == 0 {
+                            format!("nop")
+                        } else {
+                            r_type_rd_rt_sa("sll")
+                        }
+                    },
                     0b000_010 => r_type_rd_rt_sa("srl"),
                     0b000_011 => r_type_rd_rt_sa("sra"),
                     0b000_100 => r_type_rd_rt_rs("sllv"),
@@ -8794,7 +8846,16 @@ impl Cpu {
             0b000_010 => j_type("j"),
             0b000_011 => j_type("jal"),
 
-            0b000_100 => i_type_rs_rt("beq"),
+            0b000_100 => {
+                if rs == 0 && rt == 0 {
+                    format!("bra ${:04X}", imm)
+                } else if rt == 0 {
+                    format!("beqz {}, ${:04X}", rname(rs), imm)
+                } else {
+                    i_type_rs_rt("beq")
+                }
+            },
+
             0b000_101 => i_type_rs_rt("bne"),
             0b000_110 => i_type_rs_rt("blez"),
             0b000_111 => i_type_rs_rt("bgtz"),

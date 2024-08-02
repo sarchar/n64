@@ -1009,6 +1009,7 @@ impl Addressable for PeripheralInterface {
 	}
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        trace!(target: "PI", "read_block offset=${:08X} length=${:08X}", offset, length);
         if offset >= 0x0800_0000 && offset < 0x1000_0000 { // SRAM
             let offset = offset & 0x07FF_FFFF;
             if self.flash.is_some() {
@@ -1062,7 +1063,7 @@ impl Addressable for PeripheralInterface {
 
 impl Drop for PeripheralInterface {
     fn drop(&mut self) {
-        todo!();
+        //todo!();
         //if self.sram_dirty.is_some() {
         //    self.save_sram();
         //}

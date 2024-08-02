@@ -14,7 +14,7 @@ use tracing_core::Level;
 use crate::*;
 use mips::{InterruptUpdate, InterruptUpdateMode};
 
-//use crate::cpu::Cpu;
+use crate::cpu::InstructionFault;
 
 const BP_READ : u8 = 0x01;
 const BP_WRITE: u8 = 0x02;
@@ -262,8 +262,18 @@ impl Debugger {
             //println!("${:08X}: {}", address, inst);
 
             // Break loop on any instruction error or memory access
-            if let Err(_) = self.system.run_for(1) {
-                break;
+            match self.system.run_for(1) {
+                Ok(_) => {},
+
+                Err(InstructionFault::OtherException(_exception_code)) => {
+                    // TODO: CPU exceptions should only interrupt if desired
+                },
+
+                e @ Err(_) => {
+                    // All other errors are probably bad
+                    println!("breaking on error ${:?}", e);
+                    break;
+                },
             }
 
             // Check breakpoints
@@ -443,7 +453,7 @@ impl Debugger {
     }
 
     fn listing(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        let cpu = self.system.cpu.borrow();
+        let mut cpu = self.system.cpu.borrow_mut();
         let start_pc = cpu.next_instruction_pc(); // TODO set from an argument
         let mut count = 10;
 
@@ -460,13 +470,17 @@ impl Debugger {
 
         for i in 0..count {
             let addr = start_pc + (i as u64) * 4;
-            print!("${:08X}: ", addr);
+            print!("${:08X}", addr);
 
-            if let Ok(op) = cpu.bus.borrow_mut().read_u32(addr as usize) {
-                let inst = cpu::Cpu::disassemble(addr, op, true);
-                print!("{}", inst);
+            if let Ok(Some(address)) = cpu.translate_address(addr, false, false) {
+                if let Ok(op) = cpu.bus.borrow_mut().read_u32(address.physical_address as usize) {
+                    let inst = cpu::Cpu::disassemble(addr, op, true);
+                    print!("(${:08X}): {}", op, inst);
+                } else {
+                    print!(": <unaccessable>");
+                }
             } else {
-                print!("<unaccessable>");
+                print!(": <address not mapped>");
             }
 
             if addr == cpu.next_instruction_pc() {

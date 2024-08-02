@@ -627,6 +627,7 @@ impl Hle {
             0x3A1CBAC3 => HleRspSoftwareVersion::S3DEX2, // Super Mario 64 (U)
             0x3F7247FB => HleRspSoftwareVersion::S3DEX2, // Tetrisphere
             0xE41EC47E => HleRspSoftwareVersion::S3DEX2, // MK Trilogy
+            0xAE08D5B9 => HleRspSoftwareVersion::S3DEX2, // GoldenEye 007
 
             0xAD0A6292 => HleRspSoftwareVersion::F3DEX2, // Nintendo 64 devkit f3dex2
             0x22099872 => HleRspSoftwareVersion::F3DEX2, // Zelda MM Release
@@ -639,11 +640,13 @@ impl Hle {
             0xCB8C9B6C => HleRspSoftwareVersion::F3DEX2, // NBA Live 99
             0x9551177B => HleRspSoftwareVersion::F3DEX2, // NHL 99
 
+
             // F3DEX1
             //0xA346A5CC => HleRspSoftwareVersion::F3DEX1, // Bomberman 64
             //0x8805FFEA => HleRspSoftwareVersion::F3DEX1, // Mario Kart
             //0x6EAA1DA8 => HleRspSoftwareVersion::F3DEX1, // Rayman 2
             //0xEE47381B => HleRspSoftwareVersion::F3DEX1, // Hexen 64
+            //0xEE47381B => HleRspSoftwareVersion::S3DEX2, // Banjo-Kazooie
 
             //0x86B1593E => HleRspSoftwareVersion:: ???  , // Star Wars Rogue Squadron
 
@@ -662,7 +665,7 @@ impl Hle {
                 self.command_table[0x06] = Hle::handle_displaylist;
                 //self.command_table[0xC0] = Hle::handle_noop;
 
-                let base = (-0x41i8 as u8) as usize;
+                let base = (-0x41i8 as u8) as usize; // 0xBF
                 self.command_table[base-0] = Hle::handle_tri1;
                 self.command_table[base-2] = Hle::handle_popmtx;
                 self.command_table[base-3] = Hle::handle_moveword00;
@@ -674,7 +677,7 @@ impl Hle {
                 self.command_table[base-9] = Hle::handle_cleargeometrymode;
                 self.command_table[base-11] = Hle::handle_rdphalf_1;
                 self.command_table[base-12] = Hle::handle_rdphalf_2;
-                //self.command_table[base-14] = Hle::handle_tri2;
+                self.command_table[base-14] = Hle::handle_tri4;
 
                 // RDP commands
                 self.command_table[0xFF] = Hle::handle_setcimg;
@@ -2562,6 +2565,10 @@ impl Hle {
         };
 
         match (current_tile.format, current_tile.size) {
+            (0, 1) => { // RGBA_8b
+                warn!(target: "HLE", "unsupported texture format RGBA_8b");
+            },
+
             (0, 2) => { // RGBA_16b
                 self.map_tmem_rgba_16b(current_tile.tmem as u32, texture_width, texture_height, line_bytes, plot);
             },
@@ -2715,6 +2722,75 @@ impl Hle {
         trace!(target: "HLE", "{} next_call_is_actually gsSPQuadrangle(...)", self.command_prefix);
         self.handle_tri2();
     }
+
+    fn handle_tri4(&mut self) { // G_TRI4
+        let v00 = ((self.command >> 28) & 0x0F) as u16;
+        let v01 = ((self.command >> 44) & 0x0F) as u16;
+        let v02 = ((self.command >> 24) & 0x0F) as u16;
+        let v10 = ((self.command >> 20) & 0x0F) as u16;
+        let v11 = ((self.command >> 40) & 0x0F) as u16;
+        let v12 = ((self.command >> 16) & 0x0F) as u16;
+        let v20 = ((self.command >> 12) & 0x0F) as u16;
+        let v21 = ((self.command >> 36) & 0x0F) as u16;
+        let v22 = ((self.command >>  8) & 0x0F) as u16;
+        let v30 = ((self.command >>  4) & 0x0F) as u16;
+        let v31 = ((self.command >> 32) & 0x0F) as u16;
+        let v32 = ((self.command >>  0) & 0x0F) as u16;
+        trace!(target: "HLE", "{} gsSP4Triangle({}, {}, {}, 0, {}, {}, {}, 0, {}, {}, {}, 0, {}, {}, {}, 0)", self.command_prefix, 
+            v00, v01, v02, v10, v11, v12, v20, v21, v22, v30, v31, v32);
+
+        // if a previous *RECT call forced depth we need to re-enable depth
+        if self.disable_depth_override.is_some() {
+            self.disable_depth_override = None;
+            self.check_othermode_state_change();
+        }
+
+        // make sure texture are mapped
+        self.map_current_textures();
+
+        // translate to global vertex stack
+        let vi = self.vertex_stack.get(v00 as usize).unwrap();
+        let (_, v00) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v01 as usize).unwrap();
+        let (_, v01) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v02 as usize).unwrap();
+        let (_, v02) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v10 as usize).unwrap();
+        let (_, v10) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v11 as usize).unwrap();
+        let (_, v11) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v12 as usize).unwrap();
+        let (_, v12) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v20 as usize).unwrap();
+        let (_, v20) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v21 as usize).unwrap();
+        let (_, v21) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v22 as usize).unwrap();
+        let (_, v22) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v30 as usize).unwrap();
+        let (_, v30) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v31 as usize).unwrap();
+        let (_, v31) = self.finalize_vertex(*vi as usize).unwrap();
+        let vi = self.vertex_stack.get(v32 as usize).unwrap();
+        let (_, v32) = self.finalize_vertex(*vi as usize).unwrap();
+
+        // adjust color according to G_SHADE_SMOOTH. If smooth shading is not enabled,
+        // all other vertices take the color of the first vertex
+        let is_lit = (self.vertices[v00 as usize].flags & VertexFlags::LIT) != 0;
+        if !is_lit && (self.geometry_mode & 0x0020_0004) == 0x04 { // G_SHADE and !G_SHADE_SMOOTH (TODO: this value is different in different ucode!)
+            self.vertices[v01 as usize].color = self.vertices[v00 as usize].color;
+            self.vertices[v02 as usize].color = self.vertices[v00 as usize].color;
+            self.vertices[v11 as usize].color = self.vertices[v10 as usize].color;
+            self.vertices[v12 as usize].color = self.vertices[v10 as usize].color;
+            self.vertices[v21 as usize].color = self.vertices[v20 as usize].color;
+            self.vertices[v22 as usize].color = self.vertices[v20 as usize].color;
+            self.vertices[v31 as usize].color = self.vertices[v30 as usize].color;
+            self.vertices[v32 as usize].color = self.vertices[v30 as usize].color;
+        }
+
+        self.add_triangles(RenderPassType::DrawTriangles, &[v00, v01, v02, v10, v11, v12, v20, v21, v22, v30, v31, v32]);
+    }
+
 
     fn handle_texrect(&mut self) { // G_TEXRECT (S3DEX2, F3DEX2)
         let cmd1 = self.next_display_list_command();

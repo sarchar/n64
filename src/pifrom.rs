@@ -108,6 +108,7 @@ impl PifRom {
         let flash = match game_code.as_str() {
             "NZS" => Flash::_128KiB, // Legend of Zelda - Majora's Mask
             "NM6" => Flash::_128KiB, // Mega Man 64
+            "NMQ" => Flash::_128KiB, // Paper Mario
             _     => Flash::None,
         };
 
