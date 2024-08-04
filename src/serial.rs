@@ -46,7 +46,7 @@ impl SerialInterface {
     }
 
     pub fn step(&mut self) {
-        if let Ok(_) = self.dma_completed_rx.try_recv() {
+        while self.dma_completed_rx.try_recv().is_ok() {
             //println!("SerialInterface::step generating SI");
             self.interrupt_flag = true;
             self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::SetInterrupt)).unwrap();

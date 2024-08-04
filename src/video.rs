@@ -234,7 +234,7 @@ impl VideoInterface {
     }
 
     pub fn calculate_free_cycles(&self) -> u64 {
-        return Self::CYC_PER_SCANLINE - self.cycle_count;
+        Self::CYC_PER_SCANLINE - self.cycle_count
     }
 
     pub fn step(&mut self, cpu_cycles_elapsed: u64) {

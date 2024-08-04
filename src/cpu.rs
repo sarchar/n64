@@ -2404,8 +2404,10 @@ impl Cpu {
             );
 
             if jit_jump || self.jit_jump_no_delay {
-                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some())); // will never happen (CompileInstructionResult::Cant will occur
-                                                                                    // with a jump in the delay slot)
+                // this assert should never happen (CompileInstructionResult::Cant will occur with a jump in the delay slot)
+                assert!(!(self.jit_jump || self.jit_conditional_branch.is_some()), 
+                        "jit_jump={:?} self.jit_conditional_branch={:?}", jit_jump, self.jit_conditional_branch);
+                                      
                 trace!(target: "JIT-BUILD", "** performing jump");
 
                 self.jit_jump_no_delay = false;
@@ -2416,6 +2418,7 @@ impl Cpu {
                     ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // .
                 );
 
+                // TODO This letssetupexcept can be removed, since prefetch_bridge doesn't generate exceptions anymore
                 // prepare exceptions for the prefetch() call
                 letssetupexcept!(self, assembler, false);
 

@@ -188,14 +188,14 @@ impl PifRom {
             _ => {},
         };
 
-        let seed = 0xDD; // 64DD? Niiice.
-        match PifRom::ipl2hash(data, seed) {
-            //x @ 0x32B294E2AB90 => (CicType::Nus8303, x, seed, false), // 64DD retail JP
-            //x @ 0x6EE8D9E84970 => (CicType::Nus8401, x, seed, false), // 64DD dev
-            //x @ 0x083C6C77E0B1 => (CicType::Nus5167, x, seed, false), // 64DD conversion cartridges ??
-            //x @ 0x05BA2EF0A5f1 => (CicType::NusDdus, x, seed, false), // 64DD retail US
-            _ => {},
-        };
+        //let seed = 0xDD; // 64DD? Niiice.
+        //match PifRom::ipl2hash(data, seed) {
+        //    //x @ 0x32B294E2AB90 => (CicType::Nus8303, x, seed, false), // 64DD retail JP
+        //    //x @ 0x6EE8D9E84970 => (CicType::Nus8401, x, seed, false), // 64DD dev
+        //    //x @ 0x083C6C77E0B1 => (CicType::Nus5167, x, seed, false), // 64DD conversion cartridges ??
+        //    //x @ 0x05BA2EF0A5f1 => (CicType::NusDdus, x, seed, false), // 64DD retail US
+        //    _ => {},
+        //};
 
         // Unknown IPL3 checksum, default to 6102 with seed 0x3F
         let checksum = PifRom::ipl2hash(data, 0x3F);
@@ -223,7 +223,7 @@ impl PifRom {
         };
 
         let init = add(mul(MAGIC, seed as u32), 1) ^ data[0];
-        let mut buf = vec![init; 16];
+        let mut buf = [init; 16];
 
         for i in 1..=1008 {
             let ii   = i as u32;
@@ -261,11 +261,10 @@ impl PifRom {
             buf[15] = sum(sum(buf[15], rol(cur, prev >> 27), ii), rol(next, cur >> 27), ii);
         }
 
-        let mut result = vec![buf[0]; 4];
+        let mut result = [buf[0]; 4];
 
-        for i in 0..16 {
+        for (i, cur) in buf.iter().enumerate() {
             let ii = i as u32;
-            let cur = buf[i];
 
             result[0] = add(result[0], ror(cur, cur & 0x1F));
             result[1] = if cur < result[0] {
@@ -409,12 +408,12 @@ impl PifRom {
                             } else if channel == 4 { // Cart channel
                                 match self.eeprom {
                                     Eeprom::_4KiB => {
-                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x00C0 16Kbit 
+                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x0080 4KiB
                                         self.write_u8_correct(0x80, res_addr + 1).unwrap();
                                         self.write_u8_correct(0x00, res_addr + 2).unwrap(); // 0x80 set = write in progress
                                     },
                                     Eeprom::_16KiB => {
-                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x00C0 16Kbit 
+                                        self.write_u8_correct(0x00, res_addr + 0).unwrap(); // 0x00C0 16KiB
                                         self.write_u8_correct(0xC0, res_addr + 1).unwrap();
                                         self.write_u8_correct(0x00, res_addr + 2).unwrap(); // 0x80 set = write in progress
                                     },
