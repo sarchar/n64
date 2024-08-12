@@ -624,7 +624,6 @@ impl PeripheralInterface {
 
             // if the sram exists, make sure it's the right size and return a chunk
             Some(ref mut sram_data) => {
-                let offset = offset - 0x0800_0000;
                 let end = (offset + length as usize) >> 2;
                 if end > sram_data.len() {
                     debug!(target: "SRAM", "increasing SRAM to {} bytes", end * 4);
