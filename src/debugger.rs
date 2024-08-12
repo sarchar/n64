@@ -145,11 +145,16 @@ impl Debugger {
         let mut last_printed_pc = 0;
         while self.alive {
             let readline = { // context for dropping cpu
-                let cpu = self.system.cpu.borrow();
+                let mut cpu = self.system.cpu.borrow_mut();
                 let next_instruction_pc = cpu.next_instruction_pc();
                 if last_printed_pc != next_instruction_pc {
-                    let inst = cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true);
+                    let inst = if cpu.next_instruction().is_some() {
+                        cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true)
+                    } else {
+                        format!("<cannot fetch instruction>")
+                    };
                     print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
+
                     if cpu.next_is_delay_slot() {
                         print!(" (delay slot)");
                     }

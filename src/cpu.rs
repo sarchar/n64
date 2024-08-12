@@ -253,7 +253,7 @@ macro_rules! letsset {
             letsgo!($ops
                 ;   mov $reg32, DWORD v as i32 as _
             );
-        } else if (((v as u32) as i64) as u32) == v {
+        } else if ((v as i32) as u64) == v {
             letsgo!($ops
                 ;   mov $reg64, DWORD v as i32 as _
             );
@@ -371,6 +371,7 @@ macro_rules! letscheck {
         // check if there was an exception in the previous letscall
         letsgo!($ops
             ;   cmp BYTE [r_cpu + offset_of!(Cpu, jit_other_exception) as i32], BYTE 0u8 as _
+            // ;   jne >exit_for_exception
             ;   jne >epilog
         );
 
@@ -755,7 +756,14 @@ impl Cpu {
         self.current_instruction_pc
     }
 
-    pub fn next_instruction(&self) -> Option<u32> {
+    pub fn next_instruction(&mut self) -> Option<u32> {
+        if self.next_instruction.is_none() {
+            self.next_instruction = match self.translate_address(self.next_instruction_pc, false, false) {
+                Ok(Some(address)) => Some(self.read_u32_phys(address).unwrap()),
+                Ok(None) => None,
+                Err(_) => None,
+            };
+        }
         self.next_instruction
     }
 
@@ -1243,11 +1251,14 @@ impl Cpu {
 
         // we need to throw away next_instruction, so prefetch the new instruction now
         self.next_is_delay_slot = false;
-        //if self.jit_executing {
-        //    Cpu::prefetch_bridge(self);
-        //} else {
+
+        // when executing in JIT we can use prefetch_bridge() so we don't actually end up reading the bus,
+        // since the code could already be compiled (and likely is since its the exception handler)
+        if self.jit_executing {
+            Cpu::prefetch_bridge(self);
+        } else {
             self.prefetch()?;
-        //}
+        }
 
         // break out of all processing
         Err(InstructionFault::OtherException(exception_code))
@@ -2039,7 +2050,7 @@ impl Cpu {
         //
         // TODO: Catch PC address and TLB exceptions
 
-        //trace!(target: "JIT-RUN", "run_for started at ${:08X}", self.next_instruction_pc as u32);
+        trace!(target: "JIT-RUN", "run_for started at ${:08X}, max_cycles={}", self.next_instruction_pc as u32, max_cycles);
 
         let steps_start = self.num_steps;
         // const MIN_STEPS_TO_BE_WORTH_IT: u64 = 8; // TODO does this "optimization" make sense?
@@ -2097,13 +2108,17 @@ impl Cpu {
 
                     // execute the block
                     trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    let starting_steps = self.num_steps;
                     self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
+                    trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     let compiled_block = compiled_block.borrow();
                     trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
+                    let starting_steps = self.num_steps;
                     self.num_steps += self.run_block(&*compiled_block, physical_address)?; // start execution at an offset into the block
+                    trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
                 }
 
                 CachedBlockStatus::Uncompilable => { // interpret some instructions and try again
@@ -2403,6 +2418,7 @@ impl Cpu {
                 ;   dec DWORD [rsp+s_cycle_count]
             );
 
+            // jit_jump_no_delay is used in ERET
             if jit_jump || self.jit_jump_no_delay {
                 // this assert should never happen (CompileInstructionResult::Cant will occur with a jump in the delay slot)
                 assert!(!(self.jit_jump || self.jit_conditional_branch.is_some()), 
@@ -2412,22 +2428,12 @@ impl Cpu {
 
                 self.jit_jump_no_delay = false;
 
-                // move jump target value into self.pc, call self.prefetch and gtfo
+                // the dynamic jump target is in s_jump_target..we can either jump directly to the code or
+                // the code doesn't exist and needs to be compiled.  so we get out of this block now, but
+                // we can continue compiling
                 letsgo!(assembler
-                    ;   mov rax, QWORD [rsp+s_jump_target]                   // copy jump target to self.pc
-                    ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // .
-                );
-
-                // TODO This letssetupexcept can be removed, since prefetch_bridge doesn't generate exceptions anymore
-                // prepare exceptions for the prefetch() call
-                letssetupexcept!(self, assembler, false);
-
-                // no arguments to prefetch_bridge
-                letscall!(assembler, Cpu::prefetch_bridge);
-
-                // jumps have to leave the block, but continue compiling
-                letsgo!(assembler
-                    ;   jmp >epilog
+                    ;   mov rdx, QWORD [rsp+s_jump_target]                   // copy jump target to self.pc
+                    ;   jmp >check_cycle_count_or_block_link                 // try jumping directly to the target block
                 );
             } else if let Some((branch_offset, is_branch_likely, is_unconditional)) = jit_conditional_branch {
                 assert!(!self.jit_jump && self.jit_conditional_branch.is_none()); // no branches within delay slots
@@ -2446,55 +2452,51 @@ impl Cpu {
                 // to check r_cond), or we are using branch_likely and know that we're taking the
                 // branch. alternatively, if the branch is uncondtional (always taken) we jump here
                 if is_branch_likely || is_unconditional {
+                    // try to detect basic idle loops, where we have an unconditional branch backwards 
+                    // one instruction and the delay slot is a nop
                     if is_unconditional && branch_offset == -4 && self.inst.v == 0 {
                         trace!(target: "JIT-BUILD", "** idle loop detected at ${:08X}, exiting block", branch_target);
                         letsgo!(assembler
-                            ;   mov BYTE [r_cpu + offset_of!(Cpu, jit_idle_loop_detected) as i32], BYTE 1u8 as _
+                            ;   inc BYTE [r_cpu + offset_of!(Cpu, jit_idle_loop_detected) as i32] // set jit_idle_loop_detected to nonzero
                             ;   jmp >break_out
                         );
                     }
                     trace!(target: "JIT-BUILD", "** in branch_likely to ${:08X}, checking cycle count break out", branch_target as u32);
 
                     // test if we need to break out of the block before the branch
+                    // the use of the dynamic label lets us take branches within this same block
+                    // otherwise, we can use the branch target and try for block linking
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
                         ;   jle >break_out
                         ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
                         ;   cmp BYTE [rax], BYTE 0u8 as _
-                        ;   je =>dynamic_label                           // otherwise, just take the branch
+                        ;   je =>dynamic_label                           // otherwise, take the branch
                         ;break_out:
-                        ;   mov rax, QWORD branch_target as u64 as _             // PC address we need to jump to
-                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax  // put branch target in self.pc
-                    );
-
-                    letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
-
-                    letsgo!(assembler
-                        ;   jmp >epilog                                     // exit the block
+                        ;   mov rdx, QWORD branch_target as u64 as _     // PC address we need to jump to
+                        ;   jmp >restore_pc_and_break_out                // we must exit the block, so no block linking
+                        // this label is used above, before the instruction is compiled, to skip delay slots
                         ;no_branch:
                     );
                 } else {
                     trace!(target: "JIT-BUILD", "** checking normal branch condition:");
 
+                    // check s_cycle_count and break_cpu_cycles to see if we should exit the block
                     letsgo!(assembler
                         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _    // break out when run count hits 0 or less
                         ;   jle >break_out
                         ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
                         ;   cmp BYTE [rax], BYTE 0u8 as _
                         ;   je >no_break_out
+                        // we have to exit the block, so set rdx (for restore_pc_and_breakout) based on r_cond
                         ;break_out:
-                        ;   mov rax, QWORD self.next_instruction_pc as _    // default to fall through
+                        ;   mov rdx, QWORD self.next_instruction_pc as _    // default to fall through
                         ;   dec r_cond                                      // check if r_cond is set
                         ;   jne >skip_set                                   // .
-                        ;   mov rax, QWORD branch_target as u64 as _        // if set, use the branch target instead
+                        ;   mov rdx, QWORD branch_target as u64 as _        // if set, use the branch target instead
                         ;skip_set:
-                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax // store branch dest in self.pc
-                    );
-
-                    letscall!(assembler, Cpu::prefetch_bridge);             // setup next_instruction_pc
-
-                    letsgo!(assembler
-                        ;   jmp >epilog                                     // exit the block
+                        ;   jmp >restore_pc_and_break_out                   // exit the block
+                        // since we don't have to exit the block, jump to the dynamic label
                         ;no_break_out:
                         ;   dec r_cond          // test if r_cond is 1
                         ;   jz =>dynamic_label  // and branch if so
@@ -2503,6 +2505,15 @@ impl Cpu {
 
                 jit_fixups.push((branch_target, dynamic_label));
             }
+            // TODO this is temporary and isn't necessary beyond using the debugger
+            // else if !self.next_is_delay_slot {
+            //     // test if we need to break out
+            //     letsgo!(assembler
+            //         ;   mov rdx, QWORD self.next_instruction_pc as i64 as _
+            //         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
+            //         ;   jle >restore_pc_and_break_out
+            //     );
+            // }
         }
 
         if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
@@ -2511,37 +2522,65 @@ impl Cpu {
             debug!(target: "JIT-BUILD", "[terminating block compilation after {} nops]", num_nops);
         }
 
-        // If we fall through execution here instead of jumping to epilog, then we basically need
-        // to continue execution of game code.
+        // If we fall through execution here instead of jumping to epilog, then we basically can
+        // to continue execution of game code, but first check if there are cycles left.
         //
-        // Thankfully, self.next_instruction_pc has been updating and currently points to the next instruction,
-        // so we try linking to a block and otherwise exiting.
+        // self.next_instruction_pc has been updating and currently points to the next instruction,
+        // so we try linking to the next block and jumping to it directly.
         //
-        // And technically, we shouldn't exit a block right before a delay slot instruction
-        // So it should never be true here
+        // And we can't exit a block in a delay slot instruction, so it should never be true here
         assert!(!self.next_is_delay_slot);
-        if ((self.next_instruction_pc as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-            letsgo!(assembler
-                ;   mov rdx, DWORD self.next_instruction_pc as i32 as _ // sign-extend address
-            );
-        } else {
-            letsgo!(assembler
-                ;   mov rdx, QWORD self.next_instruction_pc as i64 as _
-            );
-        }
+
+        // block link expects the next instruction address rdx
+        letsset!(assembler, rdx, edx, self.next_instruction_pc);
+
         letsgo!(assembler
-            ;   jmp >try_block_link
+            ;check_cycle_count_or_block_link:
+            ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _  // check s_cycle_count for <= 0
+            ;   jle >restore_pc_and_break_out
+            ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
+            ;   cmp BYTE [rax], BYTE 0u8 as _
+            ;   je >try_block_link
+            // fall through to restore_pc_and_break_out
         );
 
-        // Finally the "epilog", which just restores hi/lo and returns
+        // set next_instruction_pc (in rdx) into PC and call prefetch
+        letsgo!(assembler
+            ;restore_pc_and_break_out:
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rdx  // store branch dest in self.pc
+            // fall through to prefetch_bridge
+        );
+
+        letscall!(assembler, Cpu::prefetch_bridge);                  // setup next_instruction_pc
+        // fall through to epilog
+        // ...
+        // ...
+        // Finally the "epilog", which due to the fact that we have a trapoline just returns
         letsgo!(assembler
             ;epilog:
-        );
-
-        // return to the trampoline
-        letsgo!(assembler
             ;   ret
         );
+
+        // OK, well, I thought block linking the exception handler would be a nice performance improvement, but
+        // I guess not.  Literally a huge overhead and I'm not sure why. It might have to do with the translate_address
+        // call, but now I wonder if block linking is just going to be slower for all branches.
+        //
+        // // Handle exceptions -- we may or may not need to break out (depending on cycle count), but we can actually
+        // // just do a block link to the exception handler most of the time. However, when an exception has occurred
+        // // (jit_other_exception is true and letscheck!() branched here), the next instruction is in self.next_instruction_pc
+        // // already (prefetch_bridge already called too). We need to get it back into rdx for try_block_link
+        // letsgo!(assembler
+        //     ;exit_for_exception:
+        //     // check cycle count first
+        //     ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _  // check s_cycle_count for <= 0
+        //     ;   jle <epilog
+        //     ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
+        //     ;   cmp BYTE [rax], BYTE 0u8 as _
+        //     ;   jne <epilog
+        //     // ok, we need the PC in rdx for try_block_link
+        //     ;   mov rdx, QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32]
+        //     ;   jmp >try_block_link
+        // );
 
         // fixup jumps
         for &(branch_target, dynamic_label) in &jit_fixups {
@@ -2556,16 +2595,7 @@ impl Cpu {
                 let code_start_offset = assembler.offset();
 
                 trace!(target: "JIT-BUILD", "** creating external block branch target handler for branch to ${:16X}", branch_target);
-                if ((branch_target as u64) & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
-                    letsgo!(assembler
-                        ;   mov rdx, DWORD branch_target as i32 as _ // sign-extend address
-                    );
-                } else {
-                    letsgo!(assembler
-                        ;   mov rdx, QWORD branch_target as i64 as _
-                        ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
-                    );
-                }
+                letsset!(assembler, rdx, eax, branch_target);
                 letsgo!(assembler
                     ;   jmp >try_block_link
                 );
@@ -2593,13 +2623,8 @@ impl Cpu {
             ;   jz >notfound
             ;   jmp rax // weee
             ;notfound: // otherwise, put branch destination into self.pc, prefetch, and exit the block
-            ;   mov rax, QWORD [rsp+s_tmp0]
-            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
-        );
-
-        letscall!(assembler, Cpu::prefetch_bridge);
-        letsgo!(assembler
-            ;   ret
+            ;   mov rdx, QWORD [rsp+s_tmp0]
+            ;   jmp <restore_pc_and_break_out
         );
 
         // finalize the block

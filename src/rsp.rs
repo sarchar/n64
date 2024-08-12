@@ -1653,6 +1653,9 @@ impl RspCpuCore {
                                 && (dma_info.source_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
                                 let access = self.comms.rdram.read();
                                 let rdram: &[u32] = access.as_deref().unwrap().as_ref().unwrap();
+                                if (dma_info.source_address >> 2) as usize >= rdram.len() {
+                                    println!("dma about to fail: {:?}", dma_info);
+                                }
                                 let slice = &rdram[(dma_info.source_address >> 2) as usize..][..(dma_info.length >> 2) as usize];
 
                                 let mem_offset = (dma_info.dest_address & 0x1FFF) >> 2; // 8KiB, repeated

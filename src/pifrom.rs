@@ -263,7 +263,7 @@ impl PifRom {
 
         let mut result = [buf[0]; 4];
 
-        for (i, cur) in buf.iter().enumerate() {
+        for (i, &cur) in buf.iter().enumerate() {
             let ii = i as u32;
 
             result[0] = add(result[0], ror(cur, cur & 0x1F));
@@ -294,6 +294,7 @@ impl PifRom {
     fn update_control_write(&mut self) {
         let value = self.ram[0x0F];
 
+        trace!(target: "PIF", "control byte write ${:02X}", value);
         //panic!("PIF: write command port");
         if (value & 0x01) != 0 {
             let ramcpy = self.ram.to_owned();
