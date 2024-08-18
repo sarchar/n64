@@ -107,6 +107,8 @@ impl Addressable for Rdp {
             // DP_CLOCK
             0x0010_0010 => {
                 self.update_clock();
+                // trace!(target: "DP_CLOCK", "clock=${:08X}", self.clock);
+                // TODO this doesn't seem to be the cause of OoT crashes...panic!();
                 Ok(self.clock)
             },
 

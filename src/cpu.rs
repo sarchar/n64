@@ -2,6 +2,7 @@
 
 use cfg_if::cfg_if;
 
+use std::arch::asm;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::HashMap;
@@ -149,20 +150,21 @@ enum CompileInstructionResult {
     Cant,     // Instruction not compiled, exit block and interpret
 }
 
-// win64 calling convention/ABI:
-// caller saved: rax, rcx, rdx, r8-r11, xmm0-xmm5 (volatile)
-// callee saved: rbx, rbp, rdi, rsi, rsp, r12-r15, xmm6-xmm15 (non-volatile)
-// TODO important: fpcsr is nonvolatile (callee saved), which controls fp rounding
+// SysV64 calling convention/ABI:
+// caller saved: rax, rdi, rsi, rcx, r8-r11, all xmm registers (volatile)
+// callee saved: rbx, rbp, rsp, r12-r15 (non-volatile)
+// TODO important: is fpcsr volatile? controls fp rounding and might need to be preserved
 // rax is return value
 // rsp is the stack pointer and must be 0x10 (16) bytes aligned before a function call
-// rcx, rdx, r8, and r9 are the first four arguments to a function call -- these should never be
+// rdi, rsi, rdx, rcx, r8, and r9 are the first six arguments to a function call -- these should never be
 // aliased to r_ or v_ names, since they are used directly for function call parameters.
 // further arguments are pushed to the stack in right-to-left order (left-most arguments are closer to rsp)
-// xmm0l, xmm1l, xmm2l, and xmmr3l are the first four floating point arguments
 // at the end of a function, rsp must be equal to what it was at the beginning of a function, 
 // unless the return value is in the stack, then rsp must be the original value minus the return value size
-// ebp used to be used as a base pointer for stack frames, but is not generally the case
-// if a dynamic stack is useful, rbp can be used (and is callee saved) to save and restore the stack pointer
+// optionally, functions can push rbp such that the return rip is 8 bytes above it, and then set rbp to the address
+// of the saved rbp:
+//    push rbp
+//    mov rbp, rsp
 macro_rules! letsgo {
     ($ops:ident $($t:tt)*) => {
         // for registers that we're using often, we want to use as many callee saved registers as
@@ -175,14 +177,27 @@ macro_rules! letsgo {
         // all are valid to be used as another temporary storage register)
         dynasm!($ops
             ; .arch x64
-            ; .alias r_gpr, rbx
-            ; .alias r_cp0gpr, r12
-            ; .alias r_cpu, rsi
-            ; .alias r_cond, edi
-            ; .alias r_cond_64, rdi
-            ; .alias v_tmp, r10
+            // saved registers
+            ; .alias r_gpr, r12
+            ; .alias r_cp0gpr, r13
+            ; .alias r_cpu, r14
+            ; .alias r_cond, ebx         // I want r_cond to be an "old" 32bit register for fast xor, also non-volatile
+            ; .alias r_cond_64, rbx
+            // volatile (non-saved) registers
+            ; .alias v_tmp, r10          // I don't want to use any of the 6 function parameters since those are used directly
             ; .alias v_tmp_32, r10d
             ; .alias v_tmp2, r11
+            // arguments to functions (also volatile)
+            ; .alias v_arg0, rdi
+            ; .alias v_arg1, rsi
+            ; .alias v_arg2, rdx
+            // ; .alias v_arg3, rcx    // not used
+            // ; .alias v_arg0_32, edi // not used
+            ; .alias v_arg1_32, esi
+            ; .alias v_arg2_32, edx
+            ; .alias v_arg3_32, ecx
+            ; .alias v_arg1_8l, sil
+            ; .alias v_arg2_8l, dl
             $($t)*
         );
 
@@ -210,27 +225,27 @@ macro_rules! letsbreak {
     }
 }
 
-// use letscall! to call external "win64" functions
+// use letscall! to call external "sysv64" functions
 // this call uses the first parameter (Cpu) for all calls
-// you can setup arguments before calling letscall!() in r8, r9, and the rest in stack
+// you can setup arguments before calling letscall!() in rsi, rdx, rcx...
 macro_rules! letscall {
     ($ops:ident, $target:expr) => {
         letsgo!($ops
-            ;   mov rcx, r_cpu                            // arg0 *mut Cpu
+            ;   mov v_arg0, r_cpu                         // arg0 *mut Cpu
             ;   mov rax, QWORD $target as _               // function pointer
             ;   call rax                                  // make the call
         );
     }
 }
 
-// use letscop! to call external "win64" functions on other objects
+// use letscop! to call external "sysv64" functions on other objects
 // this call uses the first two parameters (Cpu, Cop1) for all calls
-// you can setup arguments before calling letscop!() in r8, r9, and the rest in stack
+// you can setup arguments before calling letscop!() in rdx, rcx, r8, r8...
 macro_rules! letscop {
     ($ops:ident, $cop:expr, $target:expr) => {
         letsgo!($ops
-            ;   mov rcx, r_cpu                            // arg0 *mut Cpu
-            ;   mov rdx, QWORD $cop as *mut _ as _        // arg1 *mut Cop1
+            ;   mov v_arg0, r_cpu                         // arg0 *mut Cpu
+            ;   mov v_arg1, QWORD $cop as *mut _ as _     // arg1 *mut Cop1
             ;   mov rax, QWORD $target as _               // function pointer
             ;   call rax                                  // make the call
         );
@@ -268,7 +283,7 @@ macro_rules! letsset {
 // set the link register to the self.pc, which is 8 bytes ahead of the current instruction pc
 macro_rules! letslink {
     ($self:ident, $ops:ident) => {
-        if ($self.pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+        if (($self.pc as i32) as u64) == $self.pc {
             letsgo!($ops
                 ;   mov QWORD [r_gpr + (31 * 8) as i32], DWORD $self.pc as i32 as _
             );
@@ -314,7 +329,7 @@ macro_rules! letssetupexcept {
             ;   mov BYTE [r_cpu + offset_of!(Cpu, is_delay_slot) as i32], BYTE $self.is_delay_slot as _
         );
 
-        if ($self.current_instruction_pc & 0xFFFF_FFFF_8000_0000) == 0xFFFF_FFFF_8000_0000 {
+        if (($self.current_instruction_pc as i32) as u64) == $self.current_instruction_pc {
             letsgo!($ops
                 ;   mov QWORD [r_cpu + offset_of!(Cpu, current_instruction_pc) as i32], DWORD $self.current_instruction_pc as _
             );
@@ -356,7 +371,8 @@ macro_rules! letsexcept {
         letscall!($ops, $exception_bridge);
 
         letsgo!($ops
-            ;   jmp >epilog     // we lose one instruction count by skipping the instruction epilog
+            ;   dec DWORD [rsp+s_cycle_count]
+            ;   jmp >epilog
         );
     }
 }
@@ -670,34 +686,61 @@ impl Cpu {
         let trampoline_entry_offset = assembler.offset(); // is this always 0 ?
 
         // build the trampoline code
-        // trampoline(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> cycles_ran: u32
+        // extern "sysv64" trampoline(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> cycles_ran: u32
+        #[allow(unused_assignments)]
+        #[allow(unused_mut)]
+        let mut stack_adjust = 0;
+
+        cfg_if! [
+            if #[cfg(feature="dev")] {
+                // letsbreak!(assembler);
+                letsgo!(assembler
+                    ;   push rbp
+                    ;   mov rbp, rsp
+                );
+                stack_adjust = 8;
+            }
+        ];
+
         letsgo!(assembler
             ;   push r_gpr
             ;   push r_cp0gpr
             ;   push r_cpu
             ;   push r_cond_64
-            // cpu: *mut Cpu comes in rcx
-            ;   mov r_cpu, rcx
+            // cpu: *mut Cpu comes in rdi
+            ;   mov r_cpu, v_arg0
             // shortcuts to gpr and cp0gpr
             ;   lea r_gpr, [r_cpu + offset_of!(Cpu, gpr) as i32]
             ;   lea r_cp0gpr, [r_cpu + offset_of!(Cpu, cp0gpr) as i32]
-            // the stack is currently offset by 28 due to rip being pushed plus 4 register pushes, so we will leave it that way
-            // the call below will push rip and align the stack to 0x10
-            ;   sub rsp, BYTE 0x20 // setup the stack so function calls are aligned
-                                   // 0x20 bytes is enough room for the s_* variables
-            // run_limit in r8d
-            // NOTE: 8 is subtracted from the stack pointers because we're not inside the `call rdx` (JIT code) below
-            ;   mov DWORD [rsp+(s_cycle_count-8)], r8d
-            // rdx contains the address of the target JIT code
-            ;   call rdx
+            // the stack is currently offset by 0x20/0x28 due to rip being pushed plus 4/5 register pushes
+            // we want the stack to be 0x10 aligned /after/ the `call` because future calls will call sysv64 ABI functions
+            // and this call below doesn't require the alignment. we can then align it using the call itself.
+            ;   sub rsp, BYTE 0x20 + stack_adjust // setup the stack so function calls are aligned.. 0x20 bytes is enough room for the s_* variables
+            // run_limit in v_arg2
+            // NOTE: 8 is subtracted from the stack pointers because we're not inside the `call v_arg1` (JIT code) below
+            ;   mov DWORD [rsp+(s_cycle_count-8)], v_arg2_32
+            // v_arg1 contains the address of the target JIT code
+            ;   call v_arg1
             // cycle count to return value
             ;   mov eax, DWORD [rsp+(s_cycle_count-8)]
             // restore the stack in reverse order
-            ;   add rsp, BYTE 0x20 // must match the sub rsp above
+            ;   add rsp, BYTE 0x20 + stack_adjust // must match the sub rsp above
             ;   pop r_cond_64
             ;   pop r_cpu
             ;   pop r_cp0gpr
             ;   pop r_gpr
+        );
+
+        cfg_if! [
+            if #[cfg(feature="dev")] {
+                letsgo!(assembler
+                    ;   mov rsp, rbp
+                    ;   pop rbp
+                );
+            }
+        ];
+
+        letsgo!(assembler
             ;   ret
         );
 
@@ -848,11 +891,11 @@ impl Cpu {
         value
     }
 
-    unsafe extern "win64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
+    extern "sysv64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
         //trace!(target: "JIT", "read_u8_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
-        //if virtual_address == 2 { std::arch::asm!("int3"); }
+        let cpu = unsafe { &mut *cpu };
+        //if virtual_address == 2 { asm!("int3"); }
         match cpu.read_u8(virtual_address as usize) {
             Ok(value) => (value as u8) as u32,
 
@@ -865,7 +908,7 @@ impl Cpu {
             Err(e) => {
                 // TODO handle errors better
                 error!("error in read_u8_bridge: {:?}", e);
-                std::arch::asm!("int3");
+                unsafe { asm!("int3"); }
                 0
             }
         }
@@ -881,10 +924,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn read_u16_bridge(cpu: *mut Cpu, virtual_address: u64) -> u16 {
+    extern "sysv64" fn read_u16_bridge(cpu: *mut Cpu, virtual_address: u64) -> u16 {
         //trace!(target: "JIT", "read_u16_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.read_u16(virtual_address as usize) {
             Ok(value) => value,
             Err(e) => {
@@ -904,10 +947,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn read_u32_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
+    extern "sysv64" fn read_u32_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
         //trace!(target: "JIT", "read_u32_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.read_u32(virtual_address as usize) {
             Ok(value) => value,
 
@@ -934,10 +977,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn read_u64_bridge(cpu: *mut Cpu, virtual_address: u64) -> u64 {
+    extern "sysv64" fn read_u64_bridge(cpu: *mut Cpu, virtual_address: u64) -> u64 {
         //trace!(target: "JIT", "read_u64_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.read_u64(virtual_address as usize) {
             Ok(value) => value,
             Err(e) => {
@@ -967,10 +1010,10 @@ impl Cpu {
         Ok(self.bus.borrow_mut().read_u32(physical_address as usize)?)
     }
 
-    unsafe extern "win64" fn read_u32_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u32 {
+    extern "sysv64" fn read_u32_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u32 {
         //trace!(target: "JIT", "read_u32_phys_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.read_u32_phys_direct(physical_address) {
             Ok(value) => value,
 
@@ -990,10 +1033,10 @@ impl Cpu {
         Ok(self.bus.borrow_mut().read_u64(physical_address as usize)?)
     }
 
-    unsafe extern "win64" fn read_u64_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u64 {
+    extern "sysv64" fn read_u64_phys_bridge(cpu: *mut Cpu, physical_address: u64) -> u64 {
         //trace!(target: "JIT", "read_u64_phys_bridge from ${:08X}", virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.read_u64_phys_direct(physical_address) {
             Ok(value) => value,
 
@@ -1025,10 +1068,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn write_u8_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
+    extern "sysv64" fn write_u8_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
         //trace!(target: "JIT", "write_u8_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u8(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
@@ -1054,10 +1097,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn write_u16_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
+    extern "sysv64" fn write_u16_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> i32 {
         //trace!(target: "JIT", "write_u16_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u16(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
@@ -1093,10 +1136,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> u32 {
+    extern "sysv64" fn write_u32_bridge(cpu: *mut Cpu, value: u32, virtual_address: u64) -> u32 {
         //trace!(target: "JIT", "write_u32_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u32(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
 
@@ -1109,7 +1152,7 @@ impl Cpu {
             Err(e) => {
                 // TODO handle errors better
                 error!("error in write_u32_bridge: {:?}", e);
-                std::arch::asm!("int3");
+                unsafe { asm!("int3"); }
                 0
             }
         }
@@ -1130,10 +1173,10 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn write_u64_bridge(cpu: *mut Cpu, value: u64, virtual_address: u64) -> i32 {
+    extern "sysv64" fn write_u64_bridge(cpu: *mut Cpu, value: u64, virtual_address: u64) -> i32 {
         //trace!(target: "JIT", "write_u64_bridge(value=${:08X}, address=${:08X})", value, virtual_address as u32);
 
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u64(value, virtual_address as usize) {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
@@ -1163,9 +1206,10 @@ impl Cpu {
         Ok(self.bus.borrow_mut().write_u32(value, physical_address as usize)?)
     }
 
-    unsafe extern "win64" fn write_u32_phys_bridge(cpu: *mut Cpu, value: u32, physical_address: u64) -> u32 {
+    extern "sysv64" fn write_u32_phys_bridge(cpu: *mut Cpu, value: u32, physical_address: u64) -> u32 {
         //trace!(target: "JIT", "write_u32_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
-        let cpu = { &mut *cpu };
+
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u32_phys_direct(value, physical_address) {
             Ok(_) => 0,
 
@@ -1185,9 +1229,9 @@ impl Cpu {
         Ok(self.bus.borrow_mut().write_u64(value, physical_address as usize)?)
     }
 
-    unsafe extern "win64" fn write_u64_phys_bridge(cpu: *mut Cpu, value: u64, physical_address: u64) -> u32 {
+    extern "sysv64" fn write_u64_phys_bridge(cpu: *mut Cpu, value: u64, physical_address: u64) -> u32 {
         //trace!(target: "JIT", "write_u64_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
-        let cpu = { &mut *cpu };
+        let cpu = unsafe { &mut *cpu };
         match cpu.write_u64_phys_direct(value, physical_address) {
             Ok(_) => 0,
 
@@ -1209,7 +1253,7 @@ impl Cpu {
         Ok(())
     }
 
-    extern "win64" fn prefetch_bridge(cpu: *mut Self) {
+    extern "sysv64" fn prefetch_bridge(cpu: *mut Self) {
         let cpu = unsafe { &mut *cpu };
         cpu.next_instruction = None;
         cpu.next_instruction_pc = cpu.pc;
@@ -1284,8 +1328,8 @@ impl Cpu {
         self.exception(exception_code, false)
     }
 
-    unsafe extern "win64" fn address_exception_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn address_exception_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.address_exception(virtual_address, is_write) {
@@ -1350,8 +1394,8 @@ impl Cpu {
         self.exception(ExceptionCode_Bp, false)
     }
 
-    unsafe extern "win64" fn breakpoint_exception_bridge(cpu: *mut Cpu) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn breakpoint_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.breakpoint_exception() {
@@ -1364,7 +1408,7 @@ impl Cpu {
 
             Err(err) => {
                 // TODO handle rrors
-                todo!("reserved_instruction_exception_bridge error = {:?}", err);
+                todo!("breakpoint_exception_bridge error = {:?}", err);
             }
         }
     }
@@ -1374,8 +1418,8 @@ impl Cpu {
         self.exception(ExceptionCode_Ov, false)
     }
 
-    unsafe extern "win64" fn overflow_exception_bridge(cpu: *mut Cpu) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn overflow_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.overflow_exception() {
@@ -1398,8 +1442,8 @@ impl Cpu {
         self.exception(ExceptionCode_RI, false)
     }
 
-    unsafe extern "win64" fn reserved_instruction_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn reserved_instruction_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.reserved_instruction_exception(coprocessor_number) {
@@ -1422,8 +1466,8 @@ impl Cpu {
         self.exception(ExceptionCode_Sys, false)
     }
 
-    unsafe extern "win64" fn syscall_exception_bridge(cpu: *mut Cpu) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn syscall_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.syscall_exception() {
@@ -1436,7 +1480,7 @@ impl Cpu {
 
             Err(err) => {
                 // TODO handle rrors
-                todo!("reserved_instruction_exception_bridge error = {:?}", err);
+                todo!("syscall_exception_bridge error = {:?}", err);
             }
         }
     }
@@ -1446,8 +1490,8 @@ impl Cpu {
         self.exception(ExceptionCode_Tr, false)
     }
 
-    unsafe extern "win64" fn trap_exception_bridge(cpu: *mut Cpu) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn trap_exception_bridge(cpu: *mut Cpu) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.trap_exception() {
@@ -1476,8 +1520,8 @@ impl Cpu {
         self.exception(ExceptionCode_CpU, false)
     }
 
-    unsafe extern "win64" fn coprocessor_unusable_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn coprocessor_unusable_exception_bridge(cpu: *mut Cpu, coprocessor_number: u64) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.coprocessor_unusable_exception(coprocessor_number) {
@@ -1490,14 +1534,14 @@ impl Cpu {
 
             Err(err) => {
                 // TODO handle rrors
-                todo!("trap_exception_bridge error = {:?}", err);
+                todo!("coprocessor_unusable_exception_bridge error = {:?}", err);
             }
         }
     }
     
-    unsafe extern "win64" fn cop1_unimplemented_instruction_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1) -> i64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_unimplemented_instruction_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1) -> i64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cop1.unimplemented_instruction() {
@@ -1521,9 +1565,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_cfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_cfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.cfc(rd as usize) {
             Ok(v) => v,
@@ -1546,9 +1590,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_ctc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_ctc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.ctc(rt_value, rd as usize) {
             Ok(_) => 0,
@@ -1571,9 +1615,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_mfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_mfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u32 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.mfc(rd as usize) {
             Ok(v) => v,
@@ -1596,9 +1640,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_mtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u32, rd: u64) -> i64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_mtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u32, rd: u64) -> i64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.mtc(rt_value, rd as usize) {
             Ok(_) => 0,
@@ -1621,9 +1665,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_dmfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_dmfc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rd: u64) -> u64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.dmfc(rd as usize) {
             Ok(v) => v,
@@ -1646,9 +1690,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_dmtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_dmtc_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, rt_value: u64, rd: u64) -> i64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.dmtc(rt_value, rd as usize) {
             Ok(_) => 0,
@@ -1671,9 +1715,9 @@ impl Cpu {
         }
     }
 
-    pub unsafe extern "win64" fn cop1_special_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, inst: u32) -> i64 {
-        let cpu = { &mut *cpu };
-        let cop1 = { &mut *cop1 };
+    extern "sysv64" fn cop1_special_bridge(cpu: *mut Cpu, cop1: *mut cop1::Cop1, inst: u32) -> i64 {
+        let cpu = unsafe { &mut *cpu };
+        let cop1 = unsafe { &mut *cop1 };
 
         match cop1.special(inst) {
             Ok(_) => 0,
@@ -1968,8 +2012,8 @@ impl Cpu {
         Ok(None)
     }
 
-    unsafe extern "win64" fn translate_address_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> u64 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn translate_address_bridge(cpu: *mut Cpu, virtual_address: u64, is_write: bool) -> u64 {
+        let cpu = unsafe { &mut *cpu };
 
         // do the actual exception, setting self.pc, and Cop0 state, etc
         match cpu.translate_address(virtual_address, true, is_write) {
@@ -2045,9 +2089,6 @@ impl Cpu {
     // run the JIT core, return the number of cycles actually ran
     // self.next_instruction_pc contains the address of code we start executing from
     pub fn run_for(&mut self, max_cycles: u64) -> Result<u64, InstructionFault> {
-        // TODO: Decrement Random
-        // calculate change based on max_cycles?
-        //
         // TODO: Catch PC address and TLB exceptions
 
         trace!(target: "JIT-RUN", "run_for started at ${:08X}, max_cycles={}", self.next_instruction_pc as u32, max_cycles);
@@ -2163,8 +2204,8 @@ impl Cpu {
                 }
             }
 
-            // reuse update_cop0_random despite its unsafeness
-            let _ = unsafe { Cpu::update_cop0_random(self, 0, false) };
+            // update Cop0_Random
+            let _ = Cpu::update_cop0_random(self, 0, false);
         }
 
         Ok(self.num_steps - steps_start)
@@ -2347,9 +2388,7 @@ impl Cpu {
                             ;   mov rax, QWORD [rsp+s_jump_target]
                             ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rax
                         );
-                    } else if jit_conditional_branch.is_some() {
-                        let (branch_offset, is_branch_likely, is_unconditional) = jit_conditional_branch.unwrap();
-
+                    } else if let Some((branch_offset, is_branch_likely, is_unconditional)) = jit_conditional_branch {
                         if is_branch_likely { 
                             letsgo!(assembler
                                 // this no_branch label is incorrect; if the branch isn't taken, this
@@ -2389,20 +2428,21 @@ impl Cpu {
                         ;   mov rax, QWORD self.current_instruction_pc as u64 as _
                         ;   mov QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32], rax
                         // the current opcode is self.inst.v, place back in next_instruction via set_next_instruction
-                        // rdx is the second argument
-                        ;   mov edx, DWORD self.inst.v as u32 as _
+                        // v_arg1_32 is the second argument
+                        ;   mov v_arg1_32, DWORD self.inst.v as u32 as _
                         // the current delay slot state back into next_is_delay_slot
                         ;   mov BYTE [r_cpu + offset_of!(Cpu, next_is_delay_slot) as i32], BYTE self.is_delay_slot as u8 as _
                     );
 
                     // set next_instruction
-                    unsafe extern "win64" fn set_next_instruction(cpu: *mut Cpu, inst: u32) {
-                        (*cpu).next_instruction = Some(inst);
+                    extern "sysv64" fn set_next_instruction(cpu: *mut Cpu, inst: u32) {
+                        let cpu = unsafe { &mut *cpu };
+                        cpu.next_instruction = Some(inst);
                     }
 
                     letscall!(assembler, set_next_instruction);
 
-                    // exit the block
+                    // exit the block without prefetch
                     letsgo!(assembler
                         ;   jmp >epilog
                     );
@@ -2432,8 +2472,10 @@ impl Cpu {
                 // the code doesn't exist and needs to be compiled.  so we get out of this block now, but
                 // we can continue compiling
                 letsgo!(assembler
-                    ;   mov rdx, QWORD [rsp+s_jump_target]                   // copy jump target to self.pc
-                    ;   jmp >check_cycle_count_or_block_link                 // try jumping directly to the target block
+                    ;   mov v_arg1, QWORD [rsp+s_jump_target]                // copy jump target to self.pc
+                    ;   test v_arg1_32, BYTE 3u8 as _                        // check valid execution address
+                    ;   jz >check_cycle_count_or_block_link                  // and if valid, jump to it
+                    ;   jmp >instruction_fetch_exception_handler             // generate an exception with a bad jump
                 );
             } else if let Some((branch_offset, is_branch_likely, is_unconditional)) = jit_conditional_branch {
                 assert!(!self.jit_jump && self.jit_conditional_branch.is_none()); // no branches within delay slots
@@ -2473,7 +2515,7 @@ impl Cpu {
                         ;   cmp BYTE [rax], BYTE 0u8 as _
                         ;   je =>dynamic_label                           // otherwise, take the branch
                         ;break_out:
-                        ;   mov rdx, QWORD branch_target as u64 as _     // PC address we need to jump to
+                        ;   mov v_arg1, QWORD branch_target as u64 as _  // PC address we need to jump to
                         ;   jmp >restore_pc_and_break_out                // we must exit the block, so no block linking
                         // this label is used above, before the instruction is compiled, to skip delay slots
                         ;no_branch:
@@ -2488,12 +2530,12 @@ impl Cpu {
                         ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
                         ;   cmp BYTE [rax], BYTE 0u8 as _
                         ;   je >no_break_out
-                        // we have to exit the block, so set rdx (for restore_pc_and_breakout) based on r_cond
+                        // we have to exit the block, so set v_arg1 (for restore_pc_and_breakout) based on r_cond
                         ;break_out:
-                        ;   mov rdx, QWORD self.next_instruction_pc as _    // default to fall through
+                        ;   mov v_arg1, QWORD self.next_instruction_pc as _ // default to fall through
                         ;   dec r_cond                                      // check if r_cond is set
                         ;   jne >skip_set                                   // .
-                        ;   mov rdx, QWORD branch_target as u64 as _        // if set, use the branch target instead
+                        ;   mov v_arg1, QWORD branch_target as u64 as _     // if set, use the branch target instead
                         ;skip_set:
                         ;   jmp >restore_pc_and_break_out                   // exit the block
                         // since we don't have to exit the block, jump to the dynamic label
@@ -2505,13 +2547,15 @@ impl Cpu {
 
                 jit_fixups.push((branch_target, dynamic_label));
             }
-            // TODO this is temporary and isn't necessary beyond using the debugger
-            // else if !self.next_is_delay_slot {
+            // // TODO this is temporary and isn't necessary beyond using the debugger
+            // else if !self.next_is_delay_slot && !done_compiling {
             //     // test if we need to break out
             //     letsgo!(assembler
-            //         ;   mov rdx, QWORD self.next_instruction_pc as i64 as _
             //         ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // break out when run count hits 0 or less
-            //         ;   jle >restore_pc_and_break_out
+            //         ;   jg >no_break_out
+            //         ;   mov v_arg1, QWORD self.next_instruction_pc as i64 as _
+            //         ;   jmp >restore_pc_and_break_out
+            //         ;no_break_out:
             //     );
             // }
         }
@@ -2531,8 +2575,8 @@ impl Cpu {
         // And we can't exit a block in a delay slot instruction, so it should never be true here
         assert!(!self.next_is_delay_slot);
 
-        // block link expects the next instruction address rdx
-        letsset!(assembler, rdx, edx, self.next_instruction_pc);
+        // block link expects the next instruction address v_arg1
+        letsset!(assembler, v_arg1, v_arg1_32, self.next_instruction_pc);
 
         letsgo!(assembler
             ;check_cycle_count_or_block_link:
@@ -2544,10 +2588,13 @@ impl Cpu {
             // fall through to restore_pc_and_break_out
         );
 
-        // set next_instruction_pc (in rdx) into PC and call prefetch
+        // set next_instruction_pc (in v_arg1) into PC and call prefetch
         letsgo!(assembler
             ;restore_pc_and_break_out:
-            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], rdx  // store branch dest in self.pc
+            // first test if our destination address is misaligned
+            ;   test v_arg1_32, BYTE 3u8 as _
+            ;   jnz >instruction_fetch_exception_handler
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, pc) as i32], v_arg1  // store branch dest in self.pc
             // fall through to prefetch_bridge
         );
 
@@ -2561,6 +2608,22 @@ impl Cpu {
             ;   ret
         );
 
+        // instruction fetch exception (AdEL) occurs only on a branch, and we can't really use letsexcept!() because
+        // it was built for handling exceptions during jit execution. No big deal, a few small things are duplicated here
+        // v_arg1 contains the virtual_address of the invalid instruction fetch
+        letsgo!(assembler
+            ;instruction_fetch_exception_handler:
+            ;   mov BYTE [r_cpu + offset_of!(Cpu, is_delay_slot) as i32], BYTE 0 as _    // TODO might need to set this correctly for certain test cases
+            ;   mov QWORD [r_cpu + offset_of!(Cpu, current_instruction_pc) as i32], v_arg1 
+            ;   xor v_arg2_32, v_arg2_32 // is_write = false
+        );
+
+        letscall!(assembler, Cpu::address_exception_bridge); // will call prefetch_bridge() and set up next_instruction_pc
+
+        letsgo!(assembler
+            ;   jmp <epilog // get out of block
+        );
+
         // OK, well, I thought block linking the exception handler would be a nice performance improvement, but
         // I guess not.  Literally a huge overhead and I'm not sure why. It might have to do with the translate_address
         // call, but now I wonder if block linking is just going to be slower for all branches.
@@ -2568,7 +2631,7 @@ impl Cpu {
         // // Handle exceptions -- we may or may not need to break out (depending on cycle count), but we can actually
         // // just do a block link to the exception handler most of the time. However, when an exception has occurred
         // // (jit_other_exception is true and letscheck!() branched here), the next instruction is in self.next_instruction_pc
-        // // already (prefetch_bridge already called too). We need to get it back into rdx for try_block_link
+        // // already (prefetch_bridge already called too). We need to get it back into v_arg1 for try_block_link
         // letsgo!(assembler
         //     ;exit_for_exception:
         //     // check cycle count first
@@ -2577,8 +2640,8 @@ impl Cpu {
         //     ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
         //     ;   cmp BYTE [rax], BYTE 0u8 as _
         //     ;   jne <epilog
-        //     // ok, we need the PC in rdx for try_block_link
-        //     ;   mov rdx, QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32]
+        //     // ok, we need the PC in v_arg1 for try_block_link
+        //     ;   mov v_arg1, QWORD [r_cpu + offset_of!(Cpu, next_instruction_pc) as i32]
         //     ;   jmp >try_block_link
         // );
 
@@ -2590,15 +2653,28 @@ impl Cpu {
                 // update the dynamic label to use that offset
                 let _ = assembler.labels_mut().define_dynamic(dynamic_label, dynasmrt::AssemblyOffset(*target_instruction_offset)).unwrap();
             } else {
+                trace!(target: "JIT-BUILD", "** creating external block branch target handler for branch to ${:16X}", branch_target);
+
                 // see if the target has a compiled block at that location. we need to check at
                 // block-run time, since branch destinations can be invalidated or changed
                 let code_start_offset = assembler.offset();
 
-                trace!(target: "JIT-BUILD", "** creating external block branch target handler for branch to ${:16X}", branch_target);
-                letsset!(assembler, rdx, eax, branch_target);
-                letsgo!(assembler
-                    ;   jmp >try_block_link
-                );
+                // put the branch target in v_arg1
+                letsset!(assembler, v_arg1, v_arg1_32, branch_target);
+
+                // Branch instructions can't jump to misaligned addresses but build_inst_j and build_inst_jal make use of the relative
+                // branch code, so we still have to check for misaligned jumps here
+                if (branch_target & 3) != 0 {
+                    letsgo!(assembler
+                        ;   jmp <instruction_fetch_exception_handler
+                    );
+
+                    todo!("If anything ever hits this branch, let me know (branch to ${:08X})!", branch_target);
+                } else {
+                    letsgo!(assembler
+                        ;   jmp >try_block_link
+                    );
+                }
 
                 // set the dynamic_label to jump here
                 let _ = assembler.labels_mut().define_dynamic(dynamic_label, code_start_offset).unwrap();
@@ -2608,14 +2684,18 @@ impl Cpu {
             }
         }
 
-        // try linking to a block directly, destination pc in rdx
+        // try linking to a block directly, destination pc in v_arg1
+        // TODO: I'm not sure I'm actually getting any performance benefit out of block linking
+        // the call to lookup_compiled_instruction_address is possibly way too much overhead.
         letsgo!(assembler
             ;try_block_link:
-            // save a copy of rdx
-            ;   mov [rsp+s_tmp0], rdx
+            // ;   jmp <restore_pc_and_break_out
+            // save a copy of v_arg1
+            // ;   int3
+            ;   mov QWORD [rsp+s_tmp0], v_arg1
         );
 
-        // call lookup_compiled_instruction_address with pc in rdx
+        // call lookup_compiled_instruction_address with pc in v_arg1
         // if the return value is non-zero, we have a valid jump destination and we can just jump to it and be done
         letscall!(assembler, Cpu::lookup_compiled_instruction_address);
         letsgo!(assembler
@@ -2623,7 +2703,7 @@ impl Cpu {
             ;   jz >notfound
             ;   jmp rax // weee
             ;notfound: // otherwise, put branch destination into self.pc, prefetch, and exit the block
-            ;   mov rdx, QWORD [rsp+s_tmp0]
+            ;   mov v_arg1, QWORD [rsp+s_tmp0]
             ;   jmp <restore_pc_and_break_out
         );
 
@@ -2653,12 +2733,9 @@ impl Cpu {
 
     // return number of instructions executed
     fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> Result<u64, InstructionFault> {
-        let trampoline: extern "win64" fn(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> i32 = unsafe {
+        let trampoline: extern "sysv64" fn(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> i32 = unsafe {
             std::mem::transmute(self.jit_trampoline.as_ref().unwrap().ptr(self.jit_trampoline_entry_point))
         };
-
-        // place &self into rax
-        //let call_block: extern "win64" fn(u32, u64) -> i32 = unsafe { std::mem::transmute(compiled_block.code_buffer.ptr(compiled_block.entry_point)) };
 
         // find the nth instruction in the block, which is the offset divided by sizeof(u32)
         let instruction_index = (execution_address - compiled_block.start_address) >> 2;
@@ -2692,7 +2769,7 @@ impl Cpu {
     // since this function is used by assembly, a return value of 0 indicates "not present",
     // instead of using Option<>.
     #[inline(always)]
-    extern "win64" fn lookup_compiled_instruction_address(cpu: *mut Cpu, virtual_address: u64) -> u64 {
+    extern "sysv64" fn lookup_compiled_instruction_address(cpu: *mut Cpu, virtual_address: u64) -> u64 {
         let cpu = unsafe { &mut *cpu };
         let physical_address = cpu.translate_address(virtual_address, false, false).unwrap().unwrap().physical_address;
         match cpu.lookup_cached_block(physical_address) {
@@ -2701,6 +2778,7 @@ impl Cpu {
                 let instruction_index = (physical_address - borrow.start_address) >> 2;
                 borrow.jump_table[instruction_index as usize]
             },
+            // any result other than Cached() => block is not compiled
             _ => 0,
         }
     }
@@ -2967,7 +3045,7 @@ impl Cpu {
 
         // pass 0 as coprocessor_number
         letsgo!(assembler
-            ;   xor edx, edx
+            ;   xor v_arg1_32, v_arg1_32
         );
 
         letsexcept!(self, assembler, Cpu::reserved_instruction_exception_bridge);
@@ -2982,8 +3060,8 @@ impl Cpu {
     }
 
     fn build_inst_unknown(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {
-        unsafe extern "win64" fn unknown_bridge(cpu: *mut Cpu, inst: u32) {
-            let cpu = { &mut *cpu };
+        extern "sysv64" fn unknown_bridge(cpu: *mut Cpu, inst: u32) {
+            let cpu = unsafe { &mut *cpu };
             cpu.decode_instruction(inst);
             if cpu.inst.op == 0 {
                 error!(target: "CPU", "unimplemented instruction ${:03b}_{:03b} (special ${:03b}_{:03b})", cpu.inst.op >> 3, cpu.inst.op & 0x07, cpu.inst.special >> 3, cpu.inst.special & 0x07);
@@ -2996,7 +3074,7 @@ impl Cpu {
         }
 
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         letscall!(assembler, unknown_bridge);
@@ -3332,9 +3410,9 @@ impl Cpu {
             0 => panic!("TODO"),
             1 => &mut self.cop1,
             _ => {
-                // coprocessor_number in rdx
+                // coprocessor_number in v_arg1_32
                 letsgo!(assembler
-                    ;   mov edx, DWORD copno as _
+                    ;   mov v_arg1_32, DWORD copno as _
                 );
 
                 letsexcept!(self, assembler, Cpu::coprocessor_unusable_exception_bridge);
@@ -3349,9 +3427,9 @@ impl Cpu {
             ;   jnz >no_exception
         );
 
-        // coprocessor_number in rdx
+        // coprocessor_number in v_arg1_32
         letsgo!(assembler
-            ;   mov edx, DWORD copno as _
+            ;   mov v_arg1_32, DWORD copno as _
         );
 
         letsexcept!(self, assembler, Cpu::coprocessor_unusable_exception_bridge);
@@ -3369,7 +3447,7 @@ impl Cpu {
 
             // opcode in 3nd argument
             letsgo!(assembler
-                ;   mov r8d, DWORD self.inst.v as _
+                ;   mov v_arg2_32, DWORD self.inst.v as _
             );
 
             // check return value for errors
@@ -3389,7 +3467,7 @@ impl Cpu {
 
                     // register number rd in 3rd argument
                     letsgo!(assembler
-                        ;   mov r8d, DWORD self.inst.rd as _
+                        ;   mov v_arg2_32, DWORD self.inst.rd as _
                     );
 
                     // result in eax
@@ -3416,7 +3494,7 @@ impl Cpu {
 
                     // register number rd in third argument
                     letsgo!(assembler
-                        ;   mov r8d, DWORD self.inst.rd as _
+                        ;   mov v_arg2_32, DWORD self.inst.rd as _
                     );
 
                     // result in rax
@@ -3442,7 +3520,7 @@ impl Cpu {
 
                     // register number rd in third argument
                     letsgo!(assembler
-                        ;   mov r8d, DWORD self.inst.rd as _
+                        ;   mov v_arg2_32, DWORD self.inst.rd as _
                     );
 
                     // result in eax
@@ -3461,9 +3539,9 @@ impl Cpu {
                 },
 
                 0b00_011 | 0b00_111 => { // dcfc1, dctc1 are unimplemented
-                    // set cop pointer to rdx
+                    // set cop pointer to v_arg1
                     letsgo!(assembler
-                        ;   mov rdx, QWORD cop as *mut cop1::Cop1 as _
+                        ;   mov v_arg1, QWORD cop as *mut cop1::Cop1 as _
                     );
 
                     letsexcept!(self, assembler, Cpu::cop1_unimplemented_instruction_bridge);
@@ -3479,16 +3557,16 @@ impl Cpu {
                     // 32-bits of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor r8, r8
+                            ;   xor v_arg2_32, v_arg2_32
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov v_arg2_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
                     letsgo!(assembler
-                        ;   mov r9d, DWORD self.inst.rd as _
+                        ;   mov v_arg3_32, DWORD self.inst.rd as _
                     );
 
                     letscop!(assembler, cop, Cpu::cop1_mtc_bridge);
@@ -3507,16 +3585,16 @@ impl Cpu {
                     // contents of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor r8, r8
+                            ;   xor v_arg2_32, v_arg2_32
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov r8, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov v_arg2, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
                     letsgo!(assembler
-                        ;   mov r9d, DWORD self.inst.rd as _
+                        ;   mov v_arg3_32, DWORD self.inst.rd as _
                     );
 
                     letscop!(assembler, cop, Cpu::cop1_dmtc_bridge);
@@ -3535,17 +3613,17 @@ impl Cpu {
                     // contents of rt in third arg, register number rd in fourth
                     if self.inst.rt == 0 {
                         letsgo!(assembler
-                            ;   xor r8, r8
+                            ;   xor v_arg2_32, v_arg2_32
                         );
                     } else {
                         letsgo!(assembler
-                            ;   mov r8, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                            ;   mov v_arg2, QWORD [r_gpr + (self.inst.rt * 8) as i32]
                         );
                     }
 
                     // fgpr index in 4th argument
                     letsgo!(assembler
-                        ;   mov r9d, DWORD self.inst.rd as _
+                        ;   mov v_arg3_32, DWORD self.inst.rd as _
                     );
 
                     letscop!(assembler, cop, Cpu::cop1_ctc_bridge);
@@ -3779,8 +3857,8 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_cop0_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
-        let cpu = &mut *cpu;
+    extern "sysv64" fn inst_cop0_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
+        let cpu = unsafe { &mut *cpu };
 
         // we're running inside a compiled block so self.inst isn't being used, we
         // can safely destroy it and call into rust code
@@ -3824,9 +3902,9 @@ impl Cpu {
                         // We need to catch reading from Count since it may not be updated yet,
                         // but reading Cop0_Compare doesn't change any state
                         Cop0_Count => {
-                            // put the cycle count into edx
+                            // put the cycle count into v_arg1_32
                             letsgo!(assembler
-                                ;   mov edx, DWORD [rsp+s_cycle_count]
+                                ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]
                             );
 
                             // call update_count
@@ -3841,8 +3919,8 @@ impl Cpu {
                         Cop0_Random => {
                             // we need to update Cop0_Random
                             letsgo!(assembler
-                                ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
-                                ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                                ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                                ;   mov v_arg2_32, BYTE 1 as _                // compute_num_steps
                             );
 
                             // return value is current Random value
@@ -3891,8 +3969,8 @@ impl Cpu {
                         Cop0_Random => {
                             // we need to update Cop0_Random before reads
                             letsgo!(assembler
-                                ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
-                                ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                                ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                                ;   mov v_arg2_32, BYTE 1 as _                // compute_num_steps
                             );
 
                             letscall!(assembler, Cpu::update_cop0_random);
@@ -3927,17 +4005,17 @@ impl Cpu {
                     // And both cases may affect how many cycles can be run in the rest of this block
                     Cop0_Count => {
                         letsgo!(assembler
-                            // cycle count in rdx
-                            ;   mov edx, DWORD [rsp+s_cycle_count]
-                            // value in r8
-                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
+                            // cycle count in v_arg1_32
+                            ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]
+                            // value in v_arg2_32
+                            ;   mov v_arg2_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
                             // copy to cp0gpr_latch
-                            ;   movsxd v_tmp, r8d
+                            ;   movsxd v_tmp, v_arg2_32
                             ;   mov QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32], v_tmp
                         );
 
-                        unsafe extern "win64" fn write_count(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
-                            let cpu = &mut *cpu;
+                        extern "sysv64" fn write_count(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
+                            let cpu = unsafe { &mut *cpu };
                             // update Count
                             cpu.cp0gpr[Cop0_Count] = write_value as u64;
                             // update the count tracker, which requires the current step number
@@ -3973,22 +4051,20 @@ impl Cpu {
                     // Writing Compare to a new value needs cp0_compare_distance updated, which requires Cop0_Count recomputed
                     Cop0_Compare => {
                         letsgo!(assembler
-                            //;   int3
-                            //;   mov edx, DWORD 3 as _
-                            // cycle count in rdx
-                            ;   mov edx, DWORD [rsp+s_cycle_count]
-                            // value in r8
-                            ;   mov r8d, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
+                            // cycle count in v_arg1_32
+                            ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]
+                            // value in v_arg2_32
+                            ;   mov v_arg2_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]    // zero high 32-bits of r8
                             // copy to cp0gpr_latch
-                            ;   movsxd v_tmp, r8d
+                            ;   movsxd v_tmp, v_arg2_32
                             ;   mov QWORD [r_cpu + offset_of!(Cpu, cp0gpr_latch) as i32], v_tmp
                         );
 
-                        unsafe extern "win64" fn write_compare(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
+                        extern "sysv64" fn write_compare(cpu: *mut Cpu, mut cycles_remaining: i32, write_value: u32) -> i32 {
                             // recompute Count
                             let count = Cpu::update_cop0_count(cpu, cycles_remaining) as u32;
                             // update Compare
-                            let cpu = &mut *cpu;
+                            let cpu = unsafe { &mut *cpu };
                             cpu.cp0gpr[Cop0_Compare] = write_value as u64;
                             // update the compare distance
                             cpu.cp0_compare_distance = (cpu.cp0gpr[Cop0_Compare] as u32).wrapping_sub(count);
@@ -4023,10 +4099,10 @@ impl Cpu {
                     Cop0_Random | Cop0_Wired => {
                         // we need to update Cop0_Random when these registers change, since the
                         // starting value will change and so will the cp0_random_tracker value
-                        // 'true' in dl, compute_num_steps
+                        // 'true' in v_arg2_8l, compute_num_steps
                         letsgo!(assembler
-                            ;   mov edx, DWORD [rsp+s_cycle_count]  // cycles_remaining
-                            ;   mov r8d, BYTE 1 as _                // compute_num_steps
+                            ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                            ;   mov v_arg2_32, BYTE 1 as _                // compute_num_steps
                         );
 
                         letscall!(assembler, Cpu::update_cop0_random);
@@ -4035,7 +4111,7 @@ impl Cpu {
 
                         // opcode in arg 2
                         letsgo!(assembler
-                            ;   mov edx, DWORD self.inst.v as _
+                            ;   mov v_arg1_32, DWORD self.inst.v as _
                         );
 
                         // do the write
@@ -4049,7 +4125,7 @@ impl Cpu {
 
                         // opcode in arg 2
                         letsgo!(assembler
-                            ;   mov edx, DWORD self.inst.v as _
+                            ;   mov v_arg1_32, DWORD self.inst.v as _
                         );
 
                         // call self.inst_cop0_bridge(Cpu, inst)
@@ -4078,7 +4154,7 @@ impl Cpu {
 
                         // opcode in second argument
                         letsgo!(assembler
-                            ;   mov edx, DWORD self.inst.v as _
+                            ;   mov v_arg1_32, DWORD self.inst.v as _
                         );
 
                         // call self.inst_cop0_bridge(Cpu, inst)
@@ -4096,7 +4172,7 @@ impl Cpu {
                         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
                         // TODO this could be done in assembly, but tlbr isn't a commonly executed instruction
-                        unsafe extern "win64" fn tlbr_bridge(cpu: *mut Cpu) {
+                        extern "sysv64" fn tlbr_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
 
                             let tlb = &cpu.tlb[(cpu.cp0gpr[Cop0_Index] & 0x1F) as usize];
@@ -4117,7 +4193,7 @@ impl Cpu {
                     0b000_010 => { // tlbwi
                         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwi", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
-                        extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
+                        extern "sysv64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
                             trace!(target: "CPU", "COP0: tlbwi, index={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                         cpu.cp0gpr[Cop0_Index], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
@@ -4132,7 +4208,7 @@ impl Cpu {
                     0b000_110 => { // tlbwr
                         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
 
-                        extern "win64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
+                        extern "sysv64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
                             info!(target: "CPU", "COP0: tlbwr, random={}, EntryHi=${:016X}, EntryLo0=${:016X}, EntryLo1=${:016X}, PageMask=${:016X}",
                                         cpu.cp0gpr[Cop0_Random], cpu.cp0gpr[Cop0_EntryHi], cpu.cp0gpr[Cop0_EntryLo0], cpu.cp0gpr[Cop0_EntryLo1], cpu.cp0gpr[Cop0_PageMask]);
@@ -4169,15 +4245,15 @@ impl Cpu {
                         //}
 
                         // TODO this is just a wrapper so we can println!() the instruction
-                        unsafe extern "win64" fn tlbp_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
+                        extern "sysv64" fn tlbp_bridge(cpu: *mut Cpu, inst: u32) -> i64 {
                             //let cpu = unsafe { &mut *cpu };
-                            trace!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}", (*cpu).cp0gpr[Cop0_EntryHi]);
+                            trace!(target: "CPU", "COP0: tlbp, EntryHi=${:016X}", unsafe { (*cpu).cp0gpr[Cop0_EntryHi] });
                             Cpu::inst_cop0_bridge(cpu, inst)
                         }
 
                         // opcode in second argument
                         letsgo!(assembler
-                            ;   mov edx, DWORD self.inst.v as _
+                            ;   mov v_arg1_32, DWORD self.inst.v as _
                         );
 
                         letscall!(assembler, tlbp_bridge);
@@ -4230,8 +4306,8 @@ impl Cpu {
     // So to figure that out first, we need the run limit and how many cycles have executed so far.
     // then we can update Count and cp0_count_tracker
     #[inline(always)]
-    unsafe extern "win64" fn update_cop0_count(cpu: *mut Cpu, cycles_remaining: i32) -> u64 {
-        let cpu = &mut *cpu;
+    extern "sysv64" fn update_cop0_count(cpu: *mut Cpu, cycles_remaining: i32) -> u64 {
+        let cpu = unsafe { &mut *cpu };
         // compute the current step number
         let cur_steps = cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64;
         // compute the increment to Count and add it
@@ -4249,8 +4325,8 @@ impl Cpu {
 
     // Similar to Cop0_Count, Random has not been updated within the currently executing block
     #[inline(always)]
-    unsafe extern "win64" fn update_cop0_random(cpu: *mut Cpu, cycles_remaining: i32, compute_num_steps: bool) -> u64 {
-        let cpu = &mut *cpu;
+    extern "sysv64" fn update_cop0_random(cpu: *mut Cpu, cycles_remaining: i32, compute_num_steps: bool) -> u64 {
+        let cpu = unsafe { &mut *cpu };
         // compute the current step number
         let cur_steps = if !compute_num_steps { cpu.num_steps } else { cpu.num_steps + (cpu.jit_run_limit as i32 - cycles_remaining) as u64 };
         // Cop0_Random decrements at 1 per instruction, but wraps between 31 and Wired
@@ -4362,8 +4438,8 @@ impl Cpu {
         }
     }
 
-    unsafe extern "win64" fn inst_cop2_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn inst_cop2_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
+        let cpu = unsafe { &mut *cpu };
         // we're running inside a compiled block so self.inst isn't being used, we
         // can safely destroy it and call into rust code
         cpu.decode_instruction(inst);
@@ -4391,7 +4467,7 @@ impl Cpu {
 
         // opcode in arg 2
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         // call self.inst_cop2_bridge(Cpu, inst)
@@ -4676,10 +4752,10 @@ impl Cpu {
         // setup for exceptions
         letssetupexcept!(self, assembler, false);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u8_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // rdx contains address
+        // call read_u8()
         letscall!(assembler, Cpu::read_u8_bridge);
 
         // check for exceptions
@@ -4711,10 +4787,10 @@ impl Cpu {
         // setup for exceptions
         letssetupexcept!(self, assembler, false);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u8_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u8_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // rdx contains address
+        // call read_u8()
         letscall!(assembler, Cpu::read_u8_bridge);
 
         // check for exceptions
@@ -4746,19 +4822,18 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ld r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            ;   mov v_tmp, rdx             // check if address is valid (low three bits 000)
-            ;   and v_tmp, BYTE 0x07       // .
-            ;   jz >valid                  // .
+            ;   test v_arg1_8l, BYTE 0x07 as _   // check if address is valid (low three bits 000)            
+            ;   jz >valid                        // .
             ;   mov rax, QWORD 0x0000_1234_0000_4444u64 as _ // search code
-            ;   int3           // call self.address_exception
+            ;   int3                       // TODO call self.address_exception
             ;valid:
         );
 
-        // rdx contains address
+        // v_arg1 contains address
         letscall!(assembler, Cpu::read_u64_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -4800,15 +4875,15 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x07u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
         // call read_u32()
@@ -4824,14 +4899,14 @@ impl Cpu {
             ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
             ;   je >done
             // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
-            ;   mov cl, BYTE [rsp+s_tmp0]            // shift amount
-            ;   shl rax, cl                          // shift mem into position
-            ;   mov cl, BYTE 64 as _                 // compute 64-shift into cl
-            ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 32-shift
-            ;   shr rdx, cl                          // .
+            ;   mov cl, BYTE [rsp+s_tmp0]             // shift amount
+            ;   shl rax, cl                           // shift mem into position
+            ;   mov cl, BYTE 64 as _                  // compute 64-shift into cl
+            ;   sub cl, BYTE [rsp+s_tmp0]             // .
+            ;   mov v_arg1, DWORD 0xFFFF_FFFFu32 as _ // constant mask (sign extended) shifted by 32-shift
+            ;   shr v_arg1, cl                        // .
             ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // lower bits of rt
-            ;   and v_tmp, rdx                                        // .
+            ;   and v_tmp, v_arg1                                     // .
             ;   or rax, v_tmp                        // result
             ;done:
             ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
@@ -4867,15 +4942,15 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x07u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
         // call read_u64()
@@ -4891,15 +4966,15 @@ impl Cpu {
             ;   cmp BYTE [rsp+s_tmp0], BYTE 56u8 as _
             ;   je >done
             // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
-            ;   mov cl, BYTE 56 as _                 // compute 56-shift
-            ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   shr rax, cl                          // shift mem into position
-            ;   mov cl, BYTE 8 as _                  // compute 8+shift
-            ;   add cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 8+shift
-            ;   shl rdx, cl                          // .
+            ;   mov cl, BYTE 56 as _                  // compute 56-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]             // .
+            ;   shr rax, cl                           // shift mem into position
+            ;   mov cl, BYTE 8 as _                   // compute 8+shift
+            ;   add cl, BYTE [rsp+s_tmp0]             // .
+            ;   mov v_arg1, DWORD 0xFFFF_FFFFu32 as _ // constant mask (sign extended) shifted by 8+shift
+            ;   shl v_arg1, cl                        // .
             ;   mov v_tmp, QWORD [r_gpr + (self.inst.rt * 8) as i32]  // lower bits of rt
-            ;   and v_tmp, rdx                                        // .
+            ;   and v_tmp, v_arg1                                     // .
             ;   or rax, v_tmp                        // result
             ;done:
             ;   mov QWORD [r_gpr + (self.inst.rt * 8) as i32], rax
@@ -4924,18 +4999,18 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u16_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u16_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            ;   test rdx, BYTE 0x01
+            ;   test v_arg1_8l, BYTE 0x01  // check for valid address
             ;   jz >valid
             ;   mov rax, QWORD 0xCCEC_BBEB_AAEA_0010u64 as _ // search code
             ;   int3 // call address_exception
             ;valid:
         );
 
-        // rdx contains address
+        // v_arg1 contains address
         letscall!(assembler, Cpu::read_u16_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -4966,18 +5041,18 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lhu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u16_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u16_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            ;   test rdx, BYTE 0x01
+            ;   test v_arg1_8l, BYTE 0x01 // check for valid address
             ;   jz >valid
             ;   mov rax, QWORD 0xAAEA_0010_DDED_BBCBu64 as _ // search code
             ;   int3 // call address_exception
             ;valid:
         );
 
-        // rdx contains address
+        // v_arg1 contains address
         letscall!(assembler, Cpu::read_u16_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -5023,13 +5098,13 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: ll r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            // setup arguments to address_exception_bridge _and_ translate_address (r8d = false)
-            ;   xor r8d, r8d               // .
-            ;   test rdx, BYTE 0x03        // check if address is valid (low two bits 00)
+            // setup arguments to address_exception_bridge _and_ translate_address (v_arg2_32 = false)
+            ;   xor v_arg2_32, v_arg2_32   // .
+            ;   test v_arg1_8l, BYTE 0x03  // check if address is valid (low two bits 00)
             ;   jz >valid                  // .
         );
 
@@ -5040,7 +5115,7 @@ impl Cpu {
             ;   valid:
         );
 
-        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=false
+        // setup call to translate_address() -- v_arg1 still contains virtual address and r8 is is_write=false
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
@@ -5048,8 +5123,8 @@ impl Cpu {
 
         // rax now has the physical_address, store in Cop0_LLAddr
         letsgo!(assembler
-            // put the physical address into rdx for read_u32_phys_bridge
-            ;   mov rdx, rax
+            // put the physical address into v_arg1 for read_u32_phys_bridge
+            ;   mov v_arg1, rax
             // shift physical_address right by 4 for Cop0_LLAddr
             ;   shr rax, BYTE 4 as _    
             ;   mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax
@@ -5057,7 +5132,7 @@ impl Cpu {
             ;   mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 1i8 as _
         );
 
-        // physical_address in rdx
+        // physical_address in v_arg1
         letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -5102,13 +5177,13 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lld r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            // setup arguments to address_exception_bridge _and_ translate_address (r8d = false)
-            ;   xor r8d, r8d               // .
-            ;   test rdx, BYTE 0x07        // check if address is valid (low three bits 000)
+            // setup arguments to address_exception_bridge _and_ translate_address (v_arg2_32 = false)
+            ;   xor v_arg2_32, v_arg2_32   // .
+            ;   test v_arg1_8l, BYTE 0x07  // check if address is valid (low three bits 000)
             ;   jz >valid                  // .
         );
 
@@ -5119,7 +5194,7 @@ impl Cpu {
             ;   valid:
         );
 
-        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=false
+        // setup call to translate_address() -- v_arg1 still contains virtual address and r8 is is_write=false
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
@@ -5127,8 +5202,8 @@ impl Cpu {
 
         // rax now has the physical_address, store in Cop0_LLAddr
         letsgo!(assembler
-            // put the physical address into rdx for read_u32_phys_bridge
-            ;   mov rdx, rax
+            // put the physical address into v_arg1 for read_u32_phys_bridge
+            ;   mov v_arg1, rax
             // shift physical_address right by 4 for Cop0_LLAddr
             ;   shr rax, BYTE 4 as _    
             ;   mov QWORD [r_cp0gpr + (Cop0_LLAddr * 8) as i32], rax
@@ -5136,7 +5211,7 @@ impl Cpu {
             ;   mov BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 1i8 as _
         );
 
-        // physical_address in rdx
+        // physical_address in v_arg1
         letscall!(assembler, Cpu::read_u64_phys_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -5189,22 +5264,22 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            ;   test rdx, BYTE 0x03        // check if address is valid (low two bits must be 0)
+            ;   test v_arg1_8l, BYTE 0x03  // check if address is valid (low two bits must be 0)
             ;   jz >valid                  // .
             // setup call to address_exception_bridge
-            ;   xor r8d, r8d               // is_write argument is false
+            ;   xor v_arg2_32, v_arg2_32   // is_write argument is false
         );
 
-        // an address_exception occurred. rcx will get 'self', rdx already has the virtual address
+        // an address_exception occurred. v_arg0 will get 'self', v_arg1 already has the virtual address
         // that caused the exception. we just set r8 to 1 for writes, 0 for loads (above).
         // this will call prefetch(), and jump to the epilog of the block
         letsexcept!(self, assembler, Cpu::address_exception_bridge);
 
-        // rdx contains address
+        // v_arg1 contains address
         letsgo!(assembler
             ;valid:
         );
@@ -5244,19 +5319,18 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: lwu r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            ;   mov v_tmp, rdx             // check if address is valid (low two bits 00)
-            ;   and v_tmp, BYTE 0x03       // .
-            ;   jz >valid                  // .
+            ;   test v_arg1, BYTE 0x03 as _ // check if address is valid (low two bits 00)
+            ;   jz >valid                   // .
             ;   int3           // call self.address_exception
             ;   int3           // end current run_block
             ;valid:
         );
 
-        // rdx contains address, result in eax
+        //  v_arg1 contains address, result in eax
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // if destination register is 0, we still do the read (above) but don't store the result
@@ -5301,18 +5375,18 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x03u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u32()
+        // call read_u32_bridge()
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check for exceptions
@@ -5329,10 +5403,10 @@ impl Cpu {
             ;   shl eax, cl                          // shift mem into position
             ;   mov cl, BYTE 32 as _                 // compute 32-shift into cl
             ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov edx, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
-            ;   shr edx, cl                          // .
-            ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]  // lower bits of rt
-            ;   and v_tmp_32, edx                                        // .
+            ;   mov v_arg2_32, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
+            ;   shr v_arg2_32, cl                          // .
+            ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]        // lower bits of rt
+            ;   and v_tmp_32, v_arg2_32                                        // .
             ;   or eax, v_tmp_32                     // result
             ;done:
             // sign-extend eax into rt
@@ -5370,18 +5444,18 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x03u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
-        // call read_u32()
+        // call read_u32_bridge()
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check for exceptions
@@ -5399,10 +5473,10 @@ impl Cpu {
             ;   shr eax, cl                          // shift mem into position
             ;   mov cl, BYTE 8 as _                  // compute 8+shift into cl
             ;   add cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov edx, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 8+shift
-            ;   shl edx, cl                          // .
+            ;   mov v_arg2_32, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 8+shift
+            ;   shl v_arg2_32, cl                          // .
             ;   mov v_tmp_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]  // upper bits of rt
-            ;   and v_tmp_32, edx                                        // .
+            ;   and v_tmp_32, v_arg2_32                                  // .
             ;   or eax, v_tmp_32                     // result
             ;done:
             // sign-extend eax into rt
@@ -5430,8 +5504,8 @@ impl Cpu {
         self.cop1.ldc(self.inst.rt, value)
     }
 
-    unsafe extern "win64" fn inst_ldc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn inst_ldc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
+        let cpu = unsafe { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_ldc1() {
             Ok(_) => 0,
@@ -5456,9 +5530,9 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // opcode in rdx (2nd arg)
+        // opcode in v_arg1_32 (2nd arg)
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         // do the call
@@ -5488,8 +5562,8 @@ impl Cpu {
         self.cop1.lwc(self.inst.rt, value)
     }
 
-    unsafe extern "win64" fn inst_lwc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn inst_lwc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
+        let cpu = unsafe { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_lwc1() {
             Ok(_) => 0,
@@ -5514,9 +5588,9 @@ impl Cpu {
         // setup values needed for exceptions in LWC1
         letssetupexcept!(self, assembler, false);
 
-        // opcode in rdx (2nd arg)
+        // opcode in v_arg1_32 (2nd arg)
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_lwc1_bridge);
@@ -5576,21 +5650,21 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sb r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // value to write in 2nd argument (edx)
+        // value to write in 2nd argument (v_arg1_32)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor rdx, rdx
+                ;   xor v_arg1_32, v_arg1_32
             );
         } else {
             letsgo!(assembler
-                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+                ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
             );
         }
 
-        // place virtual address in the 3rd argument (r8)
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // place virtual address in the 3rd argument (v_arg2)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
 
-        // edx has 32-bit value to write, r8 contains address
+        // v_arg1_32 has 32-bit value to write, v_arg2 contains address
         letscall!(assembler, Cpu::write_u8_bridge);
 
         // TODO check return value for error/exception
@@ -5608,21 +5682,21 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // value to write in 2nd argument (edx)
+        // value to write in 2nd argument (v_arg1_32)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor edx, edx  // zeroes rdx
+                ;   xor v_arg1_32, v_arg1_32  // zeroes v_arg1
             );
         } else {
             letsgo!(assembler
-                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+                ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
             );
         }
 
-        // place virtual address in the 3rd argument (r8)
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // place virtual address in the 3rd argument (v_arg2)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
 
-        // edx has 32-bit value to write, r8 contains address
+        // v_arg1_32 has 32-bit value to write, v_arg2 contains address
         letscall!(assembler, Cpu::write_u16_bridge);
 
         // TODO check return value for error/exception
@@ -5658,14 +5732,14 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sc r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            // setup arguments to address_exception_bridge _and_ translate_address (r8d = true)
-            ;   mov r8d, DWORD 1 as _      // .
-            ;   test rdx, BYTE 0x03        // check if address is valid (low two bits 00)
-            ;   jz >valid                  // .
+            // setup arguments to address_exception_bridge _and_ translate_address (v_arg2_32 = true)
+            ;   mov v_arg2_32, DWORD 1 as _      // .
+            ;   test v_arg1_8l, BYTE 0x03        // check if address is valid (low two bits 00)
+            ;   jz >valid                        // .
         );
 
         // generate the exception
@@ -5675,7 +5749,7 @@ impl Cpu {
             ;   valid:
         );
 
-        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=true
+        // setup call to translate_address() -- v_arg1 still contains virtual address and r8 is is_write=true
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
@@ -5683,25 +5757,25 @@ impl Cpu {
 
         // do the write if the physical_address matches Cop0_LLAddr and llbit is set
         letsgo!(assembler
-            // preserve the physical_address in r8 for the call write_u32_phys_bridge
-            ;   mov r8, rax
+            // preserve the physical_address in v_arg2 for the call write_u32_phys_bridge
+            ;   mov v_arg2, rax
             // check if llbit is set
             ;   test BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 0xFFu8 as _
             ;   jz >not_valid
         );
 
-        // the value to be written to memory is in rt and needs to be in edx
+        // the value to be written to memory is in rt and needs to be in v_arg1_32
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor edx, edx
+                ;   xor v_arg1_32, v_arg1_32
             );
         } else {
             letsgo!(assembler
-                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
             );
         }
 
-        // make the write call -- edx contains the value to write, r8 the physical_address 
+        // make the write call -- v_arg1_32 contains the value to write, v_arg2 the physical_address 
         letscall!(assembler, Cpu::write_u32_phys_bridge);
 
         // set rt to 0 or 1 based on whether the store was successful or not
@@ -5744,14 +5818,14 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: scd r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // rdx is used for the 2nd parameter to Cpu::read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is used for the 2nd parameter to Cpu::read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         letsgo!(assembler
-            // setup arguments to address_exception_bridge _and_ translate_address (r8d = true)
-            ;   mov r8d, DWORD 1 as _      // .
-            ;   test rdx, BYTE 0x07        // check if address is valid (low three bits 000)
-            ;   jz >valid                  // .
+            // setup arguments to address_exception_bridge _and_ translate_address (v_arg2_32 = true)
+            ;   mov v_arg2_32, DWORD 1 as _ // .
+            ;   test v_arg1_8l, BYTE 0x07   // check if address is valid (low three bits 000)
+            ;   jz >valid                   // .
         );
 
         // generate the exception
@@ -5761,7 +5835,7 @@ impl Cpu {
             ;   valid:
         );
 
-        // setup call to translate_address() -- rdx still contains virtual address and r8 is is_write=true
+        // setup call to translate_address() -- v_arg1 still contains virtual address and r8 is is_write=true
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
@@ -5769,25 +5843,25 @@ impl Cpu {
 
         // do the write if the physical_address matches Cop0_LLAddr and llbit is set
         letsgo!(assembler
-            // preserve the physical_address in r8 for the call write_u64_phys_bridge
-            ;   mov r8, rax
+            // preserve the physical_address in v_arg2 for the call write_u64_phys_bridge
+            ;   mov v_arg2, rax
             // check if llbit is set
             ;   test BYTE [r_cpu + offset_of!(Cpu, llbit) as i32], BYTE 0xFFu8 as _
             ;   jz >not_valid
         );
 
-        // the value to be written to memory is in rt and needs to be in rdx
+        // the value to be written to memory is in rt and needs to be in v_arg1
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor edx, edx
+                ;   xor v_arg1_32, v_arg1_32
             );
         } else {
             letsgo!(assembler
-                ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+                ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32]
             );
         }
 
-        // make the write call -- edx contains the value to write, r8 the physical_address 
+        // make the write call -- v_arg2_32 contains the value to write, r8 the physical_address 
         letscall!(assembler, Cpu::write_u64_phys_bridge);
 
         // set rt to 0 or 1 based on whether the store was successful or not
@@ -5816,30 +5890,29 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sd r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // value to write in 2nd argument (rdx)
+        // value to write in 2nd argument (v_arg1)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor rdx, rdx
+                ;   xor v_arg1_32, v_arg1_32
             );
         } else {
             letsgo!(assembler
-                ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+                ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
             );
         }
 
-        // place virtual address in the 3rd argument (r8)
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // place virtual address in the 3rd argument (v_arg2)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
 
         letsgo!(assembler
-            ;   mov v_tmp, r8              // check if address is valid (low three bits 000)
-            ;   and v_tmp, BYTE 0x07       // .
-            ;   jz >valid                  // .
+            ;   test v_arg2_8l, BYTE 0x07 as _    // check if address is valid (low three bits 000)            
+            ;   jz >valid                         // .
             ;   mov rax, QWORD 0xABCD_ABCD_ABCD_ABCDu64 as _ 
             ;   int3           // call self.address_exception
             ;valid:
         );
 
-        // rdx has 64-bit value to write, r8 contains address
+        // v_arg1 has 64-bit value to write, v_arg2 contains address
         letscall!(assembler, Cpu::write_u64_bridge);
 
         // TODO check return value for error/exception
@@ -5866,8 +5939,8 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_sdc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn inst_sdc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
+        let cpu = unsafe { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_sdc1() {
             Ok(_) => 0,
@@ -5892,9 +5965,9 @@ impl Cpu {
         // setup values needed for exceptions in LWC1
         letssetupexcept!(self, assembler, false);
 
-        // opcode in rdx (2nd arg)
+        // opcode in v_arg1_32 (2nd arg)
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_sdc1_bridge);
@@ -5924,8 +5997,8 @@ impl Cpu {
         Ok(())
     }
 
-    unsafe extern "win64" fn inst_swc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
-        let cpu = { &mut *cpu };
+    extern "sysv64" fn inst_swc1_bridge(cpu: *mut Cpu, inst: u32) -> u32 {
+        let cpu = unsafe { &mut *cpu };
         cpu.decode_instruction(inst);
         match cpu.inst_swc1() {
             Ok(_) => 0,
@@ -5947,12 +6020,12 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: swc1 fpr{}, ${:04X}(r{}) (STUB)", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // setup values needed for exceptions in LWC1
+        // setup values needed for exceptions in SWC1
         letssetupexcept!(self, assembler, false);
         
-        // opcode in rdx (2nd arg)
+        // opcode in v_arg1_32 (2nd arg)
         letsgo!(assembler
-            ;   mov edx, DWORD self.inst.v as _
+            ;   mov v_arg1_32, DWORD self.inst.v as _
         );
 
         letscall!(assembler, Cpu::inst_swc1_bridge);
@@ -5999,13 +6072,13 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         // setup parameters for translate_address_bridge
         letsgo!(assembler
             // is_write = true
-            ;   mov r8d, BYTE 1 as _
+            ;   mov v_arg2_32, BYTE 1 as _
         );
 
         // translate the original address, which might cause a TLB miss
@@ -6014,51 +6087,51 @@ impl Cpu {
         // check for exceptions
         letscheck!(assembler);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            // move physical_address into rdx
-            ;   mov rdx, rax
+            // move physical_address into v_arg1
+            ;   mov v_arg1, rax
             // compute 32-shift
-            ;   mov BYTE [rsp+s_tmp0], dl
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x07 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            // place mask out low two bits of address
-            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
+            // mask out low two bits of address
+            ;   and v_arg1, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
         // call read_u64_phys()
         letscall!(assembler, Cpu::read_u64_phys_bridge);
 
         // rax contains the result
-        // we place the computation in rdx, as it's the second parameter to write_u64_bridge
+        // we place the computation in v_arg1, as it's the second parameter to write_u64_bridge
         // TODO reduce # of instructions if possible
         letsgo!(assembler
             // no shift - use rt as is
             ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
             ;   jne >combine
-            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32]
             ;   jmp >done
             // otherwise, take the lower bits of rt and or with the low bits of rax shifted into position
             ;combine:
-            ;   mov cl, BYTE 64 as _                 // compute 64-shift
-            ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
-            ;   shl rdx, cl                          // .
-            ;   and rax, rdx                         // mask memory
-            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
-            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
-            ;   shr rdx, cl                                        // .
-            ;   or rdx, rax                          // result
+            ;   mov cl, BYTE 64 as _                    // compute 64-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]               // .
+            ;   mov v_arg1, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
+            ;   shl v_arg1, cl                          // .
+            ;   and rax, v_arg1                         // mask memory
+            ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                             // .
+            ;   shr v_arg1, cl                                        // .
+            ;   or v_arg1, rax                          // result
             ;done:
         );
 
-        // r8 is the 3nd parameter to write_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // v_arg2 is the 3nd parameter to write_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
         letsgo!(assembler
-            ;   and r8, DWORD !0x07u32 as _
+            ;   and v_arg2, DWORD !0x07u32 as _
         );
 
-        // write rdx to r8
+        // write v_arg1 to v_arg2
         letscall!(assembler, Cpu::write_u64_bridge);
 
         // check for exception
@@ -6102,13 +6175,13 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to read_u64_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to read_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         // setup parameters for translate_address_bridge
         letsgo!(assembler
             // is_write = true
-            ;   mov r8d, BYTE 1 as _
+            ;   mov v_arg2_32, BYTE 1 as _
         );
 
         // translate the original address, which might cause a TLB miss
@@ -6117,53 +6190,53 @@ impl Cpu {
         // check for exceptions
         letscheck!(assembler);
 
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
-            // move physical_address into rdx
-            ;   mov rdx, rax
+            // move physical_address into v_arg1
+            ;   mov v_arg1, rax
             // compute 32-shift
-            ;   mov cl, dl
+            ;   mov cl, v_arg1_8l
             ;   and cl, BYTE 0x07 as _
             ;   shl cl, BYTE 3 as _
             ;   mov BYTE [rsp+s_tmp0], BYTE 56 as _
             ;   sub BYTE [rsp+s_tmp0], cl
             // place mask out low two bits of address
-            ;   and rdx, DWORD !0x07u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x07u32 as _    // sign-exnteded imm32
         );
 
         // call read_u64_phys()
         letscall!(assembler, Cpu::read_u64_phys_bridge);
 
         // rax contains the result
-        // we place the computation in rdx, as it's the second parameter to write_u64_bridge
+        // we place the computation in v_arg1, as it's the second parameter to write_u64_bridge
         // TODO reduce # of instructions if possible
         letsgo!(assembler
             // no shift - use eax as is
             ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
             ;   jne >combine
-            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32]
             ;   jmp >done
             // otherwise, take the lower bits of rt and or with the low bits of eax shifted into position
             ;combine:
-            ;   mov cl, BYTE 64 as _                 // compute 64-shift
-            ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov rdx, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
-            ;   shr rdx, cl                          // .
-            ;   and rax, rdx                         // mask memory
-            ;   mov rdx, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
-            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
-            ;   shl rdx, cl                                        // .
-            ;   or rdx, rax                          // result
+            ;   mov cl, BYTE 64 as _                    // compute 64-shift
+            ;   sub cl, BYTE [rsp+s_tmp0]               // .
+            ;   mov v_arg1, DWORD 0xFFFF_FFFFu32 as _   // constant mask (sign extended) shifted by 64-shift
+            ;   shr v_arg1, cl                             // .
+            ;   and rax, v_arg1                            // mask memory
+            ;   mov v_arg1, QWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                             // .
+            ;   shl v_arg1, cl                                        // .
+            ;   or v_arg1, rax                          // result
             ;done:
         );
 
-        // r8 is the 3nd parameter to write_u32_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // v_arg2 is the 3nd parameter to write_u64_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
         letsgo!(assembler
-            ;   and r8, DWORD !0x07u32 as _
+            ;   and v_arg2, DWORD !0x07u32 as _
         );
 
-        // write rdx to r8
+        // write v_arg1 to v_arg2
         letscall!(assembler, Cpu::write_u64_bridge);
 
         // check for exception
@@ -6297,35 +6370,34 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sw r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
-        // value to write in 2nd argument (edx)
+        // value to write in 2nd argument (v_arg1_32)
         if self.inst.rt == 0 {
             letsgo!(assembler
-                ;   xor edx, edx
+                ;   xor v_arg1_32, v_arg1_32
             );
         } else {
             letsgo!(assembler
-                ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
+                ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // rt in 2nd argument
             );
         }
 
-        // place virtual address in the 3rd argument (r8)
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // place virtual address in the 3rd argument (v_arg2)
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
 
         letsgo!(assembler
-            ;   test r8b, BYTE 0x03         // check if address is valid (low two bits 00)
+            ;   test v_arg2_8l, BYTE 0x03   // check if address is valid (low two bits 00)
             ;   jz >valid                   // .
             // setup call to address_exception_bridge
-            ;   mov rdx, r8       // move virtual address to rdx
-            ;   xor r8d, r8d
-            ;   inc r8d           // is_write argument is true
+            ;   mov v_arg1, v_arg2             // move virtual address to v_arg1
+            ;   mov v_arg2_32, BYTE 0x01 as _  // is_write = true
         );
 
-        // an address_exception occurred. rcx will get 'self', rdx has the virtual address
-        // that caused the exception. we just set r8 to 1 for writes (above)
+        // an address_exception occurred. v_arg0 will get 'self', v_arg1 has the virtual address
+        // that caused the exception. we just set v_arg2_32 to 1 for writes (above)
         // this will call prefetch(), and jump to the epilog of the block
         letsexcept!(self, assembler, Cpu::address_exception_bridge);
 
-        // edx has 32-bit value to write, r8 contains address
+        // v_arg1_32 has 32-bit value to write, v_arg2 contains address
         letsgo!(assembler
             ;valid:
         );
@@ -6378,13 +6450,13 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to translate_address_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to translate_address_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         // setup parameters for translate_address_bridge
         letsgo!(assembler
             // is_write = true
-            ;   mov r8d, BYTE 1 as _
+            ;   mov v_arg2_32, BYTE 1 as _
         );
 
         // translate the original address, which might cause a TLB miss
@@ -6394,48 +6466,48 @@ impl Cpu {
         letscheck!(assembler);
 
         letsgo!(assembler
-            // move physical_address to rdx
-            ;   mov rdx, rax
-            // get the shift amount from the address, and mask low bits out of rdx
-            ;   mov BYTE [rsp+s_tmp0], dl
+            // move physical_address to v_arg1
+            ;   mov v_arg1, rax
+            // get the shift amount from the address, and mask low bits out of v_arg1
+            ;   mov BYTE [rsp+s_tmp0], v_arg1_8l
             ;   and BYTE [rsp+s_tmp0], BYTE 0x03u8 as _
             ;   shl BYTE [rsp+s_tmp0], BYTE 3 as _
-            ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
         // call read_u32_phys()
         letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // eax contains the result
-        // we place the computation in rdx, as it's the second parameter to write_u32_bridge
+        // we place the computation in v_arg1_32, as it's the second parameter to write_u32_bridge
         // TODO reduce # of instructions if possible
         letsgo!(assembler
             // no shift - use eax as is
             ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
             ;   jne >combine
-            ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
             ;   jmp >done
             // otherwise, take the lower bits of rt and or with the low bits of eax shifted into position
             ;combine:
             ;   mov cl, BYTE 32 as _                 // compute 32-shift
             ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov edx, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
-            ;   shl edx, cl                          // .
-            ;   and eax, edx                         // mask memory
-            ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
-            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
-            ;   shr edx, cl                                        // .
-            ;   or edx, eax                          // result
+            ;   mov v_arg1_32, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
+            ;   shl v_arg1_32, cl                          // .
+            ;   and eax, v_arg1_32                         // mask memory
+            ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                                // .
+            ;   shr v_arg1_32, cl                                        // .
+            ;   or v_arg1_32, eax                          // result
             ;done:
         );
 
-        // r8 is the 3nd parameter to write_u16_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // v_arg2 is the 3nd parameter to write_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
         letsgo!(assembler
-            ;   and r8, DWORD !0x03u32 as _
+            ;   and v_arg2, DWORD !0x03u32 as _
         );
 
-        // write edx to r8
+        // write v_arg1_32 to v_arg2
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check for exception
@@ -6479,13 +6551,13 @@ impl Cpu {
         // setup for exception
         letssetupexcept!(self, assembler, false);
 
-        // rdx is the 2nd parameter to translate_address_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, rdx);
+        // v_arg1 is the 2nd parameter to translate_address_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg1);
 
         // setup parameters for translate_address_bridge
         letsgo!(assembler
             // is_write = true
-            ;   mov r8d, BYTE 1 as _
+            ;   mov v_arg2_32, BYTE 1 as _
         );
 
         // call translate_address_bridge() on the original address
@@ -6495,61 +6567,59 @@ impl Cpu {
         letscheck!(assembler);
 
         // physical address now in rax
-        // get the shift amount from the address, and mask low bits out of rdx
+        // get the shift amount from the address, and mask low bits out of v_arg2
         letsgo!(assembler
-            // move address into rdx for the call read_u32_phys
-            ;   mov rdx, rax
+            // move address into v_arg1 for the call read_u32_phys
+            ;   mov v_arg1, rax
             // compute 32-shift
-            ;   mov cl, dl
+            ;   mov cl, v_arg1_8l
             ;   and cl, BYTE 0x03 as _
             ;   shl cl, BYTE 3 as _
             ;   mov BYTE [rsp+s_tmp0], BYTE 24 as _
             ;   sub BYTE [rsp+s_tmp0], cl
             // place mask out low two bits of address
-            ;   and rdx, DWORD !0x03u32 as _    // sign-exnteded imm32
+            ;   and v_arg1, DWORD !0x03u32 as _    // sign-exnteded imm32
         );
 
         letscall!(assembler, Cpu::read_u32_phys_bridge);
 
         // eax contains the result
-        // we place the computation in rdx, as it's the second parameter to write_u32_bridge
+        // we place the computation in v_arg1_32, as it's the second parameter to write_u32_bridge
         // TODO reduce # of instructions if possible
         letsgo!(assembler
             // no shift - use eax as is
             ;   cmp BYTE [rsp+s_tmp0], BYTE 0u8 as _
             ;   jne >combine
-            ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32]
+            ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32]
             ;   jmp >done
             // otherwise, take the lower bits of rt and or with the low bits of eax shifted into position
             ;combine:
             ;   mov cl, BYTE 32 as _                 // compute 32-shift
             ;   sub cl, BYTE [rsp+s_tmp0]            // .
-            ;   mov edx, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
-            ;   shr edx, cl                          // .
-            ;   and eax, edx                         // mask memory
-            ;   mov edx, DWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
-            ;   mov cl, BYTE [rsp+s_tmp0]                          // .
-            ;   shl edx, cl                                        // .
-            ;   or edx, eax                          // result
+            ;   mov v_arg1_32, DWORD 0xFFFF_FFFFu32 as _   // constant mask shifted by 32-shift
+            ;   shr v_arg1_32, cl                          // .
+            ;   and eax, v_arg1_32                         // mask memory
+            ;   mov v_arg1_32, DWORD [r_gpr + (self.inst.rt * 8) as i32] // shift rt by the shift amount
+            ;   mov cl, BYTE [rsp+s_tmp0]                  // .
+            ;   shl v_arg1_32, cl                          // .
+            ;   or v_arg1_32, eax                          // result
             ;done:
         );
 
-        // r8 is the 3nd parameter to write_u16_bridge
-        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, r8);
+        // v_arg2 is the 3nd parameter to write_u32_bridge
+        letsoffset!(assembler, self.inst.rs, self.inst.signed_imm, v_arg2);
         letsgo!(assembler
-            ;   and r8, DWORD !0x03u32 as _
+            ;   and v_arg2, DWORD !0x03u32 as _
         );
 
-        // write edx to r8
+        // write v_arg1_32 to v_arg2
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check for exception
         letscheck!(assembler);
 
-
         CompileInstructionResult::Continue
     }
-
 
     fn inst_xori(&mut self) -> Result<(), InstructionFault> {
         self.gpr[self.inst.rt] = self.gpr[self.inst.rs] ^ self.inst.imm;
