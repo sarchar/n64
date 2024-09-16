@@ -14,17 +14,12 @@ use tracing_subscriber::{filter, prelude::*};
 use clap::Parser;
 
 use n64::{System, SystemCommunication};
-use n64::debugger::Debugger;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = "long about string")]
 struct Args {
     /// Game to run. Only .Z64 (big-endian) files are currently supported.
     game_file: String,
-
-    /// Enter debugger
-    #[arg(short('D'), long)]
-    debug: bool,
 
     /// Increase logging verbosity. Can be specified multiple times. Default is WARN, then INFO -> DEBUG -> TRACE.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -131,37 +126,29 @@ fn main() {
         System::new(comms, "bios/pifrom.z64", &program_rom)
     };
 
-    // either run or debug
-    if args.debug {
-        let comms = SystemCommunication::new(None);
-        let mut debugger = Debugger::new(make_system(comms), change_logging);
-        println!("Entering debugger...");
-        debugger.run().expect("Debugger failed");
-    } else {
-        cfg_if! {
-            if #[cfg(feature="headless")] {
-                let comms = SystemCommunication::new(None);
-                make_system(comms).run();
-            } else {
-                let gilrs = match gilrs::GilrsBuilder::new().set_update_state(false).build() {
-                    Ok(g) => {
-                        info!(target: "GUI", "Gilrs initialized");
-                        g
-                    },
+    cfg_if! {
+        if #[cfg(feature="headless")] {
+            let comms = SystemCommunication::new(None);
+            Debugger::new(make_system(comms)).run().unwrap();
+        } else {
+            let gilrs = match gilrs::GilrsBuilder::new().set_update_state(false).build() {
+                Ok(g) => {
+                    info!(target: "GUI", "Gilrs initialized");
+                    g
+                },
 
-                    Err(gilrs::Error::NotImplemented(g)) => {
-                        error!(target: "GUI", "gilrs doesn't support current platform");
-                        g
-                    },
+                Err(gilrs::Error::NotImplemented(g)) => {
+                    error!(target: "GUI", "gilrs doesn't support current platform");
+                    g
+                },
 
-                    Err(e) => {
-                        error!(target: "GUI", "gilrs failed to create context: {}", e);
-                        std::process::exit(-1);
-                    },
-                };
+                Err(e) => {
+                    error!(target: "GUI", "gilrs failed to create context: {}", e);
+                    std::process::exit(-1);
+                },
+            };
 
-                pollster::block_on(gui::run::<gui::game::Game>(args, Box::new(make_system), change_logging, gilrs));
-            }
+            pollster::block_on(gui::run::<gui::game::Game>(args, Box::new(make_system), change_logging, gilrs));
         }
     }
 }

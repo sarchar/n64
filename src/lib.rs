@@ -208,6 +208,10 @@ pub struct SystemCommunication {
     // disable CPU speed throttling
     pub cpu_throttle: Arc<AtomicBool>,
 
+    // communication with the debugger
+    // TODO don't like this RwLock here
+    pub debugger: Arc<RwLock<Option<crossbeam::channel::Sender<debugger::DebuggerCommand>>>>,
+
     // tweakables -- fun for geeks
     pub tweakables: Arc<RwLock<Tweakables>>,
 }
@@ -228,8 +232,9 @@ impl SystemCommunication {
             start_dma_tx      : None,
             rdram             : Arc::new(RwLock::new(None)),
             controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
-            cpu_throttle      : Arc::new(AtomicBool::new(true)),
             settings          : Arc::new(RwLock::new(Settings::default())),
+            cpu_throttle      : Arc::new(AtomicBool::new(true)),
+            debugger          : Arc::new(RwLock::new(None)),
             tweakables        : Arc::new(RwLock::new(Tweakables::default())),
         }
     }
@@ -277,11 +282,7 @@ impl System {
         let cpu = RefCell::new(cpu::Cpu::new(comms.clone(), rcp.clone()));
 
         System {
-            comms: comms,
-
-            rcp: rcp,
-            cpu: cpu,
-
+            comms, rcp, cpu,
             start_time: std::time::Instant::now(),
             last_cpu_steps: 0,
         }
@@ -303,13 +304,13 @@ impl System {
     }
 
     #[inline(always)]
-    pub fn run_for(&mut self, cpu_cycles: u64) -> Result<(), cpu::InstructionFault> {
+    pub fn run_for(&mut self, cpu_cycles: u64) -> Result<u64, cpu::InstructionFault> {
         let mut cycles_ran = 0;
 
         if self.comms.settings.read().unwrap().cpu_interpreter_only {
             let mut cpu = self.cpu.borrow_mut();
             while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
-                cpu.step()?;
+                cpu.step_interpreter()?;
                 cycles_ran += 1;
                 self.comms.total_cpu_steps.inc();
             }
@@ -341,34 +342,27 @@ impl System {
             1 => {
                 self.comms.reset_signal.store(0, Ordering::SeqCst);
                 self.reset();
-                return Ok(());
+                return Ok(0);
             },
             2 => {
                 self.comms.reset_signal.store(0, Ordering::SeqCst);
                 self.soft_reset();
-                return Ok(());
+                return Ok(0);
             },
             _ => {},
         };
 
-        let trigger_int = { // scope rcp borrow_mut()
+        let (trigger_int, next_cycle_count) = { // scope rcp borrow_mut()
             let mut rcp = self.rcp.borrow_mut();
-            rcp.step(cycles_ran, &mut self.cpu.borrow_mut());
-            rcp.should_interrupt()
+            rcp.step(cycles_ran, &mut *self.cpu.borrow_mut());
+            (rcp.should_interrupt(), rcp.calculate_free_cycles())
         };
 
         if trigger_int != 0 {
             let _ = self.cpu.borrow_mut().rcp_interrupt();
         }
 
-        Ok(())
-    }
-
-    pub fn run(&mut self) {
-        loop { 
-            let num_cycles = self.rcp.borrow().calculate_free_cycles();
-            let _ = self.run_for(num_cycles); 
-        }
+        Ok(next_cycle_count)
     }
 }
 

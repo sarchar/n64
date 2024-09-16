@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use imgui::StyleColor;
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 use tracing_core::Level;
@@ -14,10 +15,12 @@ use atomic_counter::AtomicCounter;
 
 use image::GenericImageView;
 
+use crossbeam::channel::{self, Receiver, Sender};
+
 use crate::*;
 use gui::{App, AppWindow};
 
-use n64::{SystemCommunication, ButtonState};
+use n64::{SystemCommunication, ButtonState, debugger};
 use n64::hle::{
     self,
     HleRenderCommand, 
@@ -260,6 +263,14 @@ pub struct Game {
     last_prefetch_reset_time: Instant,
 
     last_interrupt_time: Instant,
+
+    // TEMP until debugging ui is moved
+    debugging_request_response_rx: Receiver<debugger::DebuggerCommandResponse>,
+    debugging_request_response_tx: Sender<debugger::DebuggerCommandResponse>,
+    requested_cpu_state: bool,
+    num_instructions_displayed: u32,
+    cpu_state: debugger::CpuStateInfo,
+    show_resizers: bool,
 }
 
 impl App for Game {
@@ -814,28 +825,30 @@ impl App for Game {
         // Grab copy of tweakables
         let tweakables = *comms.tweakables.read().unwrap();
 
+        let (debugging_request_response_tx, debugging_request_response_rx) = channel::bounded(1);
+        
         let mut ret = Self {
-            args: args,
-            comms: comms,
+            args,
+            comms,
 
             // immediately check inputs once
             check_inputs: true, 
 
-            hle_command_buffer: hle_command_buffer,
+            hle_command_buffer,
 
             // default to Game view
             view_mode: ViewMode::Game,
 
             // default bind group layouts
-            color_texture_bind_group_layout: color_texture_bind_group_layout,
-            depth_texture_bind_group_layout: depth_texture_bind_group_layout,
+            color_texture_bind_group_layout,
+            depth_texture_bind_group_layout,
 
             // display game
-            display_game_color_texture_pipeline: display_game_color_texture_pipeline, // render the color framebuffer
-            display_game_depth_texture_pipeline: display_game_depth_texture_pipeline, // debug view of the depth buffer
-            display_game_texture_pipeline: display_game_texture_pipeline,             // debug view of the game texture caches
-            display_game_texture_vertex_buffer: display_game_texture_vertex_buffer,   
-            display_game_texture_index_buffer: display_game_texture_index_buffer,
+            display_game_color_texture_pipeline, // render the color framebuffer
+            display_game_depth_texture_pipeline, // debug view of the depth buffer
+            display_game_texture_pipeline,       // debug view of the game texture caches
+            display_game_texture_vertex_buffer,   
+            display_game_texture_index_buffer,
 
             // render rdram
             rdram_framebuffer_texture: None,
@@ -849,25 +862,25 @@ impl App for Game {
             game_depth_texture_bind_groups: HashMap::new(),
 
             // game pipelines
-            game_pipelines: game_pipelines,
-            game_pipeline_no_depth_attachment: game_pipeline_no_depth_attachment,
+            game_pipelines,
+            game_pipeline_no_depth_attachment,
 
             // render buffers
-            game_vertex_buffer: game_vertex_buffer,
-            game_index_buffer: game_index_buffer,
+            game_vertex_buffer,
+            game_index_buffer,
 
             // ingame textures
             game_textures: vec![],
             game_texture_bind_groups: vec![],
-            game_texture_bind_group_layout: game_texture_bind_group_layout,
+            game_texture_bind_group_layout,
             game_texture_map: HashMap::new(),
 
             // uniforms
-            mvp_matrix_buffer: mvp_matrix_buffer,
-            color_combiner_state_buffer: color_combiner_state_buffer,
-            light_state_buffer: light_state_buffer,
-            fog_state_buffer: fog_state_buffer,
-            game_uniforms_bind_group: game_uniforms_bind_group,
+            mvp_matrix_buffer,
+            color_combiner_state_buffer,
+            light_state_buffer,
+            fog_state_buffer,
+            game_uniforms_bind_group,
 
             //speed: 0.2,
             //is_forward_pressed: false,
@@ -878,7 +891,7 @@ impl App for Game {
             stats_window_opened: true,
             tweakables_window_opened: false,
 
-            tweakables: tweakables,
+            tweakables,
 
             ui_frame_count: 0,
             ui_last_fps_time: Instant::now(),
@@ -899,6 +912,13 @@ impl App for Game {
             last_prefetch_reset_time: Instant::now(),
 
             last_interrupt_time: Instant::now(),
+
+            debugging_request_response_rx,
+            debugging_request_response_tx,
+            requested_cpu_state: false,
+            num_instructions_displayed: 0,
+            cpu_state: debugger::CpuStateInfo::default(),
+            show_resizers: false,
         };
 
         // Upload a null texture to texture 0 so that a game render always has a texture attached
@@ -1382,6 +1402,180 @@ impl App for Game {
                 let mut tw = self.comms.tweakables.write().unwrap();
                 *tw = self.tweakables;
             }
+        }
+
+        { 
+            let mut opened = true;
+
+            // get cpu state
+            let instruction_offset = -(self.num_instructions_displayed as i64) / 2 + 1;
+            if !self.requested_cpu_state {
+                let request = debugger::DebuggerCommand {
+                    // the number of instructions displayed is one frame behind a resize--oh well
+                    command_request: debugger::DebuggerCommandRequest::GetCpuState(Some((instruction_offset, self.num_instructions_displayed as usize))),
+                    response_channel: self.debugging_request_response_tx.clone(),
+                };
+                if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
+                    tx.send(request).unwrap();
+                    self.requested_cpu_state = true;
+                }
+            } else {
+                while let Ok(response) = self.debugging_request_response_rx.try_recv() {
+                    match response {
+                        debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
+                            self.cpu_state = cpu_state;
+                            self.requested_cpu_state = false;
+                        }
+                    }
+                } 
+            }
+
+            let window = ui.window("Listing");
+            window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
+                  .position([0.0, 0.0], imgui::Condition::FirstUseEver)
+                  .opened(&mut opened)
+                  .build(|| {
+                ui.text(format!("PC: ${:08X}", self.cpu_state.next_instruction_pc as u32));
+                if ui.small_button("R") {
+                    self.show_resizers = !self.show_resizers;
+                }
+                if ui.is_item_hovered() {
+                    ui.tooltip_text("Show column resizers");
+                }
+               
+                ui.separator();
+                    
+                ui.group(|| {
+                    let draw_list = ui.get_window_draw_list();
+                    // println!("line_count = {}", line_count);
+                    // let cursor_pos = ui.cursor_screen_pos();
+                    // let pos = [0.0+cursor_pos[0], 0.0+cursor_pos[1]];
+                    // let end = [available_area[0] - 1.0 + pos[0], available_area[1] - 1.0 + pos[1]];
+                    // draw_list.add_rect(pos, end, 0xff0000ff).build();
+
+                    // ABGR32
+
+                    let mut virtual_address = self.cpu_state.next_instruction_pc + (instruction_offset * 4) as u64;
+                    let columns =  [
+                        imgui::TableColumnSetup { name: "IconsAndAddress", flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(0) },
+                        imgui::TableColumnSetup { name: "Opcode"         , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(1) },
+                        imgui::TableColumnSetup { name: "Instruction"    , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(2) },
+                        imgui::TableColumnSetup { name: "Operands"       , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(3) },
+                        imgui::TableColumnSetup { name: "Comments"       , flags: imgui::TableColumnFlags::WIDTH_STRETCH, init_width_or_weight: -1.0, user_id: ui.new_id(4) },
+                    ];
+
+                    let table_flags = if self.show_resizers {
+                        imgui::TableFlags::RESIZABLE | imgui::TableFlags::BORDERS_INNER_V
+                    } else {
+                        imgui::TableFlags::empty()
+                    } /*| imgui::TableFlags::NO_PAD_INNER_X */ | imgui::TableFlags::SIZING_FIXED_FIT;
+
+                    // use begin_table_with_sizing so we can skip the ui.table_headers_row call, as we want to
+                    // set up and use columns but we don't want to display the headers row
+                    if let Some(_) = ui.begin_table_with_sizing("table test", 5, table_flags, [0.0, 0.0], 0.0) {
+                        // create the columns
+                        for column in columns {
+                            ui.table_setup_column_with(column);    
+                        }
+
+                        // compute the number of instructions to display after we've started building the table
+                        let available_area = ui.content_region_avail();
+                        let line_height = ui.text_line_height_with_spacing();
+                        let line_count = (available_area[1] / line_height) as u32;
+                        self.num_instructions_displayed = line_count;
+
+                        // now display the instructions if the memory is valid
+                        if let Some(ref memory) = self.cpu_state.instruction_memory {
+                            for inst in memory.iter() {
+                                // start the first column so that cursor is in the right place
+                                ui.table_next_column();
+                                let mut pos = ui.cursor_screen_pos();
+                                let mut width = available_area[0];
+
+                                // let window_alpha = ui.style_color(StyleColor::WindowBg)[3];
+                                let mut line_fill_color = None;
+
+                                // draw icons back to front
+                                // make the icons column equal to a line height so that it looks square
+                                // but take of two pixels for padding on each side
+                                // first, the breakpoints
+                                if virtual_address == self.cpu_state.next_instruction_pc + 8 {
+                                    let center = [pos[0] + line_height / 2.0, pos[1] + line_height / 2.0];
+                                    let radius = (line_height - 4.0) / 2.0;
+                                    line_fill_color = Some([1.0, 0.0, 0.0, 0.2]);
+                                    draw_list.add_circle(center, radius, [1.0, 0.0, 0.0, 1.0]).filled(true).build();
+                                }
+
+                                // draw PC arrow
+                                if virtual_address == self.cpu_state.next_instruction_pc {
+                                    let midy = line_height / 2.0;
+                                    let points = vec![
+                                        [pos[0] + 2.0              , pos[1] + midy - 2.0],
+                                        [pos[0] + line_height - 2.0, pos[1] + midy - 2.0],
+                                        [pos[0] + line_height - 2.0, pos[1] + midy + 2.0],
+                                        [pos[0] + 2.0              , pos[1] + midy + 2.0],
+                                    ];
+                                    let indicator_color = [(0x2B as f32) / 255.0, (0x8F as f32) / 255.0, (0xAD as f32) / 255.0, 1.0];
+                                    if line_fill_color.is_none() {
+                                        line_fill_color = Some([indicator_color[0], indicator_color[1], indicator_color[2], 0.2]);
+                                    }
+                                    draw_list.add_polyline(points, indicator_color).filled(true).build();
+                                }
+
+                                // fill the row with a background color if set
+                                if let Some(color) = line_fill_color {
+                                    ui.table_set_bg_color(imgui::TableBgTarget::ROW_BG0, color);
+                                } else {
+                                    ui.table_set_bg_color(imgui::TableBgTarget::ROW_BG0, [0.0, 0.0, 0.0, 0.0]);
+                                }
+
+                                // shift X over
+                                pos[0] += line_height;
+                                width -= line_height;
+                                ui.set_cursor_screen_pos(pos);
+
+                                // let height = ui.calc_text_size("X")[1] + ui.style().frame_padding[1];
+
+                                // display address
+                                // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{:08X}: ${:08X}", virtual_address as u32, inst));
+                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{:08X}", virtual_address as u32));
+
+                                // display opcode
+                                ui.table_next_column();
+                                ui.text_colored([0.7, 0.4, 0.4, 1.0], format!("{:08X}", inst));
+
+                                // display instruction mnemonic
+                                ui.table_next_column();
+                                // 30b5b8
+                                ui.text_colored([0x30 as f32 / 255.0, 0xB5 as f32 / 255.0, 0xB8 as f32 / 255.0, 1.0], 
+                                                format!("addiu"));
+
+                                // display operands
+                                // registers: #9872ab
+                                // constants: #abaa67
+                                ui.table_next_column();
+                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], format!("r0"));
+                                ui.same_line_with_spacing(0.0, 0.0);
+                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
+                                ui.same_line_with_spacing(0.0, 0.0);
+                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], format!("r1"));
+                                ui.same_line_with_spacing(0.0, 0.0);
+                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
+                                ui.same_line_with_spacing(0.0, 0.0);
+                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("0x1234"));
+
+                                // display comment
+                                ui.table_next_column();
+                                ui.text_colored([0.4, 0.4, 0.4, 1.0], format!("// do some math"));
+
+                                // next row
+                                virtual_address += 4;
+                                // ui.new_line();
+                            }
+                        }
+                    }
+                });
+            });
         }
     }
 }

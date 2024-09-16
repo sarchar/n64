@@ -5,13 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
-use rustyline::Result as RustylineResult;
-
-use tracing_core::Level;
-
 use crate::*;
+use crossbeam::channel::{self, Receiver, Sender};
 use mips::{InterruptUpdate, InterruptUpdateMode};
 
 use crate::cpu::InstructionFault;
@@ -34,8 +29,30 @@ struct Breakpoints {
     table: HashMap<u64, BreakpointInfo>,
 }
 
+#[derive(Default)]
+pub struct CpuStateInfo {
+    pub next_instruction_pc: u64,
+
+    pub instruction_memory: Option<Vec<u32>>,
+}
+
+pub enum DebuggerCommandRequest {
+    // instead of having to wait for a response on where the PC is, and then request that memory
+    // for listing displays, this flag tells the debugger to return data at an address offset from the PC
+    GetCpuState(Option<(i64, usize)>),     // (offset, size in words)
+}
+
+pub enum DebuggerCommandResponse {
+    CpuState(CpuStateInfo),
+}
+
+pub struct DebuggerCommand {
+    pub command_request: DebuggerCommandRequest,
+    pub response_channel: Sender<DebuggerCommandResponse>,
+}
+
 pub struct Debugger {
-    alive: bool,
+    active: bool,
     ctrlc_count: u32,
 
     cpu_run_til: Option<u64>,
@@ -47,7 +64,8 @@ pub struct Debugger {
 
     system: System,
 
-    change_logging: Box<dyn Fn(&str, Level) -> ()>,
+    // debugging commands
+    command_receiver: Receiver<DebuggerCommand>,
 }
 
 impl Breakpoints {
@@ -81,12 +99,7 @@ impl Breakpoints {
         let id = self.breakpoint_id;
         self.breakpoint_id += 1;
 
-        self.table.insert(address, BreakpointInfo {
-            id     : id,
-            address: address,
-            mode   : mode,
-            enable : enable,
-        });
+        self.table.insert(address, BreakpointInfo { id, address, mode, enable });
     }
 
     fn delete_breakpoint(&mut self, search_id: u64) -> Result<(), String> {
@@ -108,142 +121,180 @@ impl Breakpoints {
 }
 
 impl Debugger {
-    pub fn new(system: System, change_logging: Box<dyn Fn(&str, Level) -> ()>) -> Debugger {
+    pub fn new(mut system: System) -> Debugger {
         let cpu_running = Arc::new(AtomicBool::new(false));
         let r = cpu_running.clone();
 
-        ctrlc::set_handler(move || {
-            println!("Break!");
-            r.store(false, Ordering::SeqCst);
-        }).expect("Error setting ctrl-c handler");
+        // create the debugging communication channel
+        let (sender, command_receiver) = channel::unbounded();
+        *system.comms.debugger.write().unwrap() = Some(sender);
+        
+        // ctrlc::set_handler(move || {
+        //     println!("Break!");
+        //     r.store(false, Ordering::SeqCst);
+        // }).expect("Error setting ctrl-c handler");
 
         let breakpoints = Rc::new(RefCell::new(Breakpoints::new()));
 
-        // replace the bus the CPU is connected to to our debugger bus
-        let old_bus = system.cpu.borrow().bus.clone();
-        system.cpu.borrow_mut().bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
+        // // replace the bus the CPU is connected to to our debugger bus
+        // let old_bus = system.cpu.borrow().bus.clone();
+
+        // system.cpu.borrow_mut().bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
 
         Debugger {
-            alive         : true,
+            active        : true,
             ctrlc_count   : 0,
             cpu_run_til   : None,
-            cpu_running   : cpu_running,
-            breakpoints   : breakpoints,
-            system        : system,
-            change_logging: change_logging,
+            cpu_running,
+            breakpoints,
+            system,
+            command_receiver,
         }
     }
 
-    pub fn run(&mut self) -> RustylineResult<()> {
-        let mut rl = DefaultEditor::new()?;
-
-        if rl.load_history("history.txt").is_err() {
-            println!("No history.txt file");
+    pub fn run(&mut self) -> Result<(), ()> {
+        let mut num_cycles = 0; // the first call to run_for() won't tick the CPU
+        loop { 
+            // let num_cycles = self.rcp.borrow().calculate_free_cycles();
+            num_cycles = self.system.run_for(num_cycles).unwrap(); 
+            self.update();
         }
 
-        let mut lastline = String::from("");
-        let mut last_printed_pc = 0;
-        while self.alive {
-            let readline = { // context for dropping cpu
-                let mut cpu = self.system.cpu.borrow_mut();
-                let next_instruction_pc = cpu.next_instruction_pc();
-                if last_printed_pc != next_instruction_pc {
-                    let inst = if cpu.next_instruction().is_some() {
-                        cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true)
-                    } else {
-                        format!("<cannot fetch instruction>")
-                    };
-                    print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
+        // let mut rl = DefaultEditor::new()?;
 
-                    if cpu.next_is_delay_slot() {
-                        print!(" (delay slot)");
-                    }
-                    println!("");
-                    last_printed_pc = next_instruction_pc;
-                }
+        // if rl.load_history("history.txt").is_err() {
+        //     println!("No history.txt file");
+        // }
 
-                let prompt = format!("<PC:${:08X}>@ ", next_instruction_pc);
-                rl.readline(&prompt)
-            };
+        // let mut lastline = String::from("");
+        // let mut last_printed_pc = 0;
+        // while self.alive {
+        //     let readline = { // context for dropping cpu
+        //         let mut cpu = self.system.cpu.borrow_mut();
+        //         let next_instruction_pc = cpu.next_instruction_pc();
+        //         if last_printed_pc != next_instruction_pc {
+        //             let inst = if cpu.next_instruction().is_some() {
+        //                 cpu::Cpu::disassemble(next_instruction_pc, cpu.next_instruction().unwrap(), true)
+        //             } else {
+        //                 format!("<cannot fetch instruction>")
+        //             };
+        //             print!("${:08X}: {} (next instruction)", next_instruction_pc, inst);
 
-            match readline {
-                RustylineResult::Ok(line) => {
-                    let mut line_str = String::from(line.as_str().trim());
+        //             if cpu.next_is_delay_slot() {
+        //                 print!(" (delay slot)");
+        //             }
+        //             println!("");
+        //             last_printed_pc = next_instruction_pc;
+        //         }
 
-                    if line_str.len() == 0 {
-                        line_str = lastline.clone();
-                    }
+        //         let prompt = format!("<PC:${:08X}>@ ", next_instruction_pc);
+        //         rl.readline(&prompt)
+        //     };
 
-                    lastline = line_str.clone();
+        //     match readline {
+        //         RustylineResult::Ok(line) => {
+        //             let mut line_str = String::from(line.as_str().trim());
 
-                    if line_str.len() > 0 {
-                        rl.add_history_entry(line_str.as_str())?;
-                        if let Err(err) = self.handle_line(line_str.as_str()) {
-                            println!("error: {}", err);
+        //             if line_str.len() == 0 {
+        //                 line_str = lastline.clone();
+        //             }
+
+        //             lastline = line_str.clone();
+
+        //             if line_str.len() > 0 {
+        //                 rl.add_history_entry(line_str.as_str())?;
+        //                 if let Err(err) = self.handle_line(line_str.as_str()) {
+        //                     println!("error: {}", err);
+        //                 }
+        //             }
+
+        //             self.ctrlc_count = 0;
+        //         },
+
+        //         RustylineResult::Err(ReadlineError::Interrupted) => {
+        //             self.ctrlc_count += 1;
+        //             if self.ctrlc_count == 3 { 
+        //                 println!("Exiting...");
+        //                 break; 
+        //             }
+        //             else if self.ctrlc_count == 1 {
+        //                 println!("Ctrl-C, press twice more to exit");
+        //             }
+        //         },
+
+        //         RustylineResult::Err(ReadlineError::Eof) => {
+        //             println!("Exiting...");
+        //             break;
+        //         },
+
+        //         RustylineResult::Err(err) => {
+        //             panic!("ReadlineError: {}", err);
+        //         },
+        //     };
+        // };
+
+        // rl.save_history("history.txt")?;
+
+        // Ok(())
+    }
+
+    fn update(&mut self) {
+        // active is true when at least 1 debugging window is open
+        if !self.active { return; }
+
+        while let Ok(req) = self.command_receiver.try_recv() {
+            match req.command_request {
+                DebuggerCommandRequest::GetCpuState(read_instruction_memory) => {
+                    let mut cpu = self.system.cpu.borrow_mut();
+                    let next_instruction_pc = cpu.next_instruction_pc();
+                    let instruction_memory = if let Some((instruction_offset, instruction_count)) = read_instruction_memory {
+                        let virtual_address = (next_instruction_pc as i64).wrapping_add(instruction_offset);
+                        if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
+                            let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (instruction_count * 4) as u32).unwrap();
+                            Some(memory)
+                        } else {
+                            None
                         }
-                    }
-
-                    self.ctrlc_count = 0;
-                },
-
-                RustylineResult::Err(ReadlineError::Interrupted) => {
-                    self.ctrlc_count += 1;
-                    if self.ctrlc_count == 3 { 
-                        println!("Exiting...");
-                        break; 
-                    }
-                    else if self.ctrlc_count == 1 {
-                        println!("Ctrl-C, press twice more to exit");
-                    }
-                },
-
-                RustylineResult::Err(ReadlineError::Eof) => {
-                    println!("Exiting...");
-                    break;
-                },
-
-                RustylineResult::Err(err) => {
-                    panic!("ReadlineError: {}", err);
-                },
-            };
-        };
-
-        rl.save_history("history.txt")?;
-
-        Ok(())
-    }
-
-    fn handle_line(&mut self, line: &str) -> Result<(), String> {
-        let lines = line.split(";").collect::<Vec<&str>>();
-        for line in lines {
-            let parts = line.split_whitespace().collect::<Vec<&str>>();
-
-            if parts.len() == 0 { return Ok(()); }
-
-            let result = match parts[0] {
-                "r" | "ru" | "run"          => { self.run_cpu(&parts) },
-                "s" | "st" | "ste" | "step" => { self.step(&parts) }
-                "res" | "rese" | "reset"    => { self.reset(&parts) },
-                "regs" | "rd"               => { self.dump_regs(&parts) },
-                "rw"                        => { self.dump_regs_as_words(&parts) },
-                "b" | "br" | "bre" | "brea"
-                 | "break" | "bp"           => { self.breakpoint(&parts) },
-                "db" | "del" | "dbr" 
-                 | "dbrea" | "dbreak"       => { self.delete_breakpoint(&parts) },
-                "log"                       => { self.logging(&parts) },
-                "l" | "li" | "lis" | "list" => { self.listing(&parts) },
-                "int"                       => { self.interrupt(&parts) },
-
-                _ => {
-                    Err(format!("unsupported debugger command \"{}\"", parts[0]))
-                },
-            };
-
-            if let Err(_) = result { return result; }
+                    } else { 
+                        None
+                    };
+                    let cpu_state = CpuStateInfo { next_instruction_pc, instruction_memory };
+                    req.response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
+                }
+            }
         }
-
-        Ok(())
     }
+    // fn handle_line(&mut self, line: &str) -> Result<(), String> {
+    //     let lines = line.split(";").collect::<Vec<&str>>();
+    //     for line in lines {
+    //         let parts = line.split_whitespace().collect::<Vec<&str>>();
+
+    //         if parts.len() == 0 { return Ok(()); }
+
+    //         let result = match parts[0] {
+    //             "r" | "ru" | "run"          => { self.run_cpu(&parts) },
+    //             "s" | "st" | "ste" | "step" => { self.step(&parts) }
+    //             "res" | "rese" | "reset"    => { self.reset(&parts) },
+    //             "regs" | "rd"               => { self.dump_regs(&parts) },
+    //             "rw"                        => { self.dump_regs_as_words(&parts) },
+    //             "b" | "br" | "bre" | "brea"
+    //              | "break" | "bp"           => { self.breakpoint(&parts) },
+    //             "db" | "del" | "dbr" 
+    //              | "dbrea" | "dbreak"       => { self.delete_breakpoint(&parts) },
+    //             "log"                       => { self.logging(&parts) },
+    //             "l" | "li" | "lis" | "list" => { self.listing(&parts) },
+    //             "int"                       => { self.interrupt(&parts) },
+
+    //             _ => {
+    //                 Err(format!("unsupported debugger command \"{}\"", parts[0]))
+    //             },
+    //         };
+
+    //         if let Err(_) = result { return result; }
+    //     }
+
+    //     Ok(())
+    // }
 
     fn run_cpu(&mut self, parts: &Vec<&str>) -> Result<(), String> {
         self.cpu_run_til = None;
@@ -432,30 +483,30 @@ impl Debugger {
         Ok(())
     }
 
-    fn logging(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        if parts.len() < 2 || parts.len() > 3 {
-            return Err(format!("usage: loglevel trace|debug|info|warn|error (module=level[,module=level])"));
-        }
+    // fn logging(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     if parts.len() < 2 || parts.len() > 3 {
+    //         return Err(format!("usage: loglevel trace|debug|info|warn|error (module=level[,module=level])"));
+    //     }
 
-        let default_level = match parts[1].to_lowercase().as_str() {
-            "info" => Level::INFO,
-            "debug" => Level::DEBUG,
-            "warn" => Level::WARN,
-            "error" => Level::ERROR,
-            "trace" => Level::TRACE,
-            _ => { return Err(format!("invalid default level \"{}\"", parts[2])); }
-        };
+    //     let default_level = match parts[1].to_lowercase().as_str() {
+    //         "info" => Level::INFO,
+    //         "debug" => Level::DEBUG,
+    //         "warn" => Level::WARN,
+    //         "error" => Level::ERROR,
+    //         "trace" => Level::TRACE,
+    //         _ => { return Err(format!("invalid default level \"{}\"", parts[2])); }
+    //     };
 
-        let format_str = if parts.len() == 3 {
-            parts[2]
-        } else {
-            ""
-        };
+    //     let format_str = if parts.len() == 3 {
+    //         parts[2]
+    //     } else {
+    //         ""
+    //     };
 
-        (self.change_logging)(format_str, default_level);
+    //     (self.change_logging)(format_str, default_level);
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     fn listing(&mut self, parts: &Vec<&str>) -> Result<(), String> {
         let mut cpu = self.system.cpu.borrow_mut();

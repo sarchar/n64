@@ -373,9 +373,10 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     // start the emulation
     let thread_comms = comms.clone();
     std::thread::spawn(move || {
-        let mut system = create_system(thread_comms);
+        let system = create_system(thread_comms);
         tx.send(system.rcp.borrow_mut().mi.get_update_channel()).unwrap();
-        system.run();
+        let mut debugger = n64::debugger::Debugger::new(system);
+        debugger.run().unwrap();
     });
 
     // wait for the system to start and get the interrupt channel

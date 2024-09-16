@@ -474,7 +474,7 @@ pub struct Cpu {
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u64,                       // lookahead PC
     current_instruction_pc: u64,   // actual PC of the currently executing instruction
-                                   // only valid inside step()
+                                   // only valid inside step_interpreter()
     next_instruction: Option<u32>, // emulates delay slot (prefetch, next instruction), but can be None during JIT runs
     next_instruction_pc: u64,      // for printing correct delay slot addresses
     is_delay_slot: bool,           // true if the currently executing instruction is in a delay slot
@@ -1746,7 +1746,7 @@ impl Cpu {
         // check if the interrupts are enabled
         if ((interrupt_signal as u64) & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
             if (self.cp0gpr[Cop0_Status] & 0x07) == 0x01 { // IE must be set, and EXL and ERL both clear
-                // interrupts are executed outside of step(), which means self.current_instruction_pc isn't correct
+                // interrupts are executed outside of step_interpreter(), which means self.current_instruction_pc isn't correct
                 // and self.exception uses self.current_instruction_pc, so update it
                 self.exception(ExceptionCode_Int, false)?;
             }
@@ -2103,16 +2103,16 @@ impl Cpu {
                     self.next_instruction = Some(self.read_u32((self.next_instruction_pc) as usize).unwrap());
                     self.comms.increment_prefetch_counter();
                 }
-                self.step()?;
+                self.step_interpreter()?;
                 continue;
             }
 
-            // if the PC address is unaligned, just run Cpu::step() for the exception handler
+            // if the PC address is unaligned, just run Cpu::step_interpreter() for the exception handler
             if (self.pc & 0x03) != 0 {
-                // it doesn't matter that self.next_instruction is likely None right now, as step()
+                // it doesn't matter that self.next_instruction is likely None right now, as step_interpreter()
                 // will see the address exception instead of trying to execute next_instruction
                 self.pc -= 4; // the JIT code is one instruction ahead due to the call to prefetch().
-                self.step()?;
+                self.step_interpreter()?;
                 continue;
             }
 
@@ -2169,7 +2169,7 @@ impl Cpu {
                     }
 
                     for _ in 0..32 {
-                        self.step()?;
+                        self.step_interpreter()?;
                     }
 
                     continue;
@@ -2422,7 +2422,7 @@ impl Cpu {
                         panic!("unhandled Cant situation");
                     }
 
-                    // the current instruction needs to be replayed in step()
+                    // the current instruction needs to be replayed in step_interpreter()
                     letsgo!(assembler
                         // current_instruction_pc goes back into next_instruction_pc
                         ;   mov rax, QWORD self.current_instruction_pc as u64 as _
@@ -2799,7 +2799,7 @@ impl Cpu {
     }
 
     // interpret a single instruction
-    pub fn step(&mut self) -> Result<(), InstructionFault> {
+    pub fn step_interpreter(&mut self) -> Result<(), InstructionFault> {
         self.num_steps += 1;
 
         // increment Cop0_Count at half PClock and trigger exception
@@ -2958,7 +2958,7 @@ impl Cpu {
         // update and increment PC
         // current_instruction_pc is set twice, once at the beginning in case an external factor
         // changes the PC (see fn interupt()), and once at the end to keep it valid outside of
-        // step()
+        // step_interpreter()
         self.current_instruction_pc = self.next_instruction_pc;
         self.next_instruction_pc = self.pc;
         self.pc += 4;
