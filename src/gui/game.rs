@@ -1526,6 +1526,7 @@ impl App for Game {
                     self.listing_memory.clear();
                 }
                 
+                // draw the `R` button -- TODO make me a macro
                 let mut style_tokens = Vec::new();
                 if self.show_resizers {
                     style_tokens.push(ui.push_style_color(imgui::StyleColor::Button, [1.0, 0.0, 0.0, 1.0]));
@@ -1543,6 +1544,7 @@ impl App for Game {
                 for token in style_tokens {
                     token.pop();
                 }
+                ////////
                
                 ui.separator();
                     
@@ -1556,22 +1558,22 @@ impl App for Game {
 
                     // ABGR32
                     let columns =  [
-                        imgui::TableColumnSetup { name: "IconsAndAddress", flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(0) },
-                        imgui::TableColumnSetup { name: "Opcode"         , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(1) },
-                        imgui::TableColumnSetup { name: "Instruction"    , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(2) },
-                        imgui::TableColumnSetup { name: "Operands"       , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(3) },
-                        imgui::TableColumnSetup { name: "Comments"       , flags: imgui::TableColumnFlags::WIDTH_STRETCH, init_width_or_weight: -1.0, user_id: ui.new_id(4) },
+                        imgui::TableColumnSetup { name: "Address"    , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(0) },
+                        imgui::TableColumnSetup { name: "Opcode"     , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(1) },
+                        imgui::TableColumnSetup { name: "Instruction", flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(2) },
+                        imgui::TableColumnSetup { name: "Operands"   , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(3) },
+                        imgui::TableColumnSetup { name: "Comments"   , flags: imgui::TableColumnFlags::WIDTH_STRETCH, init_width_or_weight: 10.0, user_id: ui.new_id(4) },
                     ];
 
                     let table_flags = if self.show_resizers {
-                        imgui::TableFlags::RESIZABLE | imgui::TableFlags::BORDERS_INNER_V
+                        imgui::TableFlags::BORDERS_INNER_V
                     } else {
-                        imgui::TableFlags::empty()
-                    } /*| imgui::TableFlags::NO_PAD_INNER_X */ | imgui::TableFlags::SIZING_FIXED_FIT;
+                        imgui::TableFlags::NO_BORDERS_IN_BODY
+                    } | imgui::TableFlags::RESIZABLE | imgui::TableFlags::NO_PAD_OUTER_X;
 
                     // use begin_table_with_sizing so we can skip the ui.table_headers_row call, as we want to
                     // set up and use columns but we don't want to display the headers row
-                    if let Some(_) = ui.begin_table_with_sizing("table test", 5, table_flags, [0.0, 0.0], 0.0) {
+                    if let Some(_) = ui.begin_table_with_sizing("table test", columns.len(), table_flags, [0.0, 0.0], 0.0) {
                         // create the columns
                         for column in columns {
                             ui.table_setup_column_with(column);    
