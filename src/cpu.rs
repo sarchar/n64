@@ -117,6 +117,17 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
+#[derive()]
+pub enum DisassembledInstruction {
+    Mnemonic(String),
+    Register(usize),
+    FpuRegister(usize),
+    ConstantU16(u16),
+    ConstantS16(i16),
+    ConstantU32(u32),
+    OffsetRegister(i16, usize),
+}
+
 const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
 
 const CACHED_BLOCK_MAP_RDRAM_OFFSET  : usize = 0;
@@ -8775,17 +8786,20 @@ impl Cpu {
         CompileInstructionResult::Continue
     }
 
-    pub fn disassemble(address: u64, inst: u32, use_abi_names: bool) -> String {
-        let op = inst >> 26;
-        let rs = (inst >> 21) & 0x1F;
-        let rt = (inst >> 16) & 0x1F;
-        let rd = (inst >> 11) & 0x1F;
-        let sa = (inst >> 6) & 0x1F;
-        let func = inst & 0x3F;
-        let imm = inst & 0xFFFF;
-        let target = inst & 0x03FFFFFF;
+    // base_address required for computing relative branches
+    // return value is a vector of instruction elements, the first of which is the instruction
+    // mnemonic, and the rest are the comma separated arguments
+    pub fn disassemble(base_address: u64, opcode: u32, use_abi_names: bool) -> Vec<DisassembledInstruction> {
+        let op     = opcode >> 26;
+        let rs     = ((opcode >> 21) & 0x1F) as usize;
+        let rt     = ((opcode >> 16) & 0x1F) as usize;
+        let rd     = ((opcode >> 11) & 0x1F) as usize;
+        let sa     = ((opcode >> 6) & 0x1F) as usize;
+        let func   = opcode & 0x3F;
+        let imm    = (opcode & 0xFFFF) as i16;
+        let target = opcode & 0x03FFFFFF;
 
-        let rname = |r| {
+        let reg_name = |r| {
             if use_abi_names {
                 Cpu::abi_name(r as usize)
             } else {
@@ -8793,75 +8807,101 @@ impl Cpu {
             }
         };
 
+        let mut result = Vec::new();
+        
+        let push_mnemonic = |mn| {
+            result.push(DisassembledInstruction::Mnemonic(format!("{}", mn)));
+        };
+
         let no_type = |mn| {
-            format!("{}", mn)
+            push_mnemonic(mn);
         };
 
         let j_type = |mn| {
-            format!("{} ${:08X}", mn, (((address as u32) + 4) & 0xF000_0000) | (target << 2))
+            push_mnemonic(mn);
+            let dest = (((base_address as u32) + 4) & 0xF000_0000) | (target << 2);
+            result.push(DisassembledInstruction::ConstantU32(dest));
         };
 
         let i_type_rt = |mn| {
-            format!("{} {}, ${:04X}", mn, rname(rt), imm)
+            push_mnemonic(mn);
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
         let i_type_rt_base = |mn| {
-            format!("{} {}, ${:04X}({})", mn, rname(rt), imm, rname(rs))
+            push_mnemonic(mn);
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
         let i_type_ft_base = |mn| {
-            format!("{} f{}, ${:04X}({})", mn, rt, imm, rname(rs))
+            push_mnemonic(mn);
+            result.push(DisassembledInstruction::FpuRegister(rt));
+            result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
         let i_type1_rs = |mn| {
-            format!("{} {}, ${:04X}", mn, rname(rs), imm)
+            push_mnemonic(mn);
+            result.push(DisassembledInstruction::Register(rs));
+            result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
         let i_type_rs_rt = |mn| {
-            format!("{} {}, {}, ${:04X}", mn, rname(rs), rname(rt), imm)
+            push_mnemonic(mn);
+            format!("{} {}, {}, ${:04X}", mn, reg_name(rs), reg_name(rt), imm)
         };
 
         let i_type_rt_rs = |mn| {
-            format!("{} {}, {}, ${:04X}", mn, rname(rt), rname(rs), imm)
+            push_mnemonic(mn);
+            format!("{} {}, {}, ${:04X}", mn, reg_name(rt), reg_name(rs), imm)
         };
 
         let r_type_rd = |mn| {
-            format!("{} {}", mn, rname(rd))
+            push_mnemonic(mn);
+            format!("{} {}", mn, reg_name(rd))
         };
 
         let r_type_rs = |mn| {
-            format!("{} {}", mn, rname(rs))
+            push_mnemonic(mn);
+            format!("{} {}", mn, reg_name(rs))
         };
 
         let r_type_rd_rs = |mn| {
-            format!("{} {}, {}", mn, rname(rd), rname(rs))
+            push_mnemonic(mn);
+            format!("{} {}, {}", mn, reg_name(rd), reg_name(rs))
         };
 
         let r_type_rs_rt = |mn| {
-            format!("{} {}, {}", mn, rname(rs), rname(rt))
+            push_mnemonic(mn);
+            format!("{} {}, {}", mn, reg_name(rs), reg_name(rt))
         };
 
         let r_type_rt_rd = |mn| {
-            format!("{} {}, {}", mn, rname(rt), rname(rd))
+            push_mnemonic(mn);
+            format!("{} {}, {}", mn, reg_name(rt), reg_name(rd))
         };
 
         let r_type_rd_rt_rs = |mn| {
-            format!("{} {}, {}, {}", mn, rname(rd), rname(rt), rname(rs))
+            push_mnemonic(mn);
+            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rt), reg_name(rs))
         };
 
         let r_type_rd_rs_rt = |mn| {
-            format!("{} {}, {}, {}", mn, rname(rd), rname(rs), rname(rt))
+            push_mnemonic(mn);
+            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rs), reg_name(rt))
         };
 
         let r_type_rd_rt_sa = |mn| {
-            format!("{} {}, {}, {}", mn, rname(rd), rname(rt), sa)
+            push_mnemonic(mn);
+            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rt), sa)
         };
 
         match op {
             0b000_000 => {
                 match func {
                     0b000_000 => {
-                        if inst == 0 {
+                        if opcode == 0 {
                             format!("nop")
                         } else {
                             r_type_rd_rt_sa("sll")
@@ -8948,7 +8988,7 @@ impl Cpu {
                 if rs == 0 && rt == 0 {
                     format!("bra ${:04X}", imm)
                 } else if rt == 0 {
-                    format!("beqz {}, ${:04X}", rname(rs), imm)
+                    format!("beqz {}, ${:04X}", reg_name(rs), imm)
                 } else {
                     i_type_rs_rt("beq")
                 }
@@ -9049,6 +9089,8 @@ impl Cpu {
 
             _ => panic!("cannot disassemble 0b{:03b}_{:03b}", op >> 3, op & 0x07),
         }
+
+        result
     }
 }
 
