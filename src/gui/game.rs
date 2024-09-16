@@ -1095,7 +1095,11 @@ impl App for Game {
         }
 
         // fast-forward
-        self.comms.cpu_throttle.store(!appwnd.input().key_held(KeyCode::Backquote), Ordering::Relaxed);
+        if appwnd.input().key_held(KeyCode::Backquote) {
+            self.comms.cpu_throttle.store(0, Ordering::Relaxed);
+        } else if self.comms.cpu_throttle.load(Ordering::Relaxed) == 0 { // don't reset value `2` to 1
+            self.comms.cpu_throttle.store(1, Ordering::Relaxed);
+        }
 
         // Show demo window
         if appwnd.input().key_pressed(KeyCode::F12) {
@@ -1435,7 +1439,37 @@ impl App for Game {
                   .position([0.0, 0.0], imgui::Condition::FirstUseEver)
                   .opened(&mut opened)
                   .build(|| {
-                ui.text(format!("PC: ${:08X}", self.cpu_state.next_instruction_pc as u32));
+
+                if self.cpu_state.running && ui.button("Stop") {
+                    let request = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::StopCpu,
+                        response_channel: self.debugging_request_response_tx.clone(),
+                    };
+                    if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
+                        tx.send(request).unwrap();
+                    }
+                } else if !self.cpu_state.running && ui.button("Run") {
+                    let request = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::RunCpu,
+                        response_channel: self.debugging_request_response_tx.clone(),
+                    };
+                    if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
+                        tx.send(request).unwrap();
+                    }
+                }
+
+                ui.same_line();
+                if ui.button("Step") {
+                    let request = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::StepCpu(1),
+                        response_channel: self.debugging_request_response_tx.clone(),
+                    };
+                    if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
+                        tx.send(request).unwrap();
+                    }
+                }
+
+                ui.text(format!("Address: ${:08X}", self.cpu_state.next_instruction_pc as u32));
                 if ui.small_button("R") {
                     self.show_resizers = !self.show_resizers;
                 }

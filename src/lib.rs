@@ -206,7 +206,10 @@ pub struct SystemCommunication {
     pub settings: Arc<RwLock<Settings>>,
 
     // disable CPU speed throttling
-    pub cpu_throttle: Arc<AtomicBool>,
+    // 0 - disable throttling
+    // 1 - enable throttling
+    // 2 - disable for a single frame
+    pub cpu_throttle: Arc<AtomicU32>, // atomic enum would be nicer
 
     // communication with the debugger
     // TODO don't like this RwLock here
@@ -233,7 +236,7 @@ impl SystemCommunication {
             rdram             : Arc::new(RwLock::new(None)),
             controllers       : Arc::new(RwLock::new(vec![ControllerState::default(); 4])),
             settings          : Arc::new(RwLock::new(Settings::default())),
-            cpu_throttle      : Arc::new(AtomicBool::new(true)),
+            cpu_throttle      : Arc::new(AtomicU32::new(1)),
             debugger          : Arc::new(RwLock::new(None)),
             tweakables        : Arc::new(RwLock::new(Tweakables::default())),
         }
@@ -316,14 +319,23 @@ impl System {
             }
         } else {
             // delay...
-            if self.comms.cpu_throttle.load(Ordering::Relaxed) {
-                let mut cur_ips = 95_000_000.0;
-                while cur_ips > 93_750_000.0 {
-                    cur_ips = ((self.comms.total_cpu_steps.get() - self.last_cpu_steps) as f64) / self.start_time.elapsed().as_secs_f64();
-                }
-            } else {
-                self.last_cpu_steps = self.comms.total_cpu_steps.get();
-                self.start_time = std::time::Instant::now();
+            match self.comms.cpu_throttle.load(Ordering::Relaxed) {
+                i @ 0 | i @ 2 => {
+                    self.last_cpu_steps = self.comms.total_cpu_steps.get();
+                    self.start_time = std::time::Instant::now();
+                    if i == 2 {
+                        self.comms.cpu_throttle.store(1, Ordering::Relaxed);
+                    }
+                },
+
+                1 => {
+                    let mut cur_ips = 95_000_000.0;
+                    while cur_ips > 93_750_000.0 {
+                        cur_ips = ((self.comms.total_cpu_steps.get() - self.last_cpu_steps) as f64) / self.start_time.elapsed().as_secs_f64();
+                    }
+                },
+
+                _ => {},
             }
 
             if !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {

@@ -32,6 +32,7 @@ struct Breakpoints {
 #[derive(Default)]
 pub struct CpuStateInfo {
     pub next_instruction_pc: u64,
+    pub running: bool,
 
     pub instruction_memory: Option<Vec<u32>>,
 }
@@ -40,6 +41,12 @@ pub enum DebuggerCommandRequest {
     // instead of having to wait for a response on where the PC is, and then request that memory
     // for listing displays, this flag tells the debugger to return data at an address offset from the PC
     GetCpuState(Option<(i64, usize)>),     // (offset, size in words)
+    // stop a running Cpu
+    StopCpu,
+    // start the Cpu
+    RunCpu,
+    // Step Cpu
+    StepCpu(u64),
 }
 
 pub enum DebuggerCommandResponse {
@@ -52,13 +59,17 @@ pub struct DebuggerCommand {
 }
 
 pub struct Debugger {
+    exit_requested: bool,
+    cpu_running: bool,
+    cpu_run_for: u64,
     active: bool,
+
     ctrlc_count: u32,
 
     cpu_run_til: Option<u64>,
 
     // Ctrl-C help
-    cpu_running: Arc<AtomicBool>,
+    // cpu_running: Arc<AtomicBool>,
 
     breakpoints: Rc<RefCell<Breakpoints>>,
 
@@ -122,8 +133,8 @@ impl Breakpoints {
 
 impl Debugger {
     pub fn new(mut system: System) -> Debugger {
-        let cpu_running = Arc::new(AtomicBool::new(false));
-        let r = cpu_running.clone();
+        // let cpu_running = Arc::new(AtomicBool::new(false));
+        // let r = cpu_running.clone();
 
         // create the debugging communication channel
         let (sender, command_receiver) = channel::unbounded();
@@ -142,10 +153,13 @@ impl Debugger {
         // system.cpu.borrow_mut().bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
 
         Debugger {
+            exit_requested: false,
+            cpu_running   : true,
+            cpu_run_for   : 0,    // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
             active        : true,
             ctrlc_count   : 0,
             cpu_run_til   : None,
-            cpu_running,
+            // cpu_running,
             breakpoints,
             system,
             command_receiver,
@@ -153,10 +167,12 @@ impl Debugger {
     }
 
     pub fn run(&mut self) -> Result<(), ()> {
-        let mut num_cycles = 0; // the first call to run_for() won't tick the CPU
-        loop { 
-            // let num_cycles = self.rcp.borrow().calculate_free_cycles();
-            num_cycles = self.system.run_for(num_cycles).unwrap(); 
+        while !self.exit_requested { 
+            if self.cpu_running {
+                // let num_cycles = self.rcp.borrow().calculate_free_cycles();
+                self.cpu_run_for = self.system.run_for(self.cpu_run_for).unwrap(); 
+            }
+
             self.update();
         }
 
@@ -235,14 +251,14 @@ impl Debugger {
 
         // rl.save_history("history.txt")?;
 
-        // Ok(())
+        Ok(())
     }
 
     fn update(&mut self) {
         // active is true when at least 1 debugging window is open
         if !self.active { return; }
 
-        while let Ok(req) = self.command_receiver.try_recv() {
+        'next_command: while let Ok(req) = self.command_receiver.try_recv() {
             match req.command_request {
                 DebuggerCommandRequest::GetCpuState(read_instruction_memory) => {
                     let mut cpu = self.system.cpu.borrow_mut();
@@ -258,12 +274,30 @@ impl Debugger {
                     } else { 
                         None
                     };
-                    let cpu_state = CpuStateInfo { next_instruction_pc, instruction_memory };
+                    let running = self.cpu_running;
+                    let cpu_state = CpuStateInfo { next_instruction_pc, running, instruction_memory };
                     req.response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
-                }
+                },
+
+                DebuggerCommandRequest::StopCpu => {
+                    self.cpu_running = false;
+                },
+
+                DebuggerCommandRequest::RunCpu => {
+                    self.cpu_run_for = 0;
+                    self.cpu_running = true;
+                    if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
+                        self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
+                    }
+                },
+
+                DebuggerCommandRequest::StepCpu(num_cycles) => {
+                    if self.cpu_running { continue 'next_command; }
+                    self.system.run_for(num_cycles).unwrap();
+                },
             }
         }
-    }
+    }    
     // fn handle_line(&mut self, line: &str) -> Result<(), String> {
     //     let lines = line.split(";").collect::<Vec<&str>>();
     //     for line in lines {
@@ -296,99 +330,99 @@ impl Debugger {
     //     Ok(())
     // }
 
-    fn run_cpu(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        self.cpu_run_til = None;
-        self.cpu_running.store(true, Ordering::SeqCst);
+    // fn run_cpu(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     self.cpu_run_til = None;
+    //     self.cpu_running.store(true, Ordering::SeqCst);
 
-        if parts.len() > 1 {
-            self.cpu_run_til = match parse_int(&parts[1]) {
-                Ok(v) => Some(v as u64),
-                Err(err) => {
-                    return Err(err);
-                }
-            };
-        }
+    //     if parts.len() > 1 {
+    //         self.cpu_run_til = match parse_int(&parts[1]) {
+    //             Ok(v) => Some(v as u64),
+    //             Err(err) => {
+    //                 return Err(err);
+    //             }
+    //         };
+    //     }
 
-        let start_steps = self.system.cpu.borrow().num_steps();
-        let now = std::time::Instant::now();
+    //     let start_steps = self.system.cpu.borrow().num_steps();
+    //     let now = std::time::Instant::now();
 
-        while self.cpu_running.load(Ordering::SeqCst) {
-            //let address = *cpu.next_instruction_pc();
-            //let inst = cpu::Cpu::disassemble(address, *cpu.next_instruction(), true);
-            //println!("${:08X}: {}", address, inst);
+    //     while self.cpu_running.load(Ordering::SeqCst) {
+    //         //let address = *cpu.next_instruction_pc();
+    //         //let inst = cpu::Cpu::disassemble(address, *cpu.next_instruction(), true);
+    //         //println!("${:08X}: {}", address, inst);
 
-            // Break loop on any instruction error or memory access
-            match self.system.run_for(1) {
-                Ok(_) => {},
+    //         // Break loop on any instruction error or memory access
+    //         match self.system.run_for(1) {
+    //             Ok(_) => {},
 
-                Err(InstructionFault::OtherException(_exception_code)) => {
-                    // TODO: CPU exceptions should only interrupt if desired
-                },
+    //             Err(InstructionFault::OtherException(_exception_code)) => {
+    //                 // TODO: CPU exceptions should only interrupt if desired
+    //             },
 
-                e @ Err(_) => {
-                    // All other errors are probably bad
-                    println!("breaking on error ${:?}", e);
-                    break;
-                },
-            }
+    //             e @ Err(_) => {
+    //                 // All other errors are probably bad
+    //                 println!("breaking on error ${:?}", e);
+    //                 break;
+    //             },
+    //         }
 
-            // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
-                println!("Breakpoint ${:016X} hit", breakpoint.address);
-                self.cpu_running.store(false, Ordering::SeqCst);
-            }
+    //         // Check breakpoints
+    //         if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
+    //             println!("Breakpoint ${:016X} hit", breakpoint.address);
+    //             self.cpu_running.store(false, Ordering::SeqCst);
+    //         }
 
-            // Check run until
-            match self.cpu_run_til {
-                Some(v) => {
-                    if self.system.cpu.borrow().next_instruction_pc() == v {
-                        self.cpu_running.store(false, Ordering::SeqCst);
-                    }
-                },
-                None => {}
-            };
-        }
+    //         // Check run until
+    //         match self.cpu_run_til {
+    //             Some(v) => {
+    //                 if self.system.cpu.borrow().next_instruction_pc() == v {
+    //                     self.cpu_running.store(false, Ordering::SeqCst);
+    //                 }
+    //             },
+    //             None => {}
+    //         };
+    //     }
 
-        let steps = self.system.cpu.borrow().num_steps() - start_steps;
-        let elapsed = now.elapsed();
-        let duration = (elapsed.as_secs() as f64) + (elapsed.subsec_micros() as f64) / 1000000.0;
+    //     let steps = self.system.cpu.borrow().num_steps() - start_steps;
+    //     let elapsed = now.elapsed();
+    //     let duration = (elapsed.as_secs() as f64) + (elapsed.subsec_micros() as f64) / 1000000.0;
 
-        println!("Cpu steps: {}, duration = {}, steps/sec = {}", steps, duration, (steps as f64) / duration);
+    //     println!("Cpu steps: {}, duration = {}, steps/sec = {}", steps, duration, (steps as f64) / duration);
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-    fn step(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        let mut count = if parts.len() > 1 {
-            match parse_int(&parts[1]) {
-                Ok(v) => v as u64,
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        } else {
-            1
-        };
+    // fn step(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     let mut count = if parts.len() > 1 {
+    //         match parse_int(&parts[1]) {
+    //             Ok(v) => v as u64,
+    //             Err(err) => {
+    //                 return Err(err);
+    //             }
+    //         }
+    //     } else {
+    //         1
+    //     };
 
-        self.cpu_running.store(true, Ordering::SeqCst);
-        while count > 0 && self.cpu_running.load(Ordering::SeqCst) {
-            // Break loop on any instruction error
-            if let Err(_) = self.system.run_for(1) {
-                break;
-            }
+    //     self.cpu_running.store(true, Ordering::SeqCst);
+    //     while count > 0 && self.cpu_running.load(Ordering::SeqCst) {
+    //         // Break loop on any instruction error
+    //         if let Err(_) = self.system.run_for(1) {
+    //             break;
+    //         }
 
-            // update step count
-            count -= 1;
+    //         // update step count
+    //         count -= 1;
 
-            // Check breakpoints
-            if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
-                println!("Breakpoint ${:016X} hit", breakpoint.address);
-                self.cpu_running.store(false, Ordering::SeqCst);
-            }
-        }
+    //         // Check breakpoints
+    //         if let Some(breakpoint) = self.breakpoints.borrow().check_breakpoint((self.system.cpu.borrow().next_instruction_pc() as i32) as u64, BP_EXEC) {
+    //             println!("Breakpoint ${:016X} hit", breakpoint.address);
+    //             self.cpu_running.store(false, Ordering::SeqCst);
+    //         }
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     fn reset(&mut self, _: &Vec<&str>) -> Result<(), String> {
         self.system.reset();

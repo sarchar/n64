@@ -86,7 +86,7 @@ impl AudioInterface {
 
         // if cpu_throttle is disabled, kill all the audio playback
         // we still need to cycle next_buffer and trigger interrupts though
-        let can_play = self.comms.cpu_throttle.load(Ordering::Relaxed);
+        let can_play = self.comms.cpu_throttle.load(Ordering::Relaxed) == 1;
         if !can_play {
             self.audio_queue.clear();
             self.audio_queue.pause();
