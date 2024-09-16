@@ -47,10 +47,13 @@ pub enum DebuggerCommandRequest {
     RunCpu,
     // Step Cpu
     StepCpu(u64),
+    // Read memory
+    ReadBlock(u64, u64, usize), // (id, address, size in words)
 }
 
 pub enum DebuggerCommandResponse {
     CpuState(CpuStateInfo),
+    ReadBlock(u64, Option<Vec<u32>>), // id, data
 }
 
 pub struct DebuggerCommand {
@@ -132,7 +135,7 @@ impl Breakpoints {
 }
 
 impl Debugger {
-    pub fn new(mut system: System) -> Debugger {
+    pub fn new(system: System) -> Debugger {
         // let cpu_running = Arc::new(AtomicBool::new(false));
         // let r = cpu_running.clone();
 
@@ -167,6 +170,7 @@ impl Debugger {
     }
 
     pub fn run(&mut self) -> Result<(), ()> {
+        // self.cpu_running = false;
         while !self.exit_requested { 
             if self.cpu_running {
                 // let num_cycles = self.rcp.borrow().calculate_free_cycles();
@@ -264,8 +268,9 @@ impl Debugger {
                     let mut cpu = self.system.cpu.borrow_mut();
                     let next_instruction_pc = cpu.next_instruction_pc();
                     let instruction_memory = if let Some((instruction_offset, instruction_count)) = read_instruction_memory {
-                        let virtual_address = (next_instruction_pc as i64).wrapping_add(instruction_offset);
+                        let virtual_address = (next_instruction_pc as i64).wrapping_add(instruction_offset * 4);
                         if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
+                            // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}", next_instruction_pc, address.physical_address, instruction_offset);
                             let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (instruction_count * 4) as u32).unwrap();
                             Some(memory)
                         } else {
@@ -295,6 +300,21 @@ impl Debugger {
                     if self.cpu_running { continue 'next_command; }
                     self.system.run_for(num_cycles).unwrap();
                 },
+
+                DebuggerCommandRequest::ReadBlock(id, virtual_address, size_in_words) => {
+                    let memory = {
+                        let mut cpu = self.system.cpu.borrow_mut();
+                        if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
+                            // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}", next_instruction_pc, address.physical_address, instruction_offset);
+                            let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (size_in_words * 4) as u32).unwrap();
+                            Some(memory)
+                        } else {
+                            None
+                        }
+                    };
+
+                    req.response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
+                }
             }
         }
     }    
@@ -564,8 +584,8 @@ impl Debugger {
 
             if let Ok(Some(address)) = cpu.translate_address(addr, false, false) {
                 if let Ok(op) = cpu.bus.borrow_mut().read_u32(address.physical_address as usize) {
-                    let inst = cpu::Cpu::disassemble(addr, op, true);
-                    print!("(${:08X}): {}", op, inst);
+                    // let inst = cpu::Cpu::disassemble(addr, op, true);
+                    // print!("(${:08X}): {}", op, inst);
                 } else {
                     print!(": <unaccessable>");
                 }

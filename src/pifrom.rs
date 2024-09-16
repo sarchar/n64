@@ -136,17 +136,17 @@ impl PifRom {
         };
 
         PifRom {
-            comms: comms,
+            comms,
 
-            boot_rom: boot_rom,
-            ram: ram,
+            boot_rom,
+            ram,
             joybus_ram_copy: vec![0u32; 16],
             command_finished: false,
-            seed: seed,
+            seed,
             _cic_type: cic_type,
-            eeprom: eeprom,
-            eeprom_file: eeprom_file,
-            eeprom_data: eeprom_data,
+            eeprom,
+            eeprom_file,
+            eeprom_data,
             eeprom_dirty: None,
         }
     }
@@ -687,6 +687,14 @@ impl Addressable for PifRom {
     }
 
     fn read_block(&mut self, offset: usize, length: u32) -> Result<Vec<u32>, ReadWriteFault> {
+        if offset < 0x7C0 {
+            let mut v = Vec::new();
+            for address in (offset..offset + (length as usize)).step_by(4) {
+                v.push(self.read_u32(address).unwrap());
+            }
+            return Ok(v);
+        }
+
         if offset != 0x7C0 || length != 64 { todo!(); }
 
         self.do_joybus();

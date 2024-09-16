@@ -117,15 +117,15 @@ struct TlbEntry {
     entry_lo0: u64
 }
 
-#[derive()]
+#[derive(Clone)]
 pub enum DisassembledInstruction {
     Mnemonic(String),
     Register(usize),
     FpuRegister(usize),
-    ConstantU16(u16),
     ConstantS16(i16),
-    ConstantU32(u32),
+    Address(u64),
     OffsetRegister(i16, usize),
+    ShiftAmount(usize),
 }
 
 const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
@@ -8799,102 +8799,133 @@ impl Cpu {
         let imm    = (opcode & 0xFFFF) as i16;
         let target = opcode & 0x03FFFFFF;
 
-        let reg_name = |r| {
-            if use_abi_names {
-                Cpu::abi_name(r as usize)
-            } else {
-                Cpu::register_name(r as usize)
-            }
-        };
+        // let reg_name = |r| {
+        //     if use_abi_names {
+        //         Cpu::abi_name(r)
+        //     } else {
+        //         Cpu::register_name(r)
+        //     }
+        // };
 
         let mut result = Vec::new();
         
-        let push_mnemonic = |mn| {
+        let push_mnemonic = |result: &mut Vec<_>, mn| {
             result.push(DisassembledInstruction::Mnemonic(format!("{}", mn)));
         };
 
-        let no_type = |mn| {
-            push_mnemonic(mn);
+        // nop
+        let mut no_type = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
         };
 
-        let j_type = |mn| {
-            push_mnemonic(mn);
-            let dest = (((base_address as u32) + 4) & 0xF000_0000) | (target << 2);
-            result.push(DisassembledInstruction::ConstantU32(dest));
+        // j rel32
+        let mut j_type = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            let dest = ((base_address + 4) & 0xFFFF_FFFF_F000_0000) | ((target as u64) << 2);
+            result.push(DisassembledInstruction::Address(dest));
         };
 
-        let i_type_rt = |mn| {
-            push_mnemonic(mn);
+        // rt, imm
+        let mut i_type_rt = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
-        let i_type_rt_base = |mn| {
-            push_mnemonic(mn);
+        // rt, imm(rs)
+        let mut i_type_rt_base = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
-        let i_type_ft_base = |mn| {
-            push_mnemonic(mn);
+        // ft, imm(rs)
+        let mut i_type_ft_base = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
             result.push(DisassembledInstruction::FpuRegister(rt));
             result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
-        let i_type1_rs = |mn| {
-            push_mnemonic(mn);
+        // rs, imm
+        let mut i_type1_rs = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rs));
             result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
-        let i_type_rs_rt = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}, ${:04X}", mn, reg_name(rs), reg_name(rt), imm)
+        // rs, rt, address (only for branches)
+        let mut i_type_rs_rt = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rs));
+            result.push(DisassembledInstruction::Register(rt));
+            // delay slot + offset
+            let branch_target = base_address + 4 + ((imm as u64) << 2);
+            result.push(DisassembledInstruction::Address(branch_target));
         };
 
-        let i_type_rt_rs = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}, ${:04X}", mn, reg_name(rt), reg_name(rs), imm)
+        // rt, rs, imm
+        let mut i_type_rt_rs = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::Register(rs));
+            result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
-        let r_type_rd = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}", mn, reg_name(rd))
+        // rd
+        let mut r_type_rd = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rd));
         };
 
-        let r_type_rs = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}", mn, reg_name(rs))
+        // rs
+        let mut r_type_rs = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rs));
         };
 
-        let r_type_rd_rs = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}", mn, reg_name(rd), reg_name(rs))
+        // rd, rs
+        let mut r_type_rd_rs = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rd));
+            result.push(DisassembledInstruction::Register(rs));
         };
 
-        let r_type_rs_rt = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}", mn, reg_name(rs), reg_name(rt))
+        // rs, rt
+        let mut r_type_rs_rt = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rs));
+            result.push(DisassembledInstruction::Register(rt));
         };
 
-        let r_type_rt_rd = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}", mn, reg_name(rt), reg_name(rd))
+        // rt, rd
+        let mut r_type_rt_rd = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::Register(rd));
         };
 
-        let r_type_rd_rt_rs = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rt), reg_name(rs))
+        // rd, rt, rs
+        let mut r_type_rd_rt_rs = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rd));
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::Register(rs));
         };
 
-        let r_type_rd_rs_rt = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rs), reg_name(rt))
+        // rd, rs, rt
+        let mut r_type_rd_rs_rt = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rd));
+            result.push(DisassembledInstruction::Register(rs));
+            result.push(DisassembledInstruction::Register(rt));
         };
 
-        let r_type_rd_rt_sa = |mn| {
-            push_mnemonic(mn);
-            format!("{} {}, {}, {}", mn, reg_name(rd), reg_name(rt), sa)
+        // rd, rt, sa
+        let mut r_type_rd_rt_sa = |result: &mut Vec<_>, mn| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::Register(rd));
+            result.push(DisassembledInstruction::Register(rt));
+            result.push(DisassembledInstruction::ShiftAmount(sa));
         };
 
         match op {
@@ -8902,71 +8933,73 @@ impl Cpu {
                 match func {
                     0b000_000 => {
                         if opcode == 0 {
-                            format!("nop")
+                            push_mnemonic(&mut result, "nop");
                         } else {
-                            r_type_rd_rt_sa("sll")
+                            r_type_rd_rt_sa(&mut result, "sll");
                         }
                     },
-                    0b000_010 => r_type_rd_rt_sa("srl"),
-                    0b000_011 => r_type_rd_rt_sa("sra"),
-                    0b000_100 => r_type_rd_rt_rs("sllv"),
-                    0b000_110 => r_type_rd_rt_rs("srlv"),
-                    0b000_111 => r_type_rd_rt_rs("srav"),
+                    0b000_010 => r_type_rd_rt_sa(&mut result, "srl"),
+                    0b000_011 => r_type_rd_rt_sa(&mut result, "sra"),
+                    0b000_100 => r_type_rd_rt_rs(&mut result, "sllv"),
+                    0b000_110 => r_type_rd_rt_rs(&mut result, "srlv"),
+                    0b000_111 => r_type_rd_rt_rs(&mut result, "srav"),
 
-                    0b001_000 => r_type_rs("jr"),
-                    0b001_001 => r_type_rd_rs("jalr"),
-                    0b001_100 => no_type("syscall"),
-                    0b001_101 => no_type("break"),
-                    0b001_111 => no_type("sync"),
+                    0b001_000 => r_type_rs(&mut result, "jr"),
+                    0b001_001 => r_type_rd_rs(&mut result, "jalr"),
+                    0b001_100 => no_type(&mut result, "syscall"),
+                    0b001_101 => no_type(&mut result, "break"),
+                    0b001_111 => no_type(&mut result, "sync"),
 
-                    0b010_000 => r_type_rd("mfhi"),
-                    0b010_001 => r_type_rs("mthi"),
-                    0b010_010 => r_type_rd("mflo"),
-                    0b010_011 => r_type_rs("mtlo"),
-                    0b010_100 => r_type_rd_rt_rs("dsllv"),
-                    0b010_110 => r_type_rd_rt_rs("dsrlv"),
-                    0b010_111 => r_type_rd_rt_rs("dsrav"),
+                    0b010_000 => r_type_rd(&mut result, "mfhi"),
+                    0b010_001 => r_type_rs(&mut result, "mthi"),
+                    0b010_010 => r_type_rd(&mut result, "mflo"),
+                    0b010_011 => r_type_rs(&mut result, "mtlo"),
+                    0b010_100 => r_type_rd_rt_rs(&mut result, "dsllv"),
+                    0b010_110 => r_type_rd_rt_rs(&mut result, "dsrlv"),
+                    0b010_111 => r_type_rd_rt_rs(&mut result, "dsrav"),
 
-                    0b011_000 => r_type_rs_rt("mult"),
-                    0b011_001 => r_type_rs_rt("multu"),
-                    0b011_010 => r_type_rs_rt("div"),
-                    0b011_011 => r_type_rs_rt("divu"),
-                    0b011_100 => r_type_rs_rt("dmult"),
-                    0b011_101 => r_type_rs_rt("dmultu"),
-                    0b011_110 => r_type_rs_rt("ddiv"),
-                    0b011_111 => r_type_rs_rt("ddivu"),
+                    0b011_000 => r_type_rs_rt(&mut result, "mult"),
+                    0b011_001 => r_type_rs_rt(&mut result, "multu"),
+                    0b011_010 => r_type_rs_rt(&mut result, "div"),
+                    0b011_011 => r_type_rs_rt(&mut result, "divu"),
+                    0b011_100 => r_type_rs_rt(&mut result, "dmult"),
+                    0b011_101 => r_type_rs_rt(&mut result, "dmultu"),
+                    0b011_110 => r_type_rs_rt(&mut result, "ddiv"),
+                    0b011_111 => r_type_rs_rt(&mut result, "ddivu"),
 
-                    0b100_000 => r_type_rd_rs_rt("add"),
-                    0b100_001 => r_type_rd_rs_rt("addu"),
-                    0b100_010 => r_type_rd_rs_rt("sub"),
-                    0b100_011 => r_type_rd_rs_rt("subu"),
-                    0b100_100 => r_type_rd_rs_rt("and"),
-                    0b100_101 => r_type_rd_rs_rt("or"),
-                    0b100_110 => r_type_rd_rs_rt("xor"),
-                    0b100_111 => r_type_rd_rs_rt("nor"),
+                    0b100_000 => r_type_rd_rs_rt(&mut result, "add"),
+                    0b100_001 => r_type_rd_rs_rt(&mut result, "addu"),
+                    0b100_010 => r_type_rd_rs_rt(&mut result, "sub"),
+                    0b100_011 => r_type_rd_rs_rt(&mut result, "subu"),
+                    0b100_100 => r_type_rd_rs_rt(&mut result, "and"),
+                    0b100_101 => r_type_rd_rs_rt(&mut result, "or"),
+                    0b100_110 => r_type_rd_rs_rt(&mut result, "xor"),
+                    0b100_111 => r_type_rd_rs_rt(&mut result, "nor"),
 
-                    0b101_010 => r_type_rd_rs_rt("slt"),
-                    0b101_011 => r_type_rd_rs_rt("sltu"),
-                    0b101_100 => r_type_rd_rs_rt("dadd"),
-                    0b101_101 => r_type_rd_rs_rt("daddu"),
-                    0b101_110 => r_type_rd_rs_rt("dsub"),
-                    0b101_111 => r_type_rd_rs_rt("dsubu"),
+                    0b101_010 => r_type_rd_rs_rt(&mut result, "slt"),
+                    0b101_011 => r_type_rd_rs_rt(&mut result, "sltu"),
+                    0b101_100 => r_type_rd_rs_rt(&mut result, "dadd"),
+                    0b101_101 => r_type_rd_rs_rt(&mut result, "daddu"),
+                    0b101_110 => r_type_rd_rs_rt(&mut result, "dsub"),
+                    0b101_111 => r_type_rd_rs_rt(&mut result, "dsubu"),
 
-                    0b110_000 => r_type_rs_rt("tge"),
-                    0b110_001 => r_type_rs_rt("tgeu"),
-                    0b110_010 => r_type_rs_rt("tlt"),
-                    0b110_011 => r_type_rs_rt("tltu"),
-                    0b110_100 => r_type_rs_rt("teq"),
-                    0b110_110 => r_type_rs_rt("tne"),
+                    0b110_000 => r_type_rs_rt(&mut result, "tge"),
+                    0b110_001 => r_type_rs_rt(&mut result, "tgeu"),
+                    0b110_010 => r_type_rs_rt(&mut result, "tlt"),
+                    0b110_011 => r_type_rs_rt(&mut result, "tltu"),
+                    0b110_100 => r_type_rs_rt(&mut result, "teq"),
+                    0b110_110 => r_type_rs_rt(&mut result, "tne"),
 
-                    0b111_000 => r_type_rd_rt_sa("dsll"),
-                    0b111_010 => r_type_rd_rt_sa("dsrl"),
-                    0b111_011 => r_type_rd_rt_sa("dsra"),
-                    0b111_100 => r_type_rd_rt_sa("dsll32"),
-                    0b111_110 => r_type_rd_rt_sa("dsrl32"),
-                    0b111_111 => r_type_rd_rt_sa("dsra32"),
+                    0b111_000 => r_type_rd_rt_sa(&mut result, "dsll"),
+                    0b111_010 => r_type_rd_rt_sa(&mut result, "dsrl"),
+                    0b111_011 => r_type_rd_rt_sa(&mut result, "dsra"),
+                    0b111_100 => r_type_rd_rt_sa(&mut result, "dsll32"),
+                    0b111_110 => r_type_rd_rt_sa(&mut result, "dsrl32"),
+                    0b111_111 => r_type_rd_rt_sa(&mut result, "dsra32"),
 
-                    _ => panic!("unknown special rs=${:03b}_{:03b}", func >> 3, func & 0x07),
+                    _ => {
+                        push_mnemonic(&mut result, format!("unknown special {:03b}_{:03b}", func >> 3, func & 0x07).as_str());
+                    },
                 }
             },
 
@@ -8978,36 +9011,41 @@ impl Cpu {
                     "bltzal", "bgezal", "bltzall", "bgezall", "?", "?", "?", "?",
                     "?", "?", "?", "?", "?", "?", "?", "?",
                 ];
-                i_type1_rs(REGIMM[rt as usize])
+                i_type1_rs(&mut result, REGIMM[rt as usize]);
             },
 
-            0b000_010 => j_type("j"),
-            0b000_011 => j_type("jal"),
+            0b000_010 => j_type(&mut result, "j"),
+            0b000_011 => j_type(&mut result, "jal"),
 
             0b000_100 => {
-                if rs == 0 && rt == 0 {
-                    format!("bra ${:04X}", imm)
-                } else if rt == 0 {
-                    format!("beqz {}, ${:04X}", reg_name(rs), imm)
+                if rs == 0 && rt == 0 { // branch always psuedomnemonic
+                    push_mnemonic(&mut result, "bra");
+                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    result.push(DisassembledInstruction::Address(branch_target));
+                } else if rt == 0 { // test against r0 psuedomnemonic
+                    push_mnemonic(&mut result, "beqz");
+                    result.push(DisassembledInstruction::Register(rs));
+                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    result.push(DisassembledInstruction::Address(branch_target));
                 } else {
-                    i_type_rs_rt("beq")
+                    i_type_rs_rt(&mut result, "beq");
                 }
             },
 
-            0b000_101 => i_type_rs_rt("bne"),
-            0b000_110 => i_type_rs_rt("blez"),
-            0b000_111 => i_type_rs_rt("bgtz"),
+            0b000_101 => i_type_rs_rt(&mut result, "bne"),
+            0b000_110 => i_type_rs_rt(&mut result, "blez"),
+            0b000_111 => i_type_rs_rt(&mut result, "bgtz"),
 
-            0b001_000 => i_type_rt_rs("addi"),
-            0b001_001 => i_type_rt_rs("addiu"),
-            0b001_010 => i_type_rt_rs("slti"),
-            0b001_011 => i_type_rt_rs("sltiu"),
+            0b001_000 => i_type_rt_rs(&mut result, "addi"),
+            0b001_001 => i_type_rt_rs(&mut result, "addiu"),
+            0b001_010 => i_type_rt_rs(&mut result, "slti"),
+            0b001_011 => i_type_rt_rs(&mut result, "sltiu"),
 
-            0b001_100 => i_type_rt_rs("andi"),
-            0b001_101 => i_type_rt_rs("ori"),
-            0b001_110 => i_type_rt_rs("xori"),
+            0b001_100 => i_type_rt_rs(&mut result, "andi"),
+            0b001_101 => i_type_rt_rs(&mut result, "ori"),
+            0b001_110 => i_type_rt_rs(&mut result, "xori"),
 
-            0b001_111 => i_type_rt("lui"),
+            0b001_111 => i_type_rt(&mut result, "lui"),
 
             0b010_000 | 0b010_001 | 0b010_010 => {
                 // RS field contains the instruction code
@@ -9020,9 +9058,10 @@ impl Cpu {
                 let copno = op & 0x03;
                 if rs < 0b10_000 {
                     if COP_FN[rs as usize].starts_with("?") {
-                        error!("unknown cop function rs=${:02b}_{:03b}", rs >> 3, rs & 0x07);
+                        push_mnemonic(&mut result, format!("unknown cop{} func=${:02b}_{:03b}", copno, rs >> 3, rs & 0x07).as_str());
+                    } else {
+                        r_type_rt_rd(&mut result, format!("{}{}", COP_FN[rs as usize], copno).as_str());
                     }
-                    r_type_rt_rd(format!("{}{}", COP_FN[rs as usize], copno))
                 } else {
                     match copno {
                         1 => {
@@ -9037,57 +9076,60 @@ impl Cpu {
                                 "c.sf", "c.ngle", "c.seq", "c.ngl", "c.lt", "c.nge", "c.le", "c.ngt"
                             ];
                             if CP1_FN[func as usize].starts_with("?") {
-                                error!("unknown cp1 function func=${:03b}_{:03b}", rs >> 3, rs & 0x07);
+                                push_mnemonic(&mut result, format!("unknown cop{} func=${:03b}_{:03b}", copno, func >> 3, func & 0x07).as_str());
+                            } else {
+                                r_type_rt_rd(&mut result, format!("{}", CP1_FN[func as usize]).as_str());
                             }
-                            r_type_rt_rd(format!("{}", CP1_FN[func as usize]))
                         },
                         _ => {
-                            format!("unhandled cop{} instruction ${:X}", copno, func)
+                            push_mnemonic(&mut result, format!("unknown cop{} func=${:03b}_${:03b}", copno, func >> 3, func & 0x07).as_str());
                         },
                     }
                 }
             },
 
-            0b010_100 => i_type_rs_rt("beql"),
-            0b010_101 => i_type_rs_rt("bnel"),
-            0b010_110 => i_type_rs_rt("blezl"),
-            0b010_111 => i_type_rs_rt("bgtzl"),
+            0b010_100 => i_type_rs_rt(&mut result, "beql"),
+            0b010_101 => i_type_rs_rt(&mut result, "bnel"),
+            0b010_110 => i_type_rs_rt(&mut result, "blezl"),
+            0b010_111 => i_type_rs_rt(&mut result, "bgtzl"),
 
-            0b011_000 => i_type_rt_rs("daddi"),
-            0b011_001 => i_type_rt_rs("daddiu"),
-            0b011_010 => i_type_rt_base("ldl"),
-            0b011_011 => i_type_rt_base("ldr"),
+            0b011_000 => i_type_rt_rs(&mut result, "daddi"),
+            0b011_001 => i_type_rt_rs(&mut result, "daddiu"),
+            0b011_010 => i_type_rt_base(&mut result, "ldl"),
+            0b011_011 => i_type_rt_base(&mut result, "ldr"),
 
-            0b011_111 => no_type("<invalid>"),
+            0b011_111 => no_type(&mut result, "<invalid>"),
 
-            0b100_000 => i_type_rt_base("lb"),
-            0b100_001 => i_type_rt_base("lh"),
-            0b100_010 => i_type_rt_base("lwl"),
-            0b100_011 => i_type_rt_base("lw"),
-            0b100_100 => i_type_rt_base("lbu"),
-            0b100_101 => i_type_rt_base("lhu"),
-            0b100_110 => i_type_rt_base("lwr"),
-            0b100_111 => i_type_rt_base("lwu"),
-            0b101_000 => i_type_rt_base("sb"),
-            0b101_001 => i_type_rt_base("sh"),
-            0b101_010 => i_type_rt_base("swl"),
-            0b101_011 => i_type_rt_base("sw"),
-            0b101_100 => i_type_rt_base("sdl"),
-            0b101_101 => i_type_rt_base("sdr"),
-            0b101_110 => i_type_rt_base("swr"),
-            0b101_111 => no_type("cache"),
+            0b100_000 => i_type_rt_base(&mut result, "lb"),
+            0b100_001 => i_type_rt_base(&mut result, "lh"),
+            0b100_010 => i_type_rt_base(&mut result, "lwl"),
+            0b100_011 => i_type_rt_base(&mut result, "lw"),
+            0b100_100 => i_type_rt_base(&mut result, "lbu"),
+            0b100_101 => i_type_rt_base(&mut result, "lhu"),
+            0b100_110 => i_type_rt_base(&mut result, "lwr"),
+            0b100_111 => i_type_rt_base(&mut result, "lwu"),
+            0b101_000 => i_type_rt_base(&mut result, "sb"),
+            0b101_001 => i_type_rt_base(&mut result, "sh"),
+            0b101_010 => i_type_rt_base(&mut result, "swl"),
+            0b101_011 => i_type_rt_base(&mut result, "sw"),
+            0b101_100 => i_type_rt_base(&mut result, "sdl"),
+            0b101_101 => i_type_rt_base(&mut result, "sdr"),
+            0b101_110 => i_type_rt_base(&mut result, "swr"),
+            0b101_111 => no_type(&mut result, "cache"),
 
-            0b110_000 => i_type_rt("ll"),
-            0b110_001 => i_type_ft_base("lwc1"),
-            0b110_101 => i_type_ft_base("ldc1"),
-            0b110_111 => i_type_rt("ld"),
+            0b110_000 => i_type_rt(&mut result, "ll"),
+            0b110_001 => i_type_ft_base(&mut result, "lwc1"),
+            0b110_101 => i_type_ft_base(&mut result, "ldc1"),
+            0b110_111 => i_type_rt(&mut result, "ld"),
 
-            0b111_000 => i_type_rt("sc"),
-            0b111_001 => i_type_rt("swc1"),
-            0b111_101 => i_type_ft_base("sdc1"),
-            0b111_111 => i_type_rt("sd"),
+            0b111_000 => i_type_rt(&mut result, "sc"),
+            0b111_001 => i_type_rt(&mut result, "swc1"),
+            0b111_101 => i_type_ft_base(&mut result, "sdc1"),
+            0b111_111 => i_type_rt(&mut result, "sd"),
 
-            _ => panic!("cannot disassemble 0b{:03b}_{:03b}", op >> 3, op & 0x07),
+            _ => {
+                push_mnemonic(&mut result, format!("unknown instruction op=${:03b}_${:03b}", op >> 3, op & 0x07).as_str());
+            },
         }
 
         result

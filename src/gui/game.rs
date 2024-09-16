@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::ops::Add;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use imgui::StyleColor;
+use n64::cpu::DisassembledInstruction;
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 use tracing_core::Level;
@@ -268,6 +270,8 @@ pub struct Game {
     debugging_request_response_rx: Receiver<debugger::DebuggerCommandResponse>,
     debugging_request_response_tx: Sender<debugger::DebuggerCommandResponse>,
     requested_cpu_state: bool,
+    listing_address: Option<u64>,
+    listing_memory: Vec<u32>,
     num_instructions_displayed: u32,
     cpu_state: debugger::CpuStateInfo,
     show_resizers: bool,
@@ -825,7 +829,7 @@ impl App for Game {
         // Grab copy of tweakables
         let tweakables = *comms.tweakables.read().unwrap();
 
-        let (debugging_request_response_tx, debugging_request_response_rx) = channel::bounded(1);
+        let (debugging_request_response_tx, debugging_request_response_rx) = channel::unbounded();
         
         let mut ret = Self {
             args,
@@ -916,6 +920,8 @@ impl App for Game {
             debugging_request_response_rx,
             debugging_request_response_tx,
             requested_cpu_state: false,
+            listing_address: None,
+            listing_memory: Vec::new(),
             num_instructions_displayed: 0,
             cpu_state: debugger::CpuStateInfo::default(),
             show_resizers: false,
@@ -1416,9 +1422,14 @@ impl App for Game {
             if !self.requested_cpu_state {
                 let request = debugger::DebuggerCommand {
                     // the number of instructions displayed is one frame behind a resize--oh well
-                    command_request: debugger::DebuggerCommandRequest::GetCpuState(Some((instruction_offset, self.num_instructions_displayed as usize))),
+                    command_request: if self.listing_address.is_none() {
+                        debugger::DebuggerCommandRequest::GetCpuState(Some((instruction_offset, self.num_instructions_displayed as usize)))
+                    } else {
+                        debugger::DebuggerCommandRequest::GetCpuState(None)
+                    },
                     response_channel: self.debugging_request_response_tx.clone(),
                 };
+
                 if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
                     tx.send(request).unwrap();
                     self.requested_cpu_state = true;
@@ -1429,15 +1440,49 @@ impl App for Game {
                         debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
                             self.cpu_state = cpu_state;
                             self.requested_cpu_state = false;
+                        },
+
+                        debugger::DebuggerCommandResponse::ReadBlock(id, memory) => {
+                            if id == 0 {
+                                if let Some(memory) = memory {
+                                    self.listing_memory = memory;
+                                } else {
+                                    self.listing_memory.clear();
+                                }
+                            }
                         }
                     }
                 } 
+            }
+
+            if ui.io().mouse_wheel != 0.0 {
+                // if switching from track-pc to not...
+                if self.listing_address.is_none() {
+                    self.listing_address = Some(self.cpu_state.next_instruction_pc);
+                }
+
+                // increment address address by mouse_wheel count
+                self.listing_address = Some((self.listing_address.unwrap() as i64 + (-ui.io().mouse_wheel as i64) * 4) as u64);
+
+                // send the request-memory command
+                let address = (self.listing_address.unwrap() as i64) + (instruction_offset << 2);
+                let request = debugger::DebuggerCommand {
+                    command_request: debugger::DebuggerCommandRequest::ReadBlock(0, address as u64, self.num_instructions_displayed as usize),
+                    response_channel: self.debugging_request_response_tx.clone(),
+                };
+
+                if let Some(ref tx) = self.comms.debugger.read().unwrap().as_ref() {
+                    tx.send(request).unwrap();
+                }
             }
 
             let window = ui.window("Listing");
             window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
                   .position([0.0, 0.0], imgui::Condition::FirstUseEver)
                   .opened(&mut opened)
+                  // because I want to fill up enough lines to fill up the screen, that causes the actual table borders to
+                  // run outside of the content area of the window, which means a scrollbar will appear...so disable it
+                  .flags(imgui::WindowFlags::NO_SCROLLBAR | imgui::WindowFlags::NO_SCROLL_WITH_MOUSE)
                   .build(|| {
 
                 if self.cpu_state.running && ui.button("Stop") {
@@ -1469,12 +1514,34 @@ impl App for Game {
                     }
                 }
 
-                ui.text(format!("Address: ${:08X}", self.cpu_state.next_instruction_pc as u32));
+                if self.listing_address.is_none() {
+                    ui.text(format!("Address: ${:08X}", self.cpu_state.next_instruction_pc as u32));
+                } else {
+                    ui.text(format!("Address: ${:08X}", self.listing_address.unwrap() as u32));
+                }
+
+                ui.same_line();
+                if ui.button("Follow PC") {
+                    self.listing_address = None;
+                    self.listing_memory.clear();
+                }
+                
+                let mut style_tokens = Vec::new();
+                if self.show_resizers {
+                    style_tokens.push(ui.push_style_color(imgui::StyleColor::Button, [1.0, 0.0, 0.0, 1.0]));
+                    style_tokens.push(ui.push_style_color(imgui::StyleColor::ButtonHovered, [196.0/255.0, 0.0, 0.0, 1.0]));
+                }
+
                 if ui.small_button("R") {
                     self.show_resizers = !self.show_resizers;
                 }
+
                 if ui.is_item_hovered() {
                     ui.tooltip_text("Show column resizers");
+                }
+
+                for token in style_tokens {
+                    token.pop();
                 }
                
                 ui.separator();
@@ -1488,8 +1555,6 @@ impl App for Game {
                     // draw_list.add_rect(pos, end, 0xff0000ff).build();
 
                     // ABGR32
-
-                    let mut virtual_address = self.cpu_state.next_instruction_pc + (instruction_offset * 4) as u64;
                     let columns =  [
                         imgui::TableColumnSetup { name: "IconsAndAddress", flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(0) },
                         imgui::TableColumnSetup { name: "Opcode"         , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: -1.0, user_id: ui.new_id(1) },
@@ -1516,10 +1581,18 @@ impl App for Game {
                         let available_area = ui.content_region_avail();
                         let line_height = ui.text_line_height_with_spacing();
                         let line_count = (available_area[1] / line_height) as u32;
-                        self.num_instructions_displayed = line_count;
+                        self.num_instructions_displayed = line_count + 1;
 
                         // now display the instructions if the memory is valid
-                        if let Some(ref memory) = self.cpu_state.instruction_memory {
+                        let mut virtual_address = ((self.cpu_state.next_instruction_pc as i64) + (instruction_offset * 4)) as u64;
+                        let instruction_memory: Option<&Vec<u32>> = if self.listing_address.is_none() {
+                            self.cpu_state.instruction_memory.as_ref()
+                        } else {
+                            virtual_address = ((self.listing_address.unwrap() as i64) + (instruction_offset * 4)) as u64;
+                            Some(&self.listing_memory)
+                        };
+                        
+                        if let Some(memory) = instruction_memory {
                             for inst in memory.iter() {
                                 // start the first column so that cursor is in the right place
                                 ui.table_next_column();
@@ -1528,6 +1601,8 @@ impl App for Game {
 
                                 // let window_alpha = ui.style_color(StyleColor::WindowBg)[3];
                                 let mut line_fill_color = None;
+
+                                let mut comment = String::new();
 
                                 // draw icons back to front
                                 // make the icons column equal to a line height so that it looks square
@@ -1574,33 +1649,104 @@ impl App for Game {
                                 // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{:08X}: ${:08X}", virtual_address as u32, inst));
                                 ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{:08X}", virtual_address as u32));
 
+                                
                                 // display opcode
                                 ui.table_next_column();
                                 ui.text_colored([0.7, 0.4, 0.4, 1.0], format!("{:08X}", inst));
 
+                                // disassemble instruction
+                                let disassembly = n64::cpu::Cpu::disassemble(virtual_address, *inst, true);
+
                                 // display instruction mnemonic
                                 ui.table_next_column();
                                 // 30b5b8
-                                ui.text_colored([0x30 as f32 / 255.0, 0xB5 as f32 / 255.0, 0xB8 as f32 / 255.0, 1.0], 
-                                                format!("addiu"));
+                                if let DisassembledInstruction::Mnemonic(ref mnemonic) = disassembly[0] {
+                                    ui.text_colored([0x30 as f32 / 255.0, 0xB5 as f32 / 255.0, 0xB8 as f32 / 255.0, 1.0], mnemonic);
+                                }
 
                                 // display operands
-                                // registers: #9872ab
                                 // constants: #abaa67
                                 ui.table_next_column();
-                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], format!("r0"));
-                                ui.same_line_with_spacing(0.0, 0.0);
-                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
-                                ui.same_line_with_spacing(0.0, 0.0);
-                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], format!("r1"));
-                                ui.same_line_with_spacing(0.0, 0.0);
-                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
-                                ui.same_line_with_spacing(0.0, 0.0);
-                                ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("0x1234"));
+
+                                for (index, ref operand) in disassembly.iter().enumerate().skip(1) {
+                                    match operand {
+                                        DisassembledInstruction::Register(rnum) => {
+                                            if *rnum == 0 { // make r0 look different
+                                                // r0: 8b699b
+                                                ui.text_colored([0x8B as f32 / 255.0, 0x69 as f32 / 255.0, 0x9B as f32 / 255.0, 1.0], n64::cpu::Cpu::abi_name(*rnum));
+                                            } else {
+                                                // registers: #9872ab
+                                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], n64::cpu::Cpu::abi_name(*rnum));
+                                            }
+                                        },
+
+                                        DisassembledInstruction::ConstantS16(imm) => {
+                                            // constants grey
+                                            ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("0x{:04X}", *imm));
+                                            comment.push_str(&format!("imm={}", *imm));
+                                        }
+
+                                        DisassembledInstruction::ShiftAmount(sa) => {
+                                            // constants grey
+                                            ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{}", *sa));
+                                        }
+
+                                        DisassembledInstruction::FpuRegister(fnum) => {
+                                            // fpu registers: #80532f
+                                            ui.text_colored([0x80 as f32 / 255.0, 0x53 as f32 / 255.0, 0x2F as f32 / 255.0, 1.0], format!("f{}", *fnum));
+                                        },
+
+                                        DisassembledInstruction::Address(address) => {
+                                            // addresses: #285678
+                                            let color = [0x28 as f32 / 255.0, 0x56 as f32 / 255.0, 0x78 as f32 / 255.0, 1.0];
+                                            if (*address as i32) as u64 == *address {
+                                                ui.text_colored(color, format!("0x{:08X}", *address as u32));
+                                            } else {
+                                                ui.text_colored(color, format!("0x{:016X}", *address));
+                                            }
+                                        },
+
+                                        DisassembledInstruction::OffsetRegister(offset, rnum) => {
+                                            // constants grey
+                                            ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("0x{:04X}", *offset));
+                                            comment.push_str(&format!("imm={}, address=?", *offset));
+                                            ui.same_line_with_spacing(0.0, 0.0);
+                                            ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("("));
+                                            ui.same_line_with_spacing(0.0, 0.0);
+                                            if *rnum == 0 { // make r0 look different
+                                                // r0: 8b699b
+                                                ui.text_colored([0x8B as f32 / 255.0, 0x69 as f32 / 255.0, 0x9B as f32 / 255.0, 1.0], n64::cpu::Cpu::abi_name(*rnum));
+                                            } else {
+                                                // registers: #9872ab
+                                                ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], n64::cpu::Cpu::abi_name(*rnum));
+                                            }
+                                            ui.same_line_with_spacing(0.0, 0.0);
+                                            ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(")"));
+                                        }
+
+                                        _ => {},
+                                    }
+
+                                    if index != disassembly.len() - 1 {
+                                        ui.same_line_with_spacing(0.0, 0.0);
+                                        ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
+                                        ui.same_line_with_spacing(0.0, 0.0);
+                                    }
+
+                                    // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
+                                    // ui.same_line_with_spacing(0.0, 0.0);
+                                    // ui.text_colored([0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0], format!("r1"));
+                                    // ui.same_line_with_spacing(0.0, 0.0);
+                                    // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!(", "));
+                                    // ui.same_line_with_spacing(0.0, 0.0);
+                                    // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("0x1234"));
+                                }
 
                                 // display comment
                                 ui.table_next_column();
-                                ui.text_colored([0.4, 0.4, 0.4, 1.0], format!("// do some math"));
+                                if comment.len() != 0 {
+                                    ui.text_colored([0.4, 0.4, 0.4, 1.0], format!("// {}", comment));
+                                }
 
                                 // next row
                                 virtual_address += 4;
