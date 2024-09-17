@@ -3,8 +3,12 @@ use cfg_if::cfg_if;
 #[cfg(all(feature="gui", feature="headless"))]
 compile_error!{"features \"gui\" and \"headless\" cannot be enabled together"}
 
-#[cfg(not(feature="headless"))]
-mod gui;
+cfg_if! {
+    if #[cfg(not(feature="headless"))] {
+        mod gui;
+        mod windows;
+    }
+}
 
 #[allow(unused_imports)]
 use tracing::{debug, error, warn, info};

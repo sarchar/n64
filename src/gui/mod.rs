@@ -119,19 +119,19 @@ impl<'a> AppWindow<'a> {
         Self {
             event_loop  : Some(event_loop),
             size        : window_size,
-            window      : window,
+            window,
             input_helper: WinitInputHelper::new(),
             event_log   : vec![],
-            gilrs       : gilrs,
+            gilrs,
             connected_gamepads: [None; 4],
             change_logging_func: change_logging,
 
             wgpu        : WgpuInfo {
                 //instance      : instance,
-                surface       : surface,
+                surface,
                 surface_config: config,
-                device        : device,
-                queue         : queue,
+                device,
+                queue,
 
                 needs_reconfigure: true,
             },
@@ -374,13 +374,17 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     let thread_comms = comms.clone();
     std::thread::spawn(move || {
         let system = create_system(thread_comms);
-        tx.send(system.rcp.borrow_mut().mi.get_update_channel()).unwrap();
+        let mi_update_channel = system.rcp.borrow_mut().mi.get_update_channel();
         let mut debugger = n64::debugger::Debugger::new(system);
+        tx.send(mi_update_channel).unwrap();
         debugger.run().unwrap();
     });
 
     // wait for the system to start and get the interrupt channel
+    // also benefit of waiting for this message is that the debugger has been created
+    // (and therefore the debugging channel is available to window constructors)
     comms.mi_interrupts_tx = Some(rx.recv().unwrap());
+    assert!(comms.debugger.read().unwrap().is_some());
 
     // start the frontend
     let mut app = T::create(&appwnd, comms.clone(), args.clone());

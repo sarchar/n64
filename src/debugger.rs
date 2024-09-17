@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::*;
+
 use crossbeam::channel::{self, Receiver, Sender};
 use mips::{InterruptUpdate, InterruptUpdateMode};
 
@@ -58,14 +59,14 @@ pub enum DebuggerCommandResponse {
 
 pub struct DebuggerCommand {
     pub command_request: DebuggerCommandRequest,
-    pub response_channel: Sender<DebuggerCommandResponse>,
+    pub response_channel: Option<Sender<DebuggerCommandResponse>>,
 }
 
 pub struct Debugger {
     exit_requested: bool,
     cpu_running: bool,
     cpu_run_for: u64,
-    active: bool,
+    num_open_windows: u64,
 
     ctrlc_count: u32,
 
@@ -156,16 +157,25 @@ impl Debugger {
         // system.cpu.borrow_mut().bus = Rc::new(RefCell::new(DebuggerBus::new(old_bus, breakpoints.clone())));
 
         Debugger {
-            exit_requested: false,
-            cpu_running   : true,
-            cpu_run_for   : 0,    // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
-            active        : true,
-            ctrlc_count   : 0,
-            cpu_run_til   : None,
-            // cpu_running,
+            exit_requested  : false,
+            cpu_running     : true,
+            cpu_run_for     : 0,    // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
+            num_open_windows: 0,
+            ctrlc_count     : 0,
+            cpu_run_til     : None,
             breakpoints,
             system,
             command_receiver,
+        }
+    }
+
+    // blocking call to transmit a command request on the provided communications channel
+    pub fn send_command(user_comms: &SystemCommunication, cmd: DebuggerCommand) -> Result<(), ()> {
+        if let Some(ref tx) = user_comms.debugger.read().unwrap().as_ref() {
+            tx.send(cmd).unwrap();
+            Ok(())
+        } else {
+            Err(())
         }
     }
 
@@ -259,8 +269,8 @@ impl Debugger {
     }
 
     fn update(&mut self) {
-        // active is true when at least 1 debugging window is open
-        if !self.active { return; }
+        // active when at least 1 debugging window is open
+        if self.system.comms.debugger_windows.load(Ordering::Relaxed) == 0 { return; }
 
         'next_command: while let Ok(req) = self.command_receiver.try_recv() {
             match req.command_request {
@@ -281,7 +291,9 @@ impl Debugger {
                     };
                     let running = self.cpu_running;
                     let cpu_state = CpuStateInfo { next_instruction_pc, running, instruction_memory };
-                    req.response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
+                    if let Some(response_channel) = req.response_channel {
+                        response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
+                    }
                 },
 
                 DebuggerCommandRequest::StopCpu => {
@@ -313,7 +325,9 @@ impl Debugger {
                         }
                     };
 
-                    req.response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
+                    if let Some(response_channel) = req.response_channel {
+                        let _ = response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
+                    }
                 }
             }
         }

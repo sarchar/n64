@@ -214,6 +214,7 @@ pub struct SystemCommunication {
     // communication with the debugger
     // TODO don't like this RwLock here
     pub debugger: Arc<RwLock<Option<crossbeam::channel::Sender<debugger::DebuggerCommand>>>>,
+    pub debugger_windows: Arc<AtomicU32>,
 
     // tweakables -- fun for geeks
     pub tweakables: Arc<RwLock<Tweakables>>,
@@ -238,6 +239,7 @@ impl SystemCommunication {
             settings          : Arc::new(RwLock::new(Settings::default())),
             cpu_throttle      : Arc::new(AtomicU32::new(1)),
             debugger          : Arc::new(RwLock::new(None)),
+            debugger_windows  : Arc::new(AtomicU32::new(0)),
             tweakables        : Arc::new(RwLock::new(Tweakables::default())),
         }
     }
@@ -256,6 +258,24 @@ impl SystemCommunication {
 
     pub fn reset_prefetch_counter(&mut self) -> usize {
         self.prefetch_counter.reset()
+    }
+
+    pub fn increment_debugger_windows(&mut self) -> u32 {
+        loop {
+            let value = self.debugger_windows.load(Ordering::Relaxed);
+            if self.debugger_windows.compare_exchange(value, value + 1, Ordering::Relaxed, Ordering::Relaxed).is_ok_and(|v| v == value) {
+                return value;
+            }
+        }
+    }
+
+    pub fn decrement_debugger_windows(&mut self) -> u32 {
+        loop {
+            let value = self.debugger_windows.load(Ordering::Relaxed);
+            if self.debugger_windows.compare_exchange(value, value.saturating_sub(1), Ordering::Relaxed, Ordering::Relaxed).is_ok_and(|v| v == value) {
+                return value;
+            }
+        }
     }
 }
 
