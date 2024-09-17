@@ -9019,7 +9019,7 @@ impl Cpu {
 
             0b000_100 => {
                 if rs == 0 && rt == 0 { // branch always psuedomnemonic
-                    push_mnemonic(&mut result, "bra");
+                    push_mnemonic(&mut result, "b");
                     let branch_target = base_address + 4 + ((imm as u64) << 2);
                     result.push(DisassembledInstruction::Address(branch_target));
                 } else if rt == 0 { // test against r0 psuedomnemonic

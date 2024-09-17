@@ -1502,8 +1502,9 @@ impl App for Game {
                         tx.send(request).unwrap();
                     }
                 }
-
                 ui.same_line();
+
+                // ui.input_int("", &mut self.step_cycle_count)
                 if ui.button("Step") {
                     let request = debugger::DebuggerCommand {
                         command_request: debugger::DebuggerCommandRequest::StepCpu(1),
@@ -1747,7 +1748,7 @@ impl App for Game {
                                 // display comment
                                 ui.table_next_column();
                                 if comment.len() != 0 {
-                                    ui.text_colored([0.4, 0.4, 0.4, 1.0], format!("// {}", comment));
+                                    ui.text_colored([0.4, 0.4, 0.4, 1.0], format!("; {}", comment));
                                 }
 
                                 // next row
