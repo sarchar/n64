@@ -1,11 +1,9 @@
-use atomic_counter::AtomicCounter;
 use crossbeam::channel::{self, Receiver, Sender};
 
 use crate::*;
-use crate::gui::game::Utils;
 use n64::cpu::{self, DisassembledInstruction};
 use n64::debugger;
-use gui::game::GameWindow;
+use gui::game::{GameWindow, Utils};
 
 const BREAKPOINT_COLOR   : [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const CURSOR_COLOR       : [f32; 4] = [0x59 as f32 / 255.0, 0x57 as f32 / 255.0, 0x51 as f32 / 255.0, 1.0]; // #595751
@@ -48,6 +46,9 @@ pub struct Listing {
     // returned CPU state
     cpu_state: debugger::CpuStateInfo,
 
+    // use ABI register names
+    use_abi_names: bool,
+    
     // show table resizers
     show_resizers: bool,
 }
@@ -58,7 +59,7 @@ impl Listing {
         
         comms.increment_debugger_windows();
         
-        Listing {
+        Self {
             comms,
             debugging_request_response_rx,
             debugging_request_response_tx,
@@ -69,6 +70,7 @@ impl Listing {
             cursor_length: 0,
             num_instructions_displayed: 0,
             cpu_state: debugger::CpuStateInfo::default(),
+            use_abi_names: true,
             show_resizers: false,
         }
     }
@@ -117,6 +119,8 @@ impl GameWindow for Listing {
                             }
                         }
                     }
+
+                    _ => {},
                 }
             } 
         }
@@ -185,9 +189,12 @@ impl GameWindow for Listing {
                 self.listing_memory.clear();
             }
             
+            // draw the `A` button
+            Utils::flag_button(ui, Some(&mut self.use_abi_names), "A", Some("Display registers using the ABI names"));
+            ui.same_line();
+
             // draw the `R` button
             Utils::flag_button(ui, Some(&mut self.show_resizers), "R", Some("Show column resizers"));
-           
             ui.separator();
                 
             ui.group(|| {
@@ -227,7 +234,7 @@ impl GameWindow for Listing {
                     let line_count = (available_area[1] / line_height) as u32;
                     self.num_instructions_displayed = line_count + 1;
 
-                    if ui.is_mouse_clicked(imgui::MouseButton::Left) {
+                    if ui.is_mouse_clicked(imgui::MouseButton::Left) && ui.is_window_hovered() {
                         let mouse_pos = ui.io().mouse_pos;
                         let current_cursor = ui.cursor_screen_pos();
                         if mouse_pos[1] >= current_cursor[1] {
@@ -335,7 +342,7 @@ impl GameWindow for Listing {
                             ui.text_colored(OPCODE_COLOR, format!("{:08X}", inst));
 
                             // disassemble instruction
-                            let disassembly = cpu::Cpu::disassemble(virtual_address, *inst, true);
+                            let disassembly = cpu::Cpu::disassemble(virtual_address, *inst);
 
                             // display instruction mnemonic
                             ui.table_next_column();
@@ -351,10 +358,16 @@ impl GameWindow for Listing {
                             for (index, ref operand) in disassembly.iter().enumerate().skip(1) {
                                 match operand {
                                     DisassembledInstruction::Register(rnum) => {
-                                        if *rnum == 0 { // make r0 look different
-                                            ui.text_colored(R0_COLOR, n64::cpu::Cpu::abi_name(*rnum));
+                                        let reg_name = if self.use_abi_names {
+                                            n64::cpu::Cpu::abi_name(*rnum)
                                         } else {
-                                            ui.text_colored(REGISTERS_COLOR, n64::cpu::Cpu::abi_name(*rnum));
+                                            n64::cpu::Cpu::register_name(*rnum)
+                                        };
+
+                                        if *rnum == 0 { // make r0 look different
+                                            ui.text_colored(R0_COLOR, reg_name);
+                                        } else {
+                                            ui.text_colored(REGISTERS_COLOR, reg_name);
                                         }
                                     },
 
@@ -384,11 +397,19 @@ impl GameWindow for Listing {
                                         ui.same_line_with_spacing(0.0, 0.0);
                                         ui.text_colored(TEXT_COLOR, format!("("));
                                         ui.same_line_with_spacing(0.0, 0.0);
-                                        if *rnum == 0 { // make r0 look different
-                                            ui.text_colored(R0_COLOR, n64::cpu::Cpu::abi_name(*rnum));
+
+                                        let reg_name = if self.use_abi_names {
+                                            n64::cpu::Cpu::abi_name(*rnum)
                                         } else {
-                                            ui.text_colored(REGISTERS_COLOR, n64::cpu::Cpu::abi_name(*rnum));
+                                            n64::cpu::Cpu::register_name(*rnum)
+                                        };
+
+                                        if *rnum == 0 { // make r0 look different
+                                            ui.text_colored(R0_COLOR, reg_name);
+                                        } else {
+                                            ui.text_colored(REGISTERS_COLOR, reg_name);
                                         }
+
                                         ui.same_line_with_spacing(0.0, 0.0);
                                         ui.text_colored(TEXT_COLOR, format!(")"));
 

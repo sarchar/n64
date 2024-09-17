@@ -42,6 +42,8 @@ pub enum DebuggerCommandRequest {
     // instead of having to wait for a response on where the PC is, and then request that memory
     // for listing displays, this flag tells the debugger to return data at an address offset from the PC
     GetCpuState(Option<(i64, usize)>),     // (offset, size in words)
+    // get the main cpu registers
+    GetCpuRegisters,
     // stop a running Cpu
     StopCpu,
     // start the Cpu
@@ -54,6 +56,7 @@ pub enum DebuggerCommandRequest {
 
 pub enum DebuggerCommandResponse {
     CpuState(CpuStateInfo),
+    CpuRegisters([u64; 32]),
     ReadBlock(u64, Option<Vec<u32>>), // id, data
 }
 
@@ -295,6 +298,14 @@ impl Debugger {
                         response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
                     }
                 },
+
+                DebuggerCommandRequest::GetCpuRegisters => {
+                    if let Some(response_channel) = req.response_channel {
+                        let cpu = self.system.cpu.borrow_mut();
+                        let cpu_registers: [u64; 32] = cpu.regs_copy();
+                        response_channel.send(DebuggerCommandResponse::CpuRegisters(cpu_registers)).unwrap();
+                    }
+                }
 
                 DebuggerCommandRequest::StopCpu => {
                     self.cpu_running = false;

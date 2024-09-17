@@ -833,9 +833,13 @@ impl Cpu {
         &self.gpr
     }
 
+    pub fn regs_copy(&self) -> [u64; 32] {
+        self.gpr.clone()
+    }
+
     pub fn abi_name(i: usize) -> &'static str {
         const NAMES: [&str; 32] = [
-            "r0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+            "zr", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
             "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "s8", "ra"
         ];
 
@@ -8789,7 +8793,7 @@ impl Cpu {
     // base_address required for computing relative branches
     // return value is a vector of instruction elements, the first of which is the instruction
     // mnemonic, and the rest are the comma separated arguments
-    pub fn disassemble(base_address: u64, opcode: u32, use_abi_names: bool) -> Vec<DisassembledInstruction> {
+    pub fn disassemble(base_address: u64, opcode: u32) -> Vec<DisassembledInstruction> {
         let op     = opcode >> 26;
         let rs     = ((opcode >> 21) & 0x1F) as usize;
         let rt     = ((opcode >> 16) & 0x1F) as usize;
@@ -8799,14 +8803,6 @@ impl Cpu {
         let imm    = (opcode & 0xFFFF) as i16;
         let target = opcode & 0x03FFFFFF;
 
-        // let reg_name = |r| {
-        //     if use_abi_names {
-        //         Cpu::abi_name(r)
-        //     } else {
-        //         Cpu::register_name(r)
-        //     }
-        // };
-
         let mut result = Vec::new();
         
         let push_mnemonic = |result: &mut Vec<_>, mn| {
@@ -8814,47 +8810,47 @@ impl Cpu {
         };
 
         // nop
-        let mut no_type = |result: &mut Vec<_>, mn| {
+        let no_type = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
         };
 
         // j rel32
-        let mut j_type = |result: &mut Vec<_>, mn| {
+        let j_type = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             let dest = ((base_address + 4) & 0xFFFF_FFFF_F000_0000) | ((target as u64) << 2);
             result.push(DisassembledInstruction::Address(dest));
         };
 
         // rt, imm
-        let mut i_type_rt = |result: &mut Vec<_>, mn| {
+        let i_type_rt = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
         // rt, imm(rs)
-        let mut i_type_rt_base = |result: &mut Vec<_>, mn| {
+        let i_type_rt_base = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
         // ft, imm(rs)
-        let mut i_type_ft_base = |result: &mut Vec<_>, mn| {
+        let i_type_ft_base = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::FpuRegister(rt));
             result.push(DisassembledInstruction::OffsetRegister(imm, rs));
         };
 
         // rs, imm
-        let mut i_type1_rs = |result: &mut Vec<_>, mn| {
+        let i_type1_rs = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rs));
             result.push(DisassembledInstruction::ConstantS16(imm));
         };
 
         // rs, rt, address (only for branches)
-        let mut i_type_rs_rt = |result: &mut Vec<_>, mn| {
+        let i_type_rs_rt = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rs));
             result.push(DisassembledInstruction::Register(rt));
@@ -8864,7 +8860,7 @@ impl Cpu {
         };
 
         // rt, rs, imm
-        let mut i_type_rt_rs = |result: &mut Vec<_>, mn| {
+        let i_type_rt_rs = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::Register(rs));
@@ -8872,40 +8868,40 @@ impl Cpu {
         };
 
         // rd
-        let mut r_type_rd = |result: &mut Vec<_>, mn| {
+        let r_type_rd = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rd));
         };
 
         // rs
-        let mut r_type_rs = |result: &mut Vec<_>, mn| {
+        let r_type_rs = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rs));
         };
 
         // rd, rs
-        let mut r_type_rd_rs = |result: &mut Vec<_>, mn| {
+        let r_type_rd_rs = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rd));
             result.push(DisassembledInstruction::Register(rs));
         };
 
         // rs, rt
-        let mut r_type_rs_rt = |result: &mut Vec<_>, mn| {
+        let r_type_rs_rt = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rs));
             result.push(DisassembledInstruction::Register(rt));
         };
 
         // rt, rd
-        let mut r_type_rt_rd = |result: &mut Vec<_>, mn| {
+        let r_type_rt_rd = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             result.push(DisassembledInstruction::Register(rd));
         };
 
         // rd, rt, rs
-        let mut r_type_rd_rt_rs = |result: &mut Vec<_>, mn| {
+        let r_type_rd_rt_rs = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rd));
             result.push(DisassembledInstruction::Register(rt));
@@ -8913,7 +8909,7 @@ impl Cpu {
         };
 
         // rd, rs, rt
-        let mut r_type_rd_rs_rt = |result: &mut Vec<_>, mn| {
+        let r_type_rd_rs_rt = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rd));
             result.push(DisassembledInstruction::Register(rs));
@@ -8921,7 +8917,7 @@ impl Cpu {
         };
 
         // rd, rt, sa
-        let mut r_type_rd_rt_sa = |result: &mut Vec<_>, mn| {
+        let r_type_rd_rt_sa = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rd));
             result.push(DisassembledInstruction::Register(rt));

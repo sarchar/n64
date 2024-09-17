@@ -21,6 +21,7 @@ use crossbeam::channel::{self, Receiver, Sender};
 
 use crate::*;
 use crate::windows::listing::Listing;
+use crate::windows::registers::Registers;
 use gui::{App, AppWindow};
 
 use n64::{SystemCommunication, ButtonState, debugger};
@@ -951,6 +952,7 @@ impl App for Game {
 
         // TEMP
         ret.windows.push(Box::new(Listing::new(comms.clone())));
+        ret.windows.push(Box::new(Registers::new(comms.clone())));
 
         ret
     }
@@ -1342,7 +1344,10 @@ impl App for Game {
                 ui.checkbox("Tweakables", &mut self.tweakables_window_opened);
                 if let Some(debugger_windows_token) = ui.begin_menu("Debugger") {
                     if ui.menu_item("New Listing") {
-                        println!("new listing window");
+                        self.windows.push(Box::new(Listing::new(self.comms.clone())));
+                    }
+                    if ui.menu_item("New Registers") {
+                        self.windows.push(Box::new(Registers::new(self.comms.clone())));
                     }
                     debugger_windows_token.end();
                 }
