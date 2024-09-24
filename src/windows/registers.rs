@@ -11,13 +11,23 @@ pub struct Registers {
     debugging_request_response_rx: Receiver<debugger::DebuggerCommandResponse>,
     debugging_request_response_tx: Sender<debugger::DebuggerCommandResponse>,
 
+    // register values
     register_values: [u64; 32],
     register_value_strings: Vec<String>,
+
+    // highlight individual registers
     highlighted_registers: [Option<HighlightInfo>; 32],
     
+    // display registers using ABI names
     use_abi_names: bool,
+
+    // display full 64-bit values or truncate to 32-bit
     show_64bit_regs: bool,
     
+    // display registers in 1, 2, 4, or 8 columns
+    num_columns: usize,
+
+    // internal state
     requested_register_state: bool,
     requested_cpu_state: bool,
 }
@@ -26,7 +36,6 @@ const HIGHLIGHT_COLORS: [[f32; 4]; 3] = [
     [0.6, 0.0, 0.0, 1.0],
     [0.0, 0.6, 0.0, 1.0],
     [0.0, 0.0, 0.6, 1.0],
-    
 ];
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -56,6 +65,7 @@ impl Registers {
             highlighted_registers: [None; 32],
             use_abi_names: true,
             show_64bit_regs: true,
+            num_columns: 1,
             requested_register_state: false,
             requested_cpu_state: false,
         }    
@@ -157,20 +167,30 @@ impl GameWindow for Registers {
               .build(|| {
             Utils::flag_button(ui, Some(&mut self.use_abi_names), "A", Some("Display registers using the ABI names"));
             ui.same_line();
+
             Utils::flag_button(ui, Some(&mut self.show_64bit_regs), "64", Some("Toggle between 64-bit and 32-bit-truncated"));
+            ui.same_line();
+
+            if Utils::flag_button(ui, None, format!("{}", self.num_columns), Some("Layout registers in this many columns")) {
+                match self.num_columns {
+                    8 => { self.num_columns = 1; },
+                    _ => { self.num_columns *= 2; },
+                }
+            }
             ui.separator();
 
             // calculate the width of a label (always 3/4 chars)
             let label_size = ui.calc_text_size(if self.use_abi_names { "xy:" } else { "xyz:" });
 
             // along with internal padding, divide up the content width into 4 sections to compute the text box width
+            let column_padding = 18.0; //unsafe { ui.style().frame_padding[0] };
             let region_size = ui.content_region_avail();
-            let cols = if self.show_64bit_regs { 2 } else { 4 };
-            let text_input_size = (region_size[0] - ((cols as f32) - 1.0) * unsafe { ui.style().frame_padding[0] }) / (cols as f32) - label_size[0];
+            let text_input_size = (region_size[0] - ((self.num_columns as f32) - 1.0) * column_padding) / (self.num_columns as f32) - label_size[0];
+            let rows = 32 / self.num_columns;
 
-            for row in 0..if self.show_64bit_regs { 16 } else { 8 } {
-                for col in 0..cols {
-                    let rnum = row * cols + col;
+            for row in 0..rows {
+                for col in 0..self.num_columns {
+                    let rnum = row * self.num_columns + col;
                 
                     if self.use_abi_names {
                         ui.text(format!("{:2}:", Cpu::abi_name(rnum)));
@@ -179,6 +199,7 @@ impl GameWindow for Registers {
                     }
                     ui.same_line_with_spacing(0.0, 0.0);
 
+                    // determine bg color for the text input
                     let mut style_tokens = Vec::new();
                     if let Some(ref mut hl) = self.highlighted_registers[rnum] {
                         style_tokens.push(ui.push_style_color(imgui::StyleColor::FrameBg, hl.color));
@@ -189,7 +210,9 @@ impl GameWindow for Registers {
                     }
 
                     let token = ui.push_item_width(text_input_size);
-                    if ui.input_text("##r1", &mut self.register_value_strings[rnum as usize])
+
+                    // id for input_text needs to be unique to allow editing to work
+                    if ui.input_text(format!("##r{}", rnum), &mut self.register_value_strings[rnum as usize])
                            .chars_hexadecimal(true)
                            .enter_returns_true(true)
                            .build() {
@@ -206,8 +229,9 @@ impl GameWindow for Registers {
                         st.end();
                     }
 
-                    if col != (cols - 1) {
-                        ui.same_line();
+                    if col != (self.num_columns - 1) {
+                        // ui.same_line();
+                        ui.same_line_with_spacing(0.0, column_padding);
                     }
                 }
             }

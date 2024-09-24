@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crossbeam::channel::{self, Receiver, Sender};
 
 use crate::*;
@@ -30,6 +32,7 @@ pub struct Listing {
 
     // true if GetCpuState has been requested and we're waiting
     requested_cpu_state: bool,
+    requested_breakpoints: bool,
 
     // when listing_address is Some(), we're looking at a specific address
     // when None, following PC
@@ -42,9 +45,13 @@ pub struct Listing {
     
     // the number of instructions requested is delayed by 1 request due to the calculation of the window size
     num_instructions_displayed: u32,
+    instruction_offset: i64,
 
     // returned CPU state
     cpu_state: debugger::CpuStateInfo,
+
+    // breakpoints
+    breakpoints: HashMap<u64, debugger::BreakpointInfo>, // virtual address to breakpoint id map
 
     // use ABI register names
     use_abi_names: bool,
@@ -64,37 +71,37 @@ impl Listing {
             debugging_request_response_rx,
             debugging_request_response_tx,
             requested_cpu_state: false,
+            requested_breakpoints: false,
             listing_address: None,
             listing_memory: Vec::new(),
             cursor_address: None,
             cursor_length: 0,
             num_instructions_displayed: 0,
+            instruction_offset: 0,
             cpu_state: debugger::CpuStateInfo::default(),
+            breakpoints: HashMap::new(),
             use_abi_names: true,
             show_resizers: false,
         }
     }
 
-    fn listing_start_address(&self, instruction_offset: i64) -> u64 {
+    fn listing_start_address(&self) -> u64 {
         if self.listing_address.is_none() {
-            ((self.cpu_state.next_instruction_pc as i64) + (instruction_offset * 4)) as u64
+            ((self.cpu_state.next_instruction_pc as i64) + (self.instruction_offset * 4)) as u64
         } else {
-            ((self.listing_address.unwrap() as i64) + (instruction_offset * 4)) as u64
+            ((self.listing_address.unwrap() as i64) + (self.instruction_offset * 4)) as u64
         }
     }
-}
 
-impl GameWindow for Listing {
-    fn render_ui(&mut self, ui: &imgui::Ui) -> bool {
-        let mut opened = true;
+    fn update(&mut self, _delta_time: f32) {
+        self.instruction_offset = -(self.num_instructions_displayed as i64) / 2 + 1;
 
         // get cpu state
-        let instruction_offset = -(self.num_instructions_displayed as i64) / 2 + 1;
         if !self.requested_cpu_state {
             let request = debugger::DebuggerCommand {
                 // the number of instructions displayed is one frame behind a resize--oh well
                 command_request: if self.listing_address.is_none() {
-                    debugger::DebuggerCommandRequest::GetCpuState(Some((instruction_offset, self.num_instructions_displayed as usize)))
+                    debugger::DebuggerCommandRequest::GetCpuState(Some((self.instruction_offset, self.num_instructions_displayed as usize)))
                 } else {
                     debugger::DebuggerCommandRequest::GetCpuState(None)
                 },
@@ -102,48 +109,51 @@ impl GameWindow for Listing {
             };
 
             self.requested_cpu_state = debugger::Debugger::send_command(&self.comms, request).is_ok();
-        } else {
-            while let Ok(response) = self.debugging_request_response_rx.try_recv() {
-                match response {
-                    debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
-                        self.cpu_state = cpu_state;
-                        self.requested_cpu_state = false;
-                    },
+        } 
 
-                    debugger::DebuggerCommandResponse::ReadBlock(id, memory) => {
-                        if id == 0 {
-                            if let Some(memory) = memory {
-                                self.listing_memory = memory;
-                            } else {
-                                self.listing_memory.clear();
-                            }
-                        }
-                    }
-
-                    _ => {},
-                }
-            } 
-        }
-
-        if ui.io().mouse_wheel != 0.0 {
-            // if switching from track-pc to not...
-            if self.listing_address.is_none() {
-                self.listing_address = Some(self.cpu_state.next_instruction_pc);
-            }
-
-            // increment address address by mouse_wheel count
-            self.listing_address = Some((self.listing_address.unwrap() as i64 + (-ui.io().mouse_wheel as i64) * 4) as u64);
-
-            // send the request-memory command
-            let address = (self.listing_address.unwrap() as i64) + (instruction_offset << 2);
-            let command = debugger::DebuggerCommand {
-                command_request: debugger::DebuggerCommandRequest::ReadBlock(0, address as u64, self.num_instructions_displayed as usize),
+        if !self.requested_breakpoints {
+            let request = debugger::DebuggerCommand {
+                // the number of instructions displayed is one frame behind a resize--oh well
+                command_request:  debugger::DebuggerCommandRequest::GetBreakpoints,
                 response_channel: Some(self.debugging_request_response_tx.clone()),
             };
 
-            let _ = debugger::Debugger::send_command(&self.comms, command);
+            self.requested_breakpoints = debugger::Debugger::send_command(&self.comms, request).is_ok();
         }
 
+        while let Ok(response) = self.debugging_request_response_rx.try_recv() {
+            match response {
+                debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
+                    self.cpu_state = cpu_state;
+                    self.requested_cpu_state = false;
+                },
+
+                debugger::DebuggerCommandResponse::ReadBlock(id, memory) => {
+                    if id == 0 {
+                        if let Some(memory) = memory {
+                            self.listing_memory = memory;
+                        } else {
+                            self.listing_memory.clear();
+                        }
+                    }
+                },
+
+                debugger::DebuggerCommandResponse::Breakpoints(breakpoints) => {
+                    self.breakpoints = breakpoints;
+                    self.requested_breakpoints = false;
+                },
+
+                _ => {},
+            }
+        } 
+    }
+}
+
+impl GameWindow for Listing {
+    fn render_ui(&mut self, ui: &imgui::Ui) -> bool {
+        self.update(ui.io().delta_time);
+
+        let mut opened = true;
         let window = ui.window("Listing");
         window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
               .position([0.0, 0.0], imgui::Condition::FirstUseEver)
@@ -152,6 +162,27 @@ impl GameWindow for Listing {
               // run outside of the content area of the window, which means a scrollbar will appear...so disable it
               .flags(imgui::WindowFlags::NO_SCROLLBAR | imgui::WindowFlags::NO_SCROLL_WITH_MOUSE)
               .build(|| {
+
+            let mouse_pos = ui.io().mouse_pos;
+
+            if ui.is_window_focused() && ui.io().mouse_wheel != 0.0 {
+                // if switching from track-pc to not...
+                if self.listing_address.is_none() {
+                    self.listing_address = Some(self.cpu_state.next_instruction_pc);
+                }
+
+                // increment address address by mouse_wheel count
+                self.listing_address = Some((self.listing_address.unwrap() as i64 + (-ui.io().mouse_wheel as i64) * 4) as u64);
+
+                // send the request-memory command
+                let address = (self.listing_address.unwrap() as i64) + (self.instruction_offset << 2);
+                let command = debugger::DebuggerCommand {
+                    command_request: debugger::DebuggerCommandRequest::ReadBlock(0, address as u64, self.num_instructions_displayed as usize),
+                    response_channel: Some(self.debugging_request_response_tx.clone()),
+                };
+
+                let _ = debugger::Debugger::send_command(&self.comms, command);
+            }
 
             if self.cpu_state.running && ui.button("Stop") {
                 let command = debugger::DebuggerCommand {
@@ -235,13 +266,13 @@ impl GameWindow for Listing {
                     self.num_instructions_displayed = line_count + 1;
 
                     if ui.is_mouse_clicked(imgui::MouseButton::Left) && ui.is_window_hovered() {
-                        let mouse_pos = ui.io().mouse_pos;
                         let current_cursor = ui.cursor_screen_pos();
-                        if mouse_pos[1] >= current_cursor[1] {
+                        // clicking in the icons column shouldn't move the cursor
+                        if (mouse_pos[0] >= current_cursor[0] + line_height) && (mouse_pos[1] >= current_cursor[1]) {
                             let row = (mouse_pos[1] - current_cursor[1]) / line_height;
                             // println!("selected row {}", row);
 
-                            let start = self.listing_start_address(instruction_offset);
+                            let start = self.listing_start_address();
                             let selected_address = start + (row as u64) * 4;
                             // println!("selected address ${:08X}", selected_address);
 
@@ -265,7 +296,7 @@ impl GameWindow for Listing {
                     }
 
                     // get the starting address of the listing
-                    let mut virtual_address = self.listing_start_address(instruction_offset);
+                    let mut virtual_address = self.listing_start_address();
 
                     // now display the instructions if the memory is valid
                     let instruction_memory: Option<&Vec<u32>> = if self.listing_address.is_none() {
@@ -278,7 +309,7 @@ impl GameWindow for Listing {
                         for inst in memory.iter() {
                             // start the first column so that cursor is in the right place
                             ui.table_next_column();
-                            let mut pos = ui.cursor_screen_pos();
+                            let mut cursor_pos = ui.cursor_screen_pos();
                             let mut width = available_area[0];
 
                             // let window_alpha = ui.style_color(StyleColor::WindowBg)[3];
@@ -297,22 +328,61 @@ impl GameWindow for Listing {
                                 }
                             }
 
+                            let mouse_in_icons_cell = (mouse_pos[0] >= cursor_pos[0] && mouse_pos[0] < (cursor_pos[0] + line_height))
+                                                      && (mouse_pos[1] >= cursor_pos[1] && mouse_pos[1] < (cursor_pos[1] + line_height));
+
+                            // if the user clicked in the icons cell, set/toggle/unset a breakpoint
+                            if ui.is_mouse_clicked(imgui::MouseButton::Left) && mouse_in_icons_cell {
+                                if let Some(breakpoint_info) = self.breakpoints.get_mut(&virtual_address) {
+                                    // toggle the breakpoint
+                                    breakpoint_info.enable = !breakpoint_info.enable;
+                                    
+                                    let command = debugger::DebuggerCommand {
+                                        command_request: debugger::DebuggerCommandRequest::EnableBreakpoint(breakpoint_info.address, breakpoint_info.enable),
+                                        response_channel: None,
+                                    };
+
+                                    let _ = debugger::Debugger::send_command(&self.comms, command);
+                                } else {
+                                    // create the breakpoint
+                                    let breakpoint_info = debugger::BreakpointInfo {
+                                        address: virtual_address,
+                                        mode   : debugger::BP_EXEC,
+                                        enable : true,
+                                        ..Default::default()
+                                    };
+
+                                    let command = debugger::DebuggerCommand {
+                                        command_request: debugger::DebuggerCommandRequest::SetBreakpoint(breakpoint_info.clone()),
+                                        response_channel: None,
+                                    };
+
+                                    let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                                    self.breakpoints.insert(virtual_address, breakpoint_info);
+                                }
+                            }
+
                             // then breakpoints
-                            if virtual_address == self.cpu_state.next_instruction_pc + 8 {
-                                let center = [pos[0] + line_height / 2.0, pos[1] + line_height / 2.0];
+                            let (is_breakpoint, is_enabled, breakpoint_memory) = self.breakpoints.get(&virtual_address).map_or_else(|| (false, false, None), |info| {
+                                if (info.mode & debugger::BP_EXEC) != 0 { (true, info.enable, Some(info.memory)) } else { (true, info.enable, None) }
+                            });
+
+                            if is_breakpoint {
+                                let center = [cursor_pos[0] + line_height / 2.0, cursor_pos[1] + line_height / 2.0];
                                 let radius = (line_height - 4.0) / 2.0;
-                                line_fill_color = Some([BREAKPOINT_COLOR[0], BREAKPOINT_COLOR[1], BREAKPOINT_COLOR[2], 0.2]);
-                                draw_list.add_circle(center, radius, BREAKPOINT_COLOR).filled(true).build();
+                                // line_fill_color = Some([BREAKPOINT_COLOR[0], BREAKPOINT_COLOR[1], BREAKPOINT_COLOR[2], 0.2]);
+                                draw_list.add_circle(center, radius, BREAKPOINT_COLOR).filled(is_enabled).build();
                             }
 
                             // then PC arrow
                             if virtual_address == self.cpu_state.next_instruction_pc {
                                 let midy = line_height / 2.0;
                                 let points = vec![
-                                    [pos[0] + 2.0              , pos[1] + midy - 2.0],
-                                    [pos[0] + line_height - 2.0, pos[1] + midy - 2.0],
-                                    [pos[0] + line_height - 2.0, pos[1] + midy + 2.0],
-                                    [pos[0] + 2.0              , pos[1] + midy + 2.0],
+                                    [cursor_pos[0] + 2.0              , cursor_pos[1] + midy - 2.0],
+                                    [cursor_pos[0] + line_height - 2.0, cursor_pos[1] + midy - 2.0],
+                                    [cursor_pos[0] + line_height - 2.0, cursor_pos[1] + midy + 2.0],
+                                    [cursor_pos[0] + 2.0              , cursor_pos[1] + midy + 2.0],
                                 ];
                                 line_fill_color = Some([PC_COLOR[0], PC_COLOR[1], PC_COLOR[2], 0.2]);
                                 draw_list.add_polyline(points, PC_COLOR).filled(true).build();
@@ -326,9 +396,9 @@ impl GameWindow for Listing {
                             }
 
                             // shift X over
-                            pos[0] += line_height;
+                            cursor_pos[0] += line_height;
                             width -= line_height;
-                            ui.set_cursor_screen_pos(pos);
+                            ui.set_cursor_screen_pos(cursor_pos);
 
                             // let height = ui.calc_text_size("X")[1] + ui.style().frame_padding[1];
 
@@ -336,13 +406,13 @@ impl GameWindow for Listing {
                             // ui.text_colored([0.8, 0.8, 0.8, 1.0], format!("{:08X}: ${:08X}", virtual_address as u32, inst));
                             ui.text_colored(ADDRESS_COLOR, format!("{:08X}", virtual_address as u32));
 
-                            
                             // display opcode
+                            let opcode = if let Some(memory) = breakpoint_memory { memory } else { *inst };
                             ui.table_next_column();
-                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", inst));
+                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", opcode));
 
-                            // disassemble instruction
-                            let disassembly = cpu::Cpu::disassemble(virtual_address, *inst);
+                            // disassembly instruction
+                            let disassembly = cpu::Cpu::disassemble(virtual_address, opcode);
 
                             // display instruction mnemonic
                             ui.table_next_column();

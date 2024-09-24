@@ -22,6 +22,7 @@ use crossbeam::channel::{self, Receiver, Sender};
 use crate::*;
 use crate::windows::listing::Listing;
 use crate::windows::registers::Registers;
+use crate::windows::breakpoints::Breakpoints;
 use gui::{App, AppWindow};
 
 use n64::{SystemCommunication, ButtonState, debugger};
@@ -953,6 +954,7 @@ impl App for Game {
         // TEMP
         ret.windows.push(Box::new(Listing::new(comms.clone())));
         ret.windows.push(Box::new(Registers::new(comms.clone())));
+        ret.windows.push(Box::new(Breakpoints::new(comms.clone())));
 
         ret
     }
@@ -1348,6 +1350,9 @@ impl App for Game {
                     }
                     if ui.menu_item("New Registers") {
                         self.windows.push(Box::new(Registers::new(self.comms.clone())));
+                    }
+                    if ui.menu_item("Breakpoints") {
+                        self.windows.push(Box::new(Breakpoints::new(self.comms.clone())));
                     }
                     debugger_windows_token.end();
                 }
@@ -1928,7 +1933,7 @@ impl Utils {
 
     // create a toggle-able toolbar button, returning true when the state changes and the current state in `state`
     // pass None for no state tracking
-    pub fn flag_button<T: AsRef<str>>(ui: &imgui::Ui, state: Option<&mut bool>, label: T, tooltip: Option<T>) -> bool {
+    pub fn flag_button<T: AsRef<str>, U: AsRef<str>>(ui: &imgui::Ui, state: Option<&mut bool>, label: T, tooltip: Option<U>) -> bool {
         let mut tokens = Vec::new();
         if state.as_ref().is_some_and(|v| **v) {
             tokens.push(ui.push_style_color(imgui::StyleColor::Button, Utils::BUTTON_COLOR));

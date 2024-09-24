@@ -363,6 +363,9 @@ pub async fn run<T: App + 'static>(args: crate::Args,
         }),
     }]);
 
+    // disable window dragging by clicking in the content area
+    imgui.io_mut().config_windows_move_from_title_bar_only = true;
+
     // create the communication channels
     let hle_command_buffer = HleCommandBuffer::with_capacity(1024 * 16);
     let mut comms = SystemCommunication::new(Some(hle_command_buffer));

@@ -14,6 +14,7 @@ nodebuglogging = ["tracing/release_max_level_info"]
 headless = []
 dev = []
 jit-accuracy = []
+jit-single-step = []
 
 [dependencies]
 atomic-counter = "1.0.1"

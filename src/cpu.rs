@@ -1016,7 +1016,7 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
+    pub fn read_u32_phys(&mut self, address: Address) -> Result<u32, InstructionFault> {
         Ok(self.bus.borrow_mut().read_u32(address.physical_address as usize)?)
     }
     
@@ -1212,12 +1212,12 @@ impl Cpu {
     }
 
     #[inline(always)]
-    fn write_u32_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
+    pub fn write_u32_phys(&mut self, value: u32, address: Address) -> Result<WriteReturnSignal, InstructionFault> {
         Ok(self.bus.borrow_mut().write_u32(value, address.physical_address as usize)?)
     }
 
     #[inline(always)]
-    fn write_u32_phys_direct(&mut self, value: u32, physical_address: u64) -> Result<WriteReturnSignal, InstructionFault> {
+    pub fn write_u32_phys_direct(&mut self, value: u32, physical_address: u64) -> Result<WriteReturnSignal, InstructionFault> {
         Ok(self.bus.borrow_mut().write_u32(value, physical_address as usize)?)
     }
 
@@ -1273,6 +1273,10 @@ impl Cpu {
         cpu.next_instruction = None;
         cpu.next_instruction_pc = cpu.pc;
         cpu.pc += 4;
+    }
+
+    pub fn set_next_instruction(&mut self, inst: u32) {
+        self.next_instruction = Some(inst);
     }
 
     fn exception(&mut self, exception_code: u64, use_special: bool) -> Result<(), InstructionFault> {
@@ -1404,7 +1408,7 @@ impl Cpu {
     }
 
 
-    fn breakpoint_exception(&mut self) -> Result<(), InstructionFault> {
+    pub fn breakpoint_exception(&mut self) -> Result<(), InstructionFault> {
         self.cp0gpr[Cop0_Cause] &= !0x3000_0000; // clear coprocessor number
         self.exception(ExceptionCode_Bp, false)
     }
@@ -2070,7 +2074,6 @@ impl Cpu {
         let cached_block_map_index = match self.get_cached_block_map_index(physical_address) {
             Some(v) => v,
             None => {
-                //println!("uncompilable: ${:08X}", physical_address);
                 return Ok(CachedBlockStatus::Uncompilable);
             },
         };
@@ -2561,6 +2564,19 @@ impl Cpu {
                 }
 
                 jit_fixups.push((branch_target, dynamic_label));
+            } else if !self.next_is_delay_slot { // can't single step through instructions with delay slots, sorry. shit will break.
+                cfg_if! {
+                    if #[cfg(feature="jit-single-step")] {
+                        letsgo!(assembler
+                            ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _  // break out
+                            ;   jg >no_break_out
+                            ;break_out:
+                            ;   mov v_arg1, QWORD self.next_instruction_pc as _
+                            ;   jmp >restore_pc_and_break_out
+                            ;no_break_out:
+                        );
+                    }
+                }
             }
             // // TODO this is temporary and isn't necessary beyond using the debugger
             // else if !self.next_is_delay_slot && !done_compiling {
@@ -2781,8 +2797,7 @@ impl Cpu {
         Ok(res as u64)
     }
 
-    // since this function is used by assembly, a return value of 0 indicates "not present",
-    // instead of using Option<>.
+    // since this function is used by assembly, a return value of 0 indicates "not present", instead of using Option<>.
     #[inline(always)]
     extern "sysv64" fn lookup_compiled_instruction_address(cpu: *mut Cpu, virtual_address: u64) -> u64 {
         let cpu = unsafe { &mut *cpu };
@@ -2987,7 +3002,7 @@ impl Cpu {
             // Most common situation
             result @ Ok(_) => result,
 
-            // Other exceptions continue execution
+            // Other (cpu) exceptions continue execution
             Err(InstructionFault::OtherException(_)) => {
                 Ok(())
             }
@@ -3022,6 +3037,7 @@ impl Cpu {
                 self.pc -= 4;
                 self.next_instruction_pc = self.current_instruction_pc;
                 self.next_instruction = Some(self.inst.v);
+                self.next_is_delay_slot = next_was_delay_slot;
                 result
             },
         };
@@ -6893,8 +6909,13 @@ impl Cpu {
 
 
     fn special_break(&mut self) -> Result<(), InstructionFault> {
-        self.breakpoint_exception()?;
-        Ok(())
+        // The breakpoint opcode gets handled differently than the other exceptions.  We may not actually need to invoke
+        // the game's exception handler if this breakpoint is inserted by the debugger.  If it is actually a game's `break` instruction,
+        // then the debugger needs to call Cpu::breakpoint_exception.
+        println!("got here");
+        return Err(InstructionFault::Break);
+        // self.breakpoint_exception()?;
+        // Ok(())
     }
 
     fn build_special_break(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {

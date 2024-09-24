@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 
 use std::collections::HashMap;
@@ -9,67 +9,183 @@ use crate::*;
 
 use crossbeam::channel::{self, Receiver, Sender};
 use mips::{InterruptUpdate, InterruptUpdateMode};
+use tracing::{error, warn};
 
 use crate::cpu::InstructionFault;
 
-const BP_READ : u8 = 0x01;
-const BP_WRITE: u8 = 0x02;
-const BP_EXEC : u8 = 0x04;
-
-#[derive(Copy, Clone)]
-struct BreakpointInfo {
-    id     : u64,
-    address: u64,
-    mode   : u8,
-    enable : bool,
-}
-
-struct Breakpoints {
-    breakpoint_id: u64,
-    global_enable: bool,
-    table: HashMap<u64, BreakpointInfo>,
-}
+pub const BP_READ : u8 = 0x01;
+pub const BP_WRITE: u8 = 0x02;
+pub const BP_EXEC : u8 = 0x04;
 
 #[derive(Default)]
 pub struct CpuStateInfo {
     pub next_instruction_pc: u64,
     pub running: bool,
-
     pub instruction_memory: Option<Vec<u32>>,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum DebuggerCommandRequest {
-    // instead of having to wait for a response on where the PC is, and then request that memory
-    // for listing displays, this flag tells the debugger to return data at an address offset from the PC
+    /// get the PC and cpu state, along with some memory
+    ///
+    /// instead of having to wait for a response on where the PC is, and then request that memory
+    /// for listing displays, this flag tells the debugger to return data at an address offset from the PC
     GetCpuState(Option<(i64, usize)>),     // (offset, size in words)
-    // get the main cpu registers
+    /// get the main cpu registers
     GetCpuRegisters,
-    // stop a running Cpu
+    /// stop a running Cpu
     StopCpu,
-    // start the Cpu
+    /// start the Cpu
     RunCpu,
-    // Step Cpu
+    /// Step Cpu
     StepCpu(u64),
-    // Read memory
+    /// Read memory
     ReadBlock(u64, u64, usize), // (id, address, size in words)
+    /// Get list of breakpoints
+    GetBreakpoints,
+    /// Set a new breakpoint. The id field will be overwritten with a new ID
+    SetBreakpoint(BreakpointInfo),
+    /// Enable/disable the breakpoint.
+    EnableBreakpoint(u64, bool), // (virtual address of breakpoint, enable)
+    /// Remove an existing breakpoint
+    RemoveBreakpoint(u64), // virtual address of a breakpoint
 }
 
 pub enum DebuggerCommandResponse {
+    /// Response to [DebuggerCommandRequest::GetCpuState] containing the current CpuStateInfo structure
     CpuState(CpuStateInfo),
+
     CpuRegisters([u64; 32]),
     ReadBlock(u64, Option<Vec<u32>>), // id, data
+
+    /// Response to [DebuggerCommandReqeust::GetBreakpoints] containing a list of [BreakpointInfo]s
+    Breakpoints(HashMap<u64, BreakpointInfo>),
 }
 
+#[derive(Clone, Debug)]
 pub struct DebuggerCommand {
     pub command_request: DebuggerCommandRequest,
     pub response_channel: Option<Sender<DebuggerCommandResponse>>,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+pub struct BreakpointInfo {
+    /// virtual address of the breakpoint
+    /// uniquely defines the breakpoint instance as well
+    pub address: u64,
+    /// physical address of the above
+    pub physical_address: u64,
+    /// RWX flags
+    pub mode   : u8,
+    /// bp won't trigger if enable is clear
+    pub enable : bool,
+    /// word at the location (if mode & BP_EXEC)
+    pub memory : u32,
+}
+
+struct Breakpoints {
+    global_enable: bool,
+    table: HashMap<u64, BreakpointInfo>,
+}
+
+impl Breakpoints {
+    fn new() -> Breakpoints {
+        Breakpoints {
+            global_enable: true,
+            table: HashMap::new(),
+        }
+    }
+
+    fn check_breakpoint(&self, virtual_address: u64, mode: u8) -> Option<BreakpointInfo> {
+        if !self.global_enable { return None; }
+
+        if let Some(breakpoint) = self.table.get(&virtual_address) {
+            if breakpoint.enable && ((breakpoint.mode & mode) != 0) {
+                return Some(*breakpoint);
+            }
+        }
+
+        None
+    }
+
+    fn lookup_breakpoint(&self, virtual_address: u64) -> Option<BreakpointInfo> {
+        self.table.get(&virtual_address).map(|v| *v)
+    }
+
+    fn print_breakpoints(&self) {
+        for (_key, v) in self.table.iter() {
+            println!("${:016X} mode {}", v.address, format_breakpoint_mode(v.mode));
+        }
+    }
+
+    fn add_breakpoint(&mut self, cpu: RefMut<'_, cpu::Cpu>, address: u64, mode: u8, enable: bool) {
+        let breakpoint_info = BreakpointInfo { address, mode, enable, ..Default::default() };
+        self.add_breakpoint_info(cpu, breakpoint_info);
+    }
+
+    fn add_breakpoint_info(&mut self, mut cpu: RefMut<'_, cpu::Cpu>, mut breakpoint_info: BreakpointInfo) {
+        let enable = breakpoint_info.enable;
+        let virtual_address = breakpoint_info.address;
+        let is_execute = (breakpoint_info.mode & BP_EXEC) != 0;
+
+        if self.table.contains_key(&virtual_address) {
+            warn!(target: "DEBUGGER", "can't duplicate breakpoints");
+            return;
+        }
+        
+        if enable && is_execute {
+            // no exception here, so do the translate and call read_u32_phys
+            if let Some(address) = cpu.translate_address(virtual_address, false, true).expect("please dont' fail") {
+                breakpoint_info.physical_address = address.physical_address;
+                breakpoint_info.memory = cpu.read_u32_phys(address).expect("please don't fail");
+                cpu.write_u32_phys(0x0000000D, address).expect("please don't fail"); // break instruction
+            } else {
+                error!(target: "DEBUGGER", "Unable to add breakpoint at virtual address ${:08X}", virtual_address);
+            }
+        }
+
+        self.table.insert(breakpoint_info.address, breakpoint_info);
+    }
+
+    fn remove_breakpoint(&mut self, mut cpu: RefMut<'_, cpu::Cpu>, virtual_address: u64) -> Result<(), ()> {
+        if let Some(info) = self.table.remove(&virtual_address) {
+            if info.enable && (info.mode & BP_EXEC) != 0 {
+                cpu.write_u32_phys_direct(info.memory, info.physical_address).expect("please don't fail");
+            }
+            Ok(())
+        } else {
+            warn!(target: "DEBUGGER", "cannot remove invalid breakpoint ${:016X}", virtual_address);
+            Err(())
+        }
+    }
+
+    /// returns the old state
+    fn enable_breakpoint(&mut self, mut cpu: RefMut<'_, cpu::Cpu>, virtual_address: u64, enable: bool) -> Result<bool, ()> {
+        if let Some(mut info) = self.table.get_mut(&virtual_address) {
+            if info.enable && !enable {
+                // return the memory at the address to the real instruction
+                if (info.mode & BP_EXEC) != 0 {
+                    cpu.write_u32_phys_direct(info.memory, info.physical_address).expect("please don't fail");
+                }
+            } else if !info.enable && enable {
+                // re-set the `break` instruction
+                if (info.mode & BP_EXEC) != 0 {
+                    cpu.write_u32_phys_direct(0x0000000D, info.physical_address).expect("please don't fail");
+                }
+            }
+
+            Ok(std::mem::replace(&mut info.enable, enable))
+        } else {
+            Err(())
+        }       
+    }
+}
+
 pub struct Debugger {
     exit_requested: bool,
     cpu_running: bool,
+    cpu_broke: bool,
     cpu_run_for: u64,
-    num_open_windows: u64,
 
     ctrlc_count: u32,
 
@@ -84,58 +200,6 @@ pub struct Debugger {
 
     // debugging commands
     command_receiver: Receiver<DebuggerCommand>,
-}
-
-impl Breakpoints {
-    fn new() -> Breakpoints {
-        Breakpoints {
-            breakpoint_id: 0,
-            global_enable: true,
-            table: HashMap::new(),
-        }
-    }
-
-    fn check_breakpoint(&self, address: u64, mode: u8) -> Option<BreakpointInfo> {
-        if !self.global_enable { return None; }
-
-        if let Some(breakpoint) = self.table.get(&address) {
-            if breakpoint.enable && ((breakpoint.mode & mode) != 0) {
-                return Some(*breakpoint);
-            }
-        }
-
-        None
-    }
-
-    fn print_breakpoints(&self) {
-        for (_key, v) in self.table.iter() {
-            println!("{}: ${:016X} mode {}", v.id, v.address, format_breakpoint_mode(v.mode));
-        }
-    }
-
-    fn add_breakpoint(&mut self, address: u64, mode: u8, enable: bool) {
-        let id = self.breakpoint_id;
-        self.breakpoint_id += 1;
-
-        self.table.insert(address, BreakpointInfo { id, address, mode, enable });
-    }
-
-    fn delete_breakpoint(&mut self, search_id: u64) -> Result<(), String> {
-        let mut found_key: Option<u64> = None;
-        for (key, v) in self.table.iter() {
-            if v.id == search_id {
-                found_key = Some(*key);
-            }
-        }
-
-        if let Some(key) = found_key {
-            self.table.remove(&key);
-        } else {
-            return Err(format!("breakpoint id {} not valid", search_id));
-        }
-    
-        Ok(())
-    }
 }
 
 impl Debugger {
@@ -162,8 +226,8 @@ impl Debugger {
         Debugger {
             exit_requested  : false,
             cpu_running     : true,
-            cpu_run_for     : 0,    // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
-            num_open_windows: 0,
+            cpu_broke       : false, // true when the CPU stops due to a debugger breakpoint
+            cpu_run_for     : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
             ctrlc_count     : 0,
             cpu_run_til     : None,
             breakpoints,
@@ -172,7 +236,7 @@ impl Debugger {
         }
     }
 
-    // blocking call to transmit a command request on the provided communications channel
+    /// blocking call to transmit a command request on the provided communications channel
     pub fn send_command(user_comms: &SystemCommunication, cmd: DebuggerCommand) -> Result<(), ()> {
         if let Some(ref tx) = user_comms.debugger.read().unwrap().as_ref() {
             tx.send(cmd).unwrap();
@@ -186,8 +250,7 @@ impl Debugger {
         // self.cpu_running = false;
         while !self.exit_requested { 
             if self.cpu_running {
-                // let num_cycles = self.rcp.borrow().calculate_free_cycles();
-                self.cpu_run_for = self.system.run_for(self.cpu_run_for).unwrap(); 
+                self.cpu_run_for = self.run_for(self.cpu_run_for); 
             }
 
             self.update();
@@ -271,6 +334,58 @@ impl Debugger {
         Ok(())
     }
 
+    #[inline]
+    fn run_for(&mut self, num_cycles: u64) -> u64 {
+        match self.system.run_for(num_cycles) {
+            Ok(next_cycles) => next_cycles,
+            Err(cpu::InstructionFault::Break) => {
+                let pc = self.system.cpu.borrow().next_instruction_pc();
+                println!("CPU break at virtual address ${:08X}", pc);
+
+                // if PC is one of our breakpoints, stop the CPU, otherwise call the exception handler and continue running
+                let mut is_game_breakpoint = true;
+                if let Some(breakpoint_info) = self.breakpoints.borrow().table.get(&pc) {
+                    // we have a breakpoint here, but only if the breakpoint is disabled then it was actually
+                    // a game breakpoint and we need to 
+                    is_game_breakpoint = !breakpoint_info.enable;
+                }
+
+                if is_game_breakpoint {
+                    // will return Err(InstructionFault::OtherExcerption(ExceptionCode_Bp))
+                    let _ = self.system.cpu.borrow_mut().breakpoint_exception();
+                } else {
+                    // stop the CPU
+                    self.cpu_running = false;
+
+                    // when the cpu continues running via the RunCpu command, we must execute one instruction via the interpreter
+                    self.cpu_broke = true;
+                }
+
+                // recalculate cycles that can be run
+                self.system.rcp.borrow().calculate_free_cycles()
+            },
+            _ => panic!("unhandled CPU exception"),
+        }
+    }
+
+    fn run_interpreter_with_instruction(&mut self, inst: u32, num_cycles: u64) -> u64 {
+        let old_interpreter_flag = self.system.comms.settings.read().unwrap().cpu_interpreter_only;
+        self.system.comms.settings.write().unwrap().cpu_interpreter_only = true;
+
+        // set the next instruction to the breakpoint memory at the current address
+        let pc = self.system.cpu.borrow().next_instruction_pc();
+        let memory = self.breakpoints.borrow().table.get(&pc).unwrap().memory;
+        self.system.cpu.borrow_mut().set_next_instruction(memory);
+
+        // run for 1 instruction
+        let next_cycles = self.run_for(num_cycles); 
+
+        // restore the interpreter flag to continuing running JIT code
+        self.system.comms.settings.write().unwrap().cpu_interpreter_only = old_interpreter_flag;
+
+        next_cycles
+    }
+
     fn update(&mut self) {
         // active when at least 1 debugging window is open
         if self.system.comms.debugger_windows.load(Ordering::Relaxed) == 0 { return; }
@@ -278,6 +393,8 @@ impl Debugger {
         'next_command: while let Ok(req) = self.command_receiver.try_recv() {
             match req.command_request {
                 DebuggerCommandRequest::GetCpuState(read_instruction_memory) => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+
                     let mut cpu = self.system.cpu.borrow_mut();
                     let next_instruction_pc = cpu.next_instruction_pc();
                     let instruction_memory = if let Some((instruction_offset, instruction_count)) = read_instruction_memory {
@@ -292,19 +409,17 @@ impl Debugger {
                     } else { 
                         None
                     };
+
                     let running = self.cpu_running;
                     let cpu_state = CpuStateInfo { next_instruction_pc, running, instruction_memory };
-                    if let Some(response_channel) = req.response_channel {
-                        response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
-                    }
+                    response_channel.send(DebuggerCommandResponse::CpuState(cpu_state)).unwrap();
                 },
 
                 DebuggerCommandRequest::GetCpuRegisters => {
-                    if let Some(response_channel) = req.response_channel {
-                        let cpu = self.system.cpu.borrow_mut();
-                        let cpu_registers: [u64; 32] = cpu.regs_copy();
-                        response_channel.send(DebuggerCommandResponse::CpuRegisters(cpu_registers)).unwrap();
-                    }
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    let cpu = self.system.cpu.borrow_mut();
+                    let cpu_registers: [u64; 32] = cpu.regs_copy();
+                    response_channel.send(DebuggerCommandResponse::CpuRegisters(cpu_registers)).unwrap();
                 }
 
                 DebuggerCommandRequest::StopCpu => {
@@ -312,19 +427,39 @@ impl Debugger {
                 },
 
                 DebuggerCommandRequest::RunCpu => {
-                    self.cpu_run_for = 0;
+                    let pc = self.system.cpu.borrow().next_instruction_pc();
+                    let breakpoint_info = self.breakpoints.borrow().check_breakpoint(pc, BP_EXEC);
+                    if let Some(breakpoint_info) = breakpoint_info {
+                        self.cpu_run_for = self.run_interpreter_with_instruction(breakpoint_info.memory, 1);
+                    } else {
+                        self.cpu_run_for = 0;
+                    }
+
                     self.cpu_running = true;
                     if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
                         self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
                     }
                 },
 
-                DebuggerCommandRequest::StepCpu(num_cycles) => {
-                    if self.cpu_running { continue 'next_command; }
-                    self.system.run_for(num_cycles).unwrap();
+                DebuggerCommandRequest::StepCpu(mut num_cycles) => {
+                    if self.cpu_running || num_cycles == 0 { continue 'next_command; }
+
+                    // if the current instruction is a breakpoint, we have to execute the instruction in BreakpointInfo::memory instead
+                    let pc = self.system.cpu.borrow().next_instruction_pc();
+                    let breakpoint_info = self.breakpoints.borrow().check_breakpoint(pc, BP_EXEC);
+                    if let Some(breakpoint_info) = breakpoint_info {
+                        self.cpu_run_for = self.run_interpreter_with_instruction(breakpoint_info.memory, 1);
+                        num_cycles -= 1;
+                    }
+
+                    if num_cycles > 0 {
+                        self.cpu_run_for = self.run_for(num_cycles);
+                    }
                 },
 
                 DebuggerCommandRequest::ReadBlock(id, virtual_address, size_in_words) => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+
                     let memory = {
                         let mut cpu = self.system.cpu.borrow_mut();
                         if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
@@ -336,10 +471,29 @@ impl Debugger {
                         }
                     };
 
-                    if let Some(response_channel) = req.response_channel {
-                        let _ = response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
-                    }
+                    let _ = response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
+                },
+
+                DebuggerCommandRequest::GetBreakpoints => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    let breakpoints: HashMap<u64, BreakpointInfo> = self.breakpoints.borrow().table.clone();
+                    response_channel.send(DebuggerCommandResponse::Breakpoints(breakpoints)).unwrap();
+                },
+
+                DebuggerCommandRequest::SetBreakpoint(breakpoint_info) => {
+                    let cpu = self.system.cpu.borrow_mut();
+                    self.breakpoints.borrow_mut().add_breakpoint_info(cpu, breakpoint_info);
+                },
+
+                DebuggerCommandRequest::EnableBreakpoint(virtual_address, enable) => {
+                    let cpu = self.system.cpu.borrow_mut();
+                    let _ = self.breakpoints.borrow_mut().enable_breakpoint(cpu, virtual_address, enable);
                 }
+
+                DebuggerCommandRequest::RemoveBreakpoint(virtual_address) => {
+                    let cpu = self.system.cpu.borrow_mut();
+                    let _ = self.breakpoints.borrow_mut().remove_breakpoint(cpu, virtual_address);
+                },
             }
         }
     }    
@@ -506,61 +660,61 @@ impl Debugger {
         Ok(())
     }
 
-    fn breakpoint(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        if parts.len() == 1 {
-            self.breakpoints.borrow().print_breakpoints();
-            Ok(())
-        } else {
-            let breakpoint_address = match parse_int(&parts[1]) {
-                Err(err) => { return Err(err); },
-                Ok(v) => {
-                    if (v as u64) < 0x1_0000_0000 { // sign extend 32-bit value
-                        (v as i32) as u64
-                    } else {
-                        v as u64 // 64-bit
-                    }
-                },
-            };
+    // fn breakpoint(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     if parts.len() == 1 {
+    //         self.breakpoints.borrow().print_breakpoints();
+    //         Ok(())
+    //     } else {
+    //         let breakpoint_address = match parse_int(&parts[1]) {
+    //             Err(err) => { return Err(err); },
+    //             Ok(v) => {
+    //                 if (v as u64) < 0x1_0000_0000 { // sign extend 32-bit value
+    //                     (v as i32) as u64
+    //                 } else {
+    //                     v as u64 // 64-bit
+    //                 }
+    //             },
+    //         };
 
-            let mode = if parts.len() > 2 {
-                let mode_str = parts[2];
-                let mut mode_result: u8 = 0;
-                for c in mode_str.as_bytes() {
-                    mode_result |= match c {
-                        b'r' | b'R' => { BP_READ },
-                        b'w' | b'W' => { BP_WRITE },
-                        b'x' | b'X' => { BP_EXEC },
-                        _ => { return Err(format!("invalid format option '{}' (only rwx are valid)", c)); },
-                    };
-                }
-                mode_result
-            } else {
-                // default to 'x' only
-                BP_EXEC
-            };
+    //         let mode = if parts.len() > 2 {
+    //             let mode_str = parts[2];
+    //             let mut mode_result: u8 = 0;
+    //             for c in mode_str.as_bytes() {
+    //                 mode_result |= match c {
+    //                     b'r' | b'R' => { BP_READ },
+    //                     b'w' | b'W' => { BP_WRITE },
+    //                     b'x' | b'X' => { BP_EXEC },
+    //                     _ => { return Err(format!("invalid format option '{}' (only rwx are valid)", c)); },
+    //                 };
+    //             }
+    //             mode_result
+    //         } else {
+    //             // default to 'x' only
+    //             BP_EXEC
+    //         };
 
-            self.breakpoints.borrow_mut().add_breakpoint(breakpoint_address, mode, true);
+    //         self.breakpoints.borrow_mut().add_breakpoint(breakpoint_address, mode, true);
 
-            println!("breakpoint set at ${:016X} (mode {})", breakpoint_address, format_breakpoint_mode(mode));
+    //         println!("breakpoint set at ${:016X} (mode {})", breakpoint_address, format_breakpoint_mode(mode));
 
-            Ok(())
-        }
-    }
+    //         Ok(())
+    //     }
+    // }
 
-    fn delete_breakpoint(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        if parts.len() != 2 {
-            return Err(format!("usage: db [breakpoint id]"));
-        }
+    // fn delete_breakpoint(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     if parts.len() != 2 {
+    //         return Err(format!("usage: db [breakpoint id]"));
+    //     }
 
-        let search_id = match parse_int(&parts[1]) {
-            Err(err) => { return Err(err); },
-            Ok(v) => { v as u64 },
-        };
+    //     let search_id = match parse_int(&parts[1]) {
+    //         Err(err) => { return Err(err); },
+    //         Ok(v) => { v as u64 },
+    //     };
 
-        self.breakpoints.borrow_mut().delete_breakpoint(search_id)?;
+    //     self.breakpoints.borrow_mut().delete_breakpoint(search_id)?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     // fn logging(&mut self, parts: &Vec<&str>) -> Result<(), String> {
     //     if parts.len() < 2 || parts.len() > 3 {
