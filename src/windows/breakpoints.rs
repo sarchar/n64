@@ -1,20 +1,35 @@
 use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
+use imgui::DrawList;
 use n64::debugger;
 use gui::game::{GameWindow, Utils};
+
+#[derive(Clone, Debug, Default)]
+struct PopupState {
+    read: bool,
+    write: bool,
+    execute: bool,
+    address: String,
+    enable: bool,
+    dont_focus: bool,
+    error_message: String,
+}
 
 pub struct Breakpoints {
     comms: SystemCommunication,    
 
-    // request-response channel to Debugger
+    /// request-response channel to Debugger
     debugging_request_response_rx: Receiver<debugger::DebuggerCommandResponse>,
     debugging_request_response_tx: Sender<debugger::DebuggerCommandResponse>,
 
-    // list of current breakpoints
+    /// list of current breakpoints
     breakpoints: Vec<debugger::BreakpointInfo>,
     
-    // show table resizers
+    /// show table resizers
     show_resizers: bool,
+
+    /// new breakpoint popup state
+    popup_state: PopupState,
     
     // internal state
     requested_breakpoints: bool,
@@ -33,6 +48,7 @@ impl Breakpoints {
             show_resizers: false,
             requested_breakpoints: false,
             breakpoints: Vec::new(),
+            popup_state: PopupState::default(),
         }    
     }
 
@@ -58,6 +74,83 @@ impl Breakpoints {
             }
         }
     }
+
+    fn render_popups(&mut self, ui: &imgui::Ui) {
+        let result = ui.modal_popup("Set Breakpoint", || -> Option<String> {
+            let mut accept_dialog = false;
+            
+            ui.checkbox("Read", &mut self.popup_state.read);
+            ui.same_line();
+
+            ui.checkbox("Write", &mut self.popup_state.write);
+            ui.same_line();
+
+            ui.checkbox("Execute", &mut self.popup_state.execute);
+
+            if !self.popup_state.dont_focus {
+                ui.set_keyboard_focus_here();
+                self.popup_state.dont_focus = true;
+            }
+
+            if ui.input_text("Address", &mut self.popup_state.address).enter_returns_true(true).build() {
+                accept_dialog = true;
+            }
+
+            if ui.is_item_hovered() {
+                ui.tooltip_text("Virtual (for execute) or Physical (for R/W). 8 digit hex numbers will be sign extended")
+            }
+
+            ui.same_line();
+            ui.checkbox("Enable", &mut self.popup_state.enable);
+
+            if ui.button("Cancel") {
+                ui.close_current_popup();
+            }
+
+            ui.same_line();
+            if ui.button("OK") {
+                accept_dialog = true;
+            }
+
+            if accept_dialog {
+                ui.close_current_popup();
+                if let Some(address) = Utils::parse_u64_se32(&self.popup_state.address) {
+                    // create a breakpoint
+                    let breakpoint_info = debugger::BreakpointInfo {
+                        address,
+                        mode: if self.popup_state.read    { debugger::BP_READ  } else { 0 }
+                            | if self.popup_state.write   { debugger::BP_WRITE } else { 0 }
+                            | if self.popup_state.execute { debugger::BP_EXEC  } else { 0 },
+                        enable: self.popup_state.enable,
+                        ..Default::default()
+                    };
+
+                    let command = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::SetBreakpoint(breakpoint_info.clone()),
+                        response_channel: None,
+                    };
+
+                    let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                    self.breakpoints.push(breakpoint_info);
+                    None
+                } else {
+                    // Another popup!
+                    Some(format!("Could not parse '{}'", self.popup_state.address))
+                }
+            } else {
+                None
+            }
+        });
+
+        if let Some(Some(error_message)) = result {
+            self.popup_state.error_message = error_message;
+            Utils::show_messagebox(ui);
+        }
+
+        // always draw even though it may not be open
+        Utils::messagebox(ui, "Error", &self.popup_state.error_message);
+    }
 }
 
 impl GameWindow for Breakpoints {
@@ -70,20 +163,20 @@ impl GameWindow for Breakpoints {
               .position([0.0, 0.0], imgui::Condition::FirstUseEver)
               .opened(&mut opened)
               .build(|| {
+
             Utils::flag_button(ui, Some(&mut self.show_resizers), "R", Some("Show column resizers"));
-            // ui.same_line();
-            // Utils::flag_button(ui, Some(&mut self.use_abi_names), "A", Some("Display registers using the ABI names"));
-            // ui.same_line();
 
-            // Utils::flag_button(ui, Some(&mut self.show_64bit_regs), "64", Some("Toggle between 64-bit and 32-bit-truncated"));
-            // ui.same_line();
+            ui.same_line();
+            if Utils::flag_button(ui, None, "+", Some("Set a new breakpoint")) {
+                self.popup_state = PopupState {
+                    execute: true,
+                    enable : true,
+                    ..Default::default()
+                };
+                ui.open_popup("Set Breakpoint");
+            }
+            self.render_popups(ui);
 
-            // if Utils::flag_button(ui, None, format!("{}", self.num_columns), Some("Layout registers in this many columns")) {
-            //     match self.num_columns {
-            //         8 => { self.num_columns = 1; },
-            //         _ => { self.num_columns *= 2; },
-            //     }                                
-            // }
             ui.separator();
 
             let columns =  [
@@ -125,19 +218,52 @@ impl GameWindow for Breakpoints {
                     ui.table_next_column();
                     let mut read = (breakpoint_info.mode & debugger::BP_READ) != 0;
                     if ui.checkbox("##read", &mut read) {
-                        
+                        breakpoint_info.mode = if read {
+                            breakpoint_info.mode | debugger::BP_READ
+                        } else {
+                            breakpoint_info.mode & !debugger::BP_READ
+                        };
+
+                        let command = debugger::DebuggerCommand {
+                            command_request: debugger::DebuggerCommandRequest::ChangeBreakpointMode(breakpoint_info.address, breakpoint_info.mode),
+                            response_channel: None,
+                        };
+
+                        let _ = debugger::Debugger::send_command(&self.comms, command);
                     }
 
                     ui.same_line_with_spacing(0.0, 0.0);
                     let mut write = (breakpoint_info.mode & debugger::BP_WRITE) != 0;
                     if ui.checkbox("##write", &mut write) {
-                        
+                        breakpoint_info.mode = if write {
+                            breakpoint_info.mode | debugger::BP_WRITE
+                        } else {
+                            breakpoint_info.mode & !debugger::BP_WRITE
+                        };
+
+                        let command = debugger::DebuggerCommand {
+                            command_request: debugger::DebuggerCommandRequest::ChangeBreakpointMode(breakpoint_info.address, breakpoint_info.mode),
+                            response_channel: None,
+                        };
+
+                        let _ = debugger::Debugger::send_command(&self.comms, command);
                     }
 
                     ui.same_line_with_spacing(0.0, 0.0);
                     let mut execute = (breakpoint_info.mode & debugger::BP_EXEC) != 0;
                     if ui.checkbox("##execute", &mut execute) {
-                        
+                        breakpoint_info.mode = if execute {
+                            breakpoint_info.mode | debugger::BP_EXEC
+                        } else {
+                            breakpoint_info.mode & !debugger::BP_EXEC
+                        };
+
+                        let command = debugger::DebuggerCommand {
+                            command_request: debugger::DebuggerCommandRequest::ChangeBreakpointMode(breakpoint_info.address, breakpoint_info.mode),
+                            response_channel: None,
+                        };
+
+                        let _ = debugger::Debugger::send_command(&self.comms, command);
                     }
 
                     ui.table_next_column();
@@ -145,8 +271,7 @@ impl GameWindow for Breakpoints {
                     // expand text box to the full length of the cell
                     let available_size = ui.content_region_avail();
                     let size_token = ui.push_item_width(available_size[0]);
-                    let mut address = format!("0x{:08X}", breakpoint_info.address);
-                    ui.input_text("##location", &mut address).enter_returns_true(true).build();
+                    ui.text(format!("0x{:08X}", breakpoint_info.address));
 
                     ui.table_next_column();
                     if Utils::flag_button(ui, None, "X", Some("Remove this breakpoint")) {

@@ -244,7 +244,7 @@ impl Addressable for RdramInterface {
                 },
 
                 // misalignments of 1 or 3 bytes not yet implemented, and may never need to be
-                _ => unimplemented!(),
+                _ => unimplemented!("RDRAM write to offset ${:08X} failure", offset),
             }
 
             Ok(ret)

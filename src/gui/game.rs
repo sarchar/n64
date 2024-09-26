@@ -1,11 +1,8 @@
 use std::collections::HashMap;
-use std::ops::Add;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use imgui::StyleColor;
-use n64::cpu::DisassembledInstruction;
 #[allow(unused_imports)]
 use tracing::{trace, debug, error, info, warn};
 use tracing_core::Level;
@@ -17,15 +14,13 @@ use atomic_counter::AtomicCounter;
 
 use image::GenericImageView;
 
-use crossbeam::channel::{self, Receiver, Sender};
-
 use crate::*;
 use crate::windows::listing::Listing;
 use crate::windows::registers::Registers;
 use crate::windows::breakpoints::Breakpoints;
 use gui::{App, AppWindow};
 
-use n64::{SystemCommunication, ButtonState, debugger};
+use n64::{SystemCommunication, ButtonState};
 use n64::hle::{
     self,
     HleRenderCommand, 
@@ -1956,6 +1951,47 @@ impl Utils {
         }
 
         pressed
+    }
+
+    pub fn messagebox<T: AsRef<str>, U: AsRef<str>>(ui: &imgui::Ui, title: T, msg: U) {
+        ui.modal_popup(format!("{}###messagebox", title.as_ref()), || {
+            ui.text(msg);
+
+            if ui.button("OK") {
+                ui.close_current_popup();
+            }
+        });
+    }
+
+    pub fn show_messagebox(ui: &imgui::Ui) {
+        ui.open_popup("###messagebox");
+    }
+
+    // Parse `s` as either hexadecimal or decimal. Hex numbers of length exactly 8
+    // will be sign extended
+    pub fn parse_u64_se32<T: AsRef<str>>(s: &T) -> Option<u64> {
+        let s: &str = s.as_ref().trim();
+        if let Some(hex) = {
+            if s.starts_with("$") {
+                Some(&s[1..])
+            } else if s.starts_with("0x") {
+                Some(&s[2..])
+            } else {
+                None
+            }
+        } {
+            if let Ok(mut v) = u64::from_str_radix(hex, 16) {
+                if hex.len() == 8 {
+                    v = (v as i32) as u64;
+                }
+                return Some(v);
+            }
+        } else {
+            if let Ok(v) = u64::from_str_radix(s, 10) {
+                return Some(v);
+            }
+        }
+        None
     }
 }
 

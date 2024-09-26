@@ -136,7 +136,7 @@ const CACHED_BLOCK_MAP_RSP_MEM_OFFSET: usize = CACHED_BLOCK_MAP_PIFROM_OFFSET  +
 const CACHED_BLOCK_MAP_SIZE          : usize = CACHED_BLOCK_MAP_RSP_MEM_OFFSET + (0x2000 >> 2);
 
 #[derive(Copy, Clone, Debug)]
-enum CachedBlockReference {
+pub enum CachedBlockReference {
     CachedBlock(u64),              // official reference to the block
     AddressReference(usize, u64),  // usize is an offset into the cache, u64 is a block id
 }
@@ -372,8 +372,8 @@ macro_rules! letssetupexcept {
 
 // calls the exception bridge function after setting up is_delay_slot and current_instruction_pc,
 // which are required for exception() to work properly.  after, a jump to the epilog is executed.
-// be sure to set up function arguments in rdx, r8, and r9 before calling letsexcept, which in
-// turn calls letscall.
+// be sure to set up function arguments to your exception bridge are set before calling letsexcept, 
+// which in turn calls letscall.
 macro_rules! letsexcept {
     ($self:ident, $ops:ident, $exception_bridge:expr) => {
         letssetupexcept!($self, $ops, false);
@@ -381,6 +381,7 @@ macro_rules! letsexcept {
         // this will call prefetch(), so we need to jump to the block epilog now.
         letscall!($ops, $exception_bridge);
 
+        // count the cycle before exiting
         letsgo!($ops
             ;   dec DWORD [rsp+s_cycle_count]
             ;   jmp >epilog
@@ -392,14 +393,25 @@ macro_rules! letsexcept {
 // if an exception occurred, the code jumps to the epilog of the current block
 // expects:
 //      0) jit_other_exception to be set if an exception was triggered
-//      1) exception code in rax (return value from the rw call)
+//      1) jit_breakpoint set if InstructionFault::Break was triggered
+//      2) exception code in rax (return value from the rw call)
 macro_rules! letscheck {
-    ($ops:ident) => {
+    ($self:ident, $ops:ident) => {
         // check if there was an exception in the previous letscall
+        // ;   jne >exit_for_exception
         letsgo!($ops
+            // check jit_other_exception for indication that we need to break out
             ;   cmp BYTE [r_cpu + offset_of!(Cpu, jit_other_exception) as i32], BYTE 0u8 as _
-            // ;   jne >exit_for_exception
-            ;   jne >epilog
+            ;   je >no_error
+            // usually prefetch is called in Cpu::exception() so we don't need to set up an exception handler,
+            // however with InstructionFault::Break, we need to return to the same address that caused the breakpoint
+            // so we will set PC and prefetch here
+            ;   cmp BYTE [r_cpu + offset_of!(Cpu, jit_breakpoint) as i32], BYTE 0u8 as _
+            ;   je >epilog  // was not jit_breakpoint but was jit_other_exception
+            // now we have jit_breakpoint, so use a different exit handler
+            ;   mov v_arg1, QWORD $self.current_instruction_pc as _
+            ;   jmp >restore_pc_and_break_out
+            ;no_error:
         );
 
         // TODO: we could save and return an error code
@@ -541,6 +553,7 @@ pub struct Cpu {
     jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
     jit_run_limit: u64, // starting run limit for each block that's run
     jit_idle_loop_detected: bool, // true if we exited a block due to an idle loop
+    jit_breakpoint: bool, // true if we executed a block due to an external Breakpoint
     cp0_count_tracker: u64, // used to calculate Cop0_Count increment in JIT
     cp0_compare_distance: u32, // used to determine when the timer interrupt occurs in JIT
     cp0_random_tracker: u64, // used to calculate Cop0_Random decrement in JIT
@@ -574,12 +587,12 @@ type CpuInstructionBuilder = fn(&mut Cpu, &mut Assembler) -> CompileInstructionR
 impl Cpu {
     pub fn new(comms: SystemCommunication, bus: Rc<RefCell<dyn Addressable>>) -> Cpu {
         let mut cpu = Cpu {
-            comms: comms,
+            comms,
 
             num_steps: 0,
 
-            bus : bus,
-            pc  : 0,
+            bus,
+            pc: 0,
             current_instruction_pc: 0,
             next_instruction: None,
             next_instruction_pc: 0xFFFF_FFFF_FFFF_FFFF,
@@ -688,6 +701,7 @@ impl Cpu {
             jit_other_exception: false,
             jit_run_limit: 0,
             jit_idle_loop_detected: false,
+            jit_breakpoint: false,
             cp0_count_tracker: 0,
             cp0_compare_distance: 0,
             cp0_random_tracker: 0,
@@ -890,20 +904,12 @@ impl Cpu {
 
     #[inline(always)]
     fn read_u8(&mut self, virtual_address: usize) -> Result<u8, InstructionFault> {
-        let value = if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
+        if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
             self.read_u8_phys(address)
         } else {
             // invalid TLB translation, no physical address present to read and no exception
             Ok(0)
-        };
-
-        //print!("DBG RD8 A:${:08X} V:${:08X} ", virtual_address as u32, value.as_ref().unwrap());
-        //for i in 0..32 {
-        //    print!("R{}:${:08X} ", i, self.gpr[i]);
-        //}
-        //println!();
-
-        value
+        }
     }
 
     extern "sysv64" fn read_u8_bridge(cpu: *mut Cpu, virtual_address: u64) -> u32 {
@@ -1832,7 +1838,7 @@ impl Cpu {
 
     fn classify_address(&mut self, virtual_address: u64, generate_exceptions: bool, is_write: bool) -> Result<Option<Address>, InstructionFault> {
         let mut address = Address {
-            virtual_address: virtual_address,
+            virtual_address,
             physical_address: 0,
             cached: true,
             mapped: false,
@@ -2066,53 +2072,52 @@ impl Cpu {
         }
     }
 
-    fn lookup_cached_block(&mut self, physical_address: u64) -> Result<CachedBlockStatus, InstructionFault> {
+    fn lookup_cached_block(&mut self, physical_address: u64) -> CachedBlockStatus {
         trace!(target: "JIT-RUN", "[looking up cached block @ physical_address=${:08X}]", physical_address as u32);
         //println!("[looking up cached block @ physical_address=${:08X}]", physical_address as u32);
 
         // determine where in the block map to look up the block
-        let cached_block_map_index = match self.get_cached_block_map_index(physical_address) {
-            Some(v) => v,
-            None => {
-                return Ok(CachedBlockStatus::Uncompilable);
-            },
-        };
+        match self.get_cached_block_map_index(physical_address) {
+            Some(cached_block_map_index) => {
+                match self.cached_block_map[cached_block_map_index] {
+                    Some(CachedBlockReference::CachedBlock(block_id)) => {
+                        // block must exist (and block starts at the provided address)
+                        let cached_block = self.cached_blocks.get(&block_id).unwrap().clone();
+                        CachedBlockStatus::Cached(cached_block)
+                    },
 
-        match self.cached_block_map[cached_block_map_index] {
-            Some(CachedBlockReference::CachedBlock(block_id)) => {
-                // block must exist (and block starts at the provided address)
-                let cached_block = self.cached_blocks.get(&block_id).unwrap().clone();
-                return Ok(CachedBlockStatus::Cached(cached_block));
-            },
+                    Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) => {
+                        if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
+                            if referenced_block_id == block_id_reference {
+                                //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address);
+                                // block id must exist because this is a CachedBlock
+                                let cached_block = self.cached_blocks.get(&referenced_block_id).unwrap().clone();
+                                CachedBlockStatus::Cached(cached_block)
+                            } else {
+                                CachedBlockStatus::NotCached
+                            }
+                        } else {
+                            CachedBlockStatus::NotCached
+                        }
+                    },
 
-            Some(CachedBlockReference::AddressReference(index_reference, block_id_reference)) => {
-                if let Some(CachedBlockReference::CachedBlock(referenced_block_id)) = self.cached_block_map[index_reference] {
-                    if referenced_block_id == block_id_reference {
-                        //debug!(target: "JIT-BUILD", "address ${:08X} has valid AddressReference but is being recompiled", physical_address);
-                        // block id must exist because this is a CachedBlock
-                        let cached_block = self.cached_blocks.get(&referenced_block_id).unwrap().clone();
-                        return Ok(CachedBlockStatus::Cached(cached_block));
-                    }
+                    // not found
+                    None => CachedBlockStatus::NotCached,
                 }
-                return Ok(CachedBlockStatus::NotCached);
             },
 
-            // not found
-            None => {
-                return Ok(CachedBlockStatus::NotCached);
-            }
+            None => CachedBlockStatus::Uncompilable,
         }
     }
 
     // run the JIT core, return the number of cycles actually ran
     // self.next_instruction_pc contains the address of code we start executing from
-    pub fn run_for(&mut self, max_cycles: u64) -> Result<u64, InstructionFault> {
+    pub fn run_for(&mut self, max_cycles: u64, execution_breakpoints: &HashSet<u64>) -> Result<(), InstructionFault> {
         // TODO: Catch PC address and TLB exceptions
 
         trace!(target: "JIT-RUN", "run_for started at ${:08X}, max_cycles={}", self.next_instruction_pc as u32, max_cycles);
 
         let steps_start = self.num_steps;
-        // const MIN_STEPS_TO_BE_WORTH_IT: u64 = 8; // TODO does this "optimization" make sense?
         while self.num_steps < (steps_start + max_cycles) {
             // if the next step() instruction was a jump as well we should continue executing until it's not 
             // this happens if there's a jump within a jump, where we have exited the block and left next_is_delay_slot true
@@ -2157,18 +2162,18 @@ impl Cpu {
                 }
             };
 
-            match self.lookup_cached_block(physical_address)? {
+            match self.lookup_cached_block(physical_address) {
                 CachedBlockStatus::NotCached => {
                     debug!(target: "JIT-BUILD", "[pc=${:08X} not found in block cache, compiling]", self.next_instruction_pc as u32);
 
                     // build the block
-                    let compiled_block_ref = self.build_block()?;
+                    let compiled_block_ref = self.build_block(execution_breakpoints)?;
                     let compiled_block = compiled_block_ref.borrow();
 
                     // execute the block
                     trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
-                    self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address)?; // start_address => run from the first instruction
+                    self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address); // start_address => run from the first instruction
                     trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
                 },
 
@@ -2176,7 +2181,7 @@ impl Cpu {
                     let compiled_block = compiled_block.borrow();
                     trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
-                    self.num_steps += self.run_block(&*compiled_block, physical_address)?; // start execution at an offset into the block
+                    self.num_steps += self.run_block(&*compiled_block, physical_address); // start execution at an offset into the block
                     trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
                 }
 
@@ -2224,13 +2229,19 @@ impl Cpu {
 
             // update Cop0_Random
             let _ = Cpu::update_cop0_random(self, 0, false);
+
+            // if a breakpoint was hit break out and tell the debugger
+            if self.jit_breakpoint {
+                self.jit_breakpoint = false;
+                return Err(InstructionFault::Break);
+            }
         }
 
-        Ok(self.num_steps - steps_start)
+        Ok(())
     }
 
     // compile a block of code starting at self.next_instruction_pc
-    fn build_block(&mut self) -> Result<Rc<RefCell<CompiledBlock>>, InstructionFault> {
+    fn build_block(&mut self, execution_breakpoints: &HashSet<u64>) -> Result<Rc<RefCell<CompiledBlock>>, InstructionFault> {
         let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
         let start_address = self.next_instruction_pc;
 
@@ -2324,7 +2335,7 @@ impl Cpu {
                 self.read_u32((self.pc) as usize).unwrap()
             });
 
-            // update and increment PC (perhaps this should also be part of next instruction prefetch)
+            // update and increment PC
             self.current_instruction_pc = self.next_instruction_pc;
             self.next_instruction_pc = self.pc;
             self.pc += 4;
@@ -2357,6 +2368,24 @@ impl Cpu {
             //letsgo!(assembler
             //    ;    mov DWORD [rsp + s_inst], self.inst.v as _ // save current instruction opcode
             //);
+
+            // if we need to break out before executing this instruction, do so
+            // NOTE: breakpoints in delay slots are not allowed
+            if !self.is_delay_slot && execution_breakpoints.contains(&self.current_instruction_pc) {
+                letsgo!(assembler
+                    // check if s_cycle_count is still equal to the run limit (i.e., this is the first instruction,
+                    // so we want to execute it normally)
+                    ;   mov eax, DWORD [r_cpu + offset_of!(Cpu, jit_run_limit) as i32] // this is a qword, but we only need the dword
+                    ;   cmp eax, DWORD [rsp + s_cycle_count]
+                    ;   je >no_breakpoint
+                    ;breakpoint_hit:
+                    // break out
+                    ;   inc BYTE [r_cpu + offset_of!(Cpu, jit_breakpoint) as i32]   // set breakpoint flag
+                    ;   mov v_arg1, QWORD self.current_instruction_pc as _          // continuation address
+                    ;   jmp >restore_pc_and_break_out
+                    ;no_breakpoint:
+                );
+            }
 
             // In dev builds, check that r0 is still zero before every instruction
             cfg_if! {
@@ -2763,7 +2792,7 @@ impl Cpu {
     }
 
     // return number of instructions executed
-    fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> Result<u64, InstructionFault> {
+    fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> u64 {
         let trampoline: extern "sysv64" fn(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> i32 = unsafe {
             std::mem::transmute(self.jit_trampoline.as_ref().unwrap().ptr(self.jit_trampoline_entry_point))
         };
@@ -2791,10 +2820,11 @@ impl Cpu {
         self.jit_executing = false;
 
         // TODO: return instruction fault?
+        // TODO: note that this is also used for exiting on InstructionFault::Break
         // if self.jit_other_exception { ... // if an exception occurred that caused the block to exit... 
         self.jit_other_exception = false;
 
-        Ok(res as u64)
+        res as u64
     }
 
     // since this function is used by assembly, a return value of 0 indicates "not present", instead of using Option<>.
@@ -2803,7 +2833,7 @@ impl Cpu {
         let cpu = unsafe { &mut *cpu };
         let physical_address = cpu.translate_address(virtual_address, false, false).unwrap().unwrap().physical_address;
         match cpu.lookup_cached_block(physical_address) {
-            Ok(CachedBlockStatus::Cached(compiled_block)) => {
+            CachedBlockStatus::Cached(compiled_block) => {
                 let borrow = compiled_block.borrow();
                 let instruction_index = (physical_address - borrow.start_address) >> 2;
                 borrow.jump_table[instruction_index as usize]
@@ -3013,22 +3043,14 @@ impl Cpu {
                 Ok(())
             },
 
-            Err(InstructionFault::CoprocessorUnusable) => {
-                panic!("Am I using this?");
-            }
-
             Err(InstructionFault::ReadWrite(fault)) => {
                 error!(target: "CPU", "crash at PC=${:16X}: {:?}", self.current_instruction_pc, fault);
-                info!(target: "CPU", "[$80000318] = ${:08X}", self.read_u32_phys(
-                       Address {
-                            virtual_address: 0,
-                            physical_address: 0x00000318,
-                            cached: false,
-                            mapped: false,
-                            space: MemorySpace::User,
-                            tlb_index: None,
-                        }).unwrap());
+                error!(target: "CPU", "[$80000318] = ${:08X}", self.read_u32_phys_direct(0x00000318).unwrap());
                 panic!("cpu crash");
+            }
+
+            Err(InstructionFault::CoprocessorUnusable) => {
+                panic!("Am I using this?");
             }
 
             // Other faults like Break, Unimplemented actually stop processing
@@ -3485,7 +3507,7 @@ impl Cpu {
             letscop!(assembler, cop, Cpu::cop1_special_bridge);
 
             // check for exceptions
-            letscheck!(assembler);
+            letscheck!(self, assembler);
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
             match func {
@@ -3505,7 +3527,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_mfc_bridge);
 
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
 
                     // store sign-extended result in rt
                     if self.inst.rt != 0 {
@@ -3532,7 +3554,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_dmfc_bridge);
 
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -3558,7 +3580,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_cfc_bridge);
 
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
 
                     // store result in rt
                     if self.inst.rt != 0 {
@@ -3603,7 +3625,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_mtc_bridge);
 
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
                 },
   
                 0b00_101 => { // DMTC
@@ -3631,7 +3653,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_dmtc_bridge);
                     
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
                 },
 
                 0b00_110 => { // CTC
@@ -3660,7 +3682,7 @@ impl Cpu {
                     letscop!(assembler, cop, Cpu::cop1_ctc_bridge);
 
                     // check exceptions
-                    letscheck!(assembler);
+                    letscheck!(self, assembler);
                 },
 
                 0b01_000 => {
@@ -4147,7 +4169,7 @@ impl Cpu {
 
                         // do the write
                         letscall!(assembler, Cpu::inst_cop0_bridge);
-                        letscheck!(assembler);
+                        letscheck!(self, assembler);
                     },
 
                     _ => {
@@ -4163,7 +4185,7 @@ impl Cpu {
                         letscall!(assembler, Cpu::inst_cop0_bridge);
 
                         // check for exceptions
-                        letscheck!(assembler);
+                        letscheck!(self, assembler);
                     }
                 }
 
@@ -4505,7 +4527,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_cop2_bridge);
 
         // check exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -4790,7 +4812,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u8_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4825,7 +4847,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u8_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -4921,7 +4943,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u64_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // eax contains the result
         // TODO reduce # of instructions if possible
@@ -4988,7 +5010,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u64_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // eax contains the result
         // TODO reduce # of instructions if possible
@@ -5150,7 +5172,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // rax now has the physical_address, store in Cop0_LLAddr
         letsgo!(assembler
@@ -5229,7 +5251,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // rax now has the physical_address, store in Cop0_LLAddr
         letsgo!(assembler
@@ -5322,7 +5344,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check the jit_other_exception flag after call to read_u32_bridge
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // if destination register is 0, we still do the read (above) but don't store the result
         if self.inst.rt != 0 { 
@@ -5421,7 +5443,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // eax contains the result
         // TODO reduce # of instructions if possible
@@ -5490,7 +5512,7 @@ impl Cpu {
         letscall!(assembler, Cpu::read_u32_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // eax contains the result
         // TODO reduce # of instructions if possible
@@ -5547,6 +5569,12 @@ impl Cpu {
                 exception_code as u32
             },
 
+            Err(InstructionFault::ReadWrite(ReadWriteFault::Break)) => {
+                cpu.jit_breakpoint = true;
+                cpu.jit_other_exception = true;
+                0 as u32
+            },
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_ldc1_bridge: {:?}", e);
@@ -5570,7 +5598,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_ldc1_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5627,7 +5655,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_lwc1_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -5784,7 +5812,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // do the write if the physical_address matches Cop0_LLAddr and llbit is set
         letsgo!(assembler
@@ -5870,7 +5898,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check if exception occurred
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // do the write if the physical_address matches Cop0_LLAddr and llbit is set
         letsgo!(assembler
@@ -5982,6 +6010,12 @@ impl Cpu {
                 exception_code as u32
             }
 
+            Err(InstructionFault::ReadWrite(ReadWriteFault::Break)) => {
+                cpu.jit_breakpoint = true;
+                cpu.jit_other_exception = true;
+                0 as u32
+            },
+
             Err(e) => {
                 // TODO handle errors better
                 panic!("error in inst_sdc1_bridge: {:?}", e);
@@ -6004,7 +6038,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_sdc1_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6062,7 +6096,7 @@ impl Cpu {
         letscall!(assembler, Cpu::inst_swc1_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6116,7 +6150,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
         
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
@@ -6166,7 +6200,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u64_bridge);
 
         // check for exception
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6219,7 +6253,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
         
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // get the shift amount from the address, and mask low bits out of v_arg1
         letsgo!(assembler
@@ -6271,7 +6305,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u64_bridge);
 
         // check for exception
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6440,7 +6474,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check the jit_other_exception flag after call to write_u32_bridge
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
@@ -6494,7 +6528,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
         
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         letsgo!(assembler
             // move physical_address to v_arg1
@@ -6542,7 +6576,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check for exception
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6595,7 +6629,7 @@ impl Cpu {
         letscall!(assembler, Cpu::translate_address_bridge);
 
         // check for exceptions
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         // physical address now in rax
         // get the shift amount from the address, and mask low bits out of v_arg2
@@ -6647,7 +6681,7 @@ impl Cpu {
         letscall!(assembler, Cpu::write_u32_bridge);
 
         // check for exception
-        letscheck!(assembler);
+        letscheck!(self, assembler);
 
         CompileInstructionResult::Continue
     }
@@ -6909,13 +6943,7 @@ impl Cpu {
 
 
     fn special_break(&mut self) -> Result<(), InstructionFault> {
-        // The breakpoint opcode gets handled differently than the other exceptions.  We may not actually need to invoke
-        // the game's exception handler if this breakpoint is inserted by the debugger.  If it is actually a game's `break` instruction,
-        // then the debugger needs to call Cpu::breakpoint_exception.
-        println!("got here");
-        return Err(InstructionFault::Break);
-        // self.breakpoint_exception()?;
-        // Ok(())
+        self.breakpoint_exception()
     }
 
     fn build_special_break(&mut self, assembler: &mut Assembler) -> CompileInstructionResult {

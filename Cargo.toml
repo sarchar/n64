@@ -69,7 +69,7 @@ version = "0.10"
 [dependencies.imgui-wgpu]
 optional = true
 git = "https://github.com/sarchar/imgui-wgpu-rs"
-branch = "wgpu-0.19-tmp"
+branch = "mine"
 
 [dependencies.wgpu]
 version = "0.19"

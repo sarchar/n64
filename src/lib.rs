@@ -2,6 +2,7 @@
 #![feature(portable_simd)]
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -115,6 +116,10 @@ impl<T> LockedAddressable<T> {
 }
 
 impl<T: Addressable> Addressable for LockedAddressable<T> {
+    fn read_u64(&mut self, offset: usize) -> Result<u64, ReadWriteFault> {
+        self.addressable.lock().unwrap().read_u64(offset)
+    }
+
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
         self.addressable.lock().unwrap().read_u32(offset)
     }
@@ -126,6 +131,10 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
 
     fn read_u8(&mut self, offset: usize) -> Result<u8, ReadWriteFault> {
         self.addressable.lock().unwrap().read_u8(offset)
+    }
+
+    fn write_u64(&mut self, value: u64, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
+        self.addressable.lock().unwrap().write_u64(value, offset)
     }
 
     fn write_u32(&mut self, value: u32, offset: usize) -> Result<WriteReturnSignal, ReadWriteFault> {
@@ -147,7 +156,6 @@ impl<T: Addressable> Addressable for LockedAddressable<T> {
     fn write_block(&mut self, offset: usize, block: &[u32], length: u32) -> Result<WriteReturnSignal, ReadWriteFault> {
         self.addressable.lock().unwrap().write_block(offset, block, length)
     }
-
 }
 
 // Tweakables -- things developers and nerds might want to play with
@@ -327,16 +335,50 @@ impl System {
     }
 
     #[inline(always)]
-    pub fn run_for(&mut self, cpu_cycles: u64) -> Result<u64, cpu::InstructionFault> {
+    pub fn run_for(&mut self, cpu_cycles: u64, execution_breakpoints: &HashSet<u64>) -> Result<u64, cpu::InstructionFault> {
         let mut cycles_ran = 0;
 
-        if self.comms.settings.read().unwrap().cpu_interpreter_only {
+        let run_result = if self.comms.settings.read().unwrap().cpu_interpreter_only {
             let mut cpu = self.cpu.borrow_mut();
-            while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
-                cpu.step_interpreter()?;
-                cycles_ran += 1;
-                self.comms.total_cpu_steps.inc();
+            let mut result = Ok(());
+
+            // to avoid the `if` check after every single cycle, the cpu loop is duplicated in the following if arms
+            // TODO: do something better
+            if execution_breakpoints.len() > 0 {
+                while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
+                    match cpu.step_interpreter() {
+                        Ok(_) => {},
+                        err @ Err(_) => {
+                            result = err;
+                            break;
+                        },
+                    }
+
+                    cycles_ran += 1;
+                    self.comms.total_cpu_steps.inc();
+
+                    // this if check is the only difference between this cycle loop and the one below
+                    if execution_breakpoints.contains(&cpu.next_instruction_pc()) {
+                        result = Err(cpu::InstructionFault::Break);
+                        break;
+                    }
+                }
+            } else {
+                while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
+                    match cpu.step_interpreter() {
+                        Ok(_) => {},
+                        err @ Err(_) => {
+                            result = err;
+                            break;
+                        },
+                    }
+
+                    cycles_ran += 1;
+                    self.comms.total_cpu_steps.inc();
+                }
             }
+
+            result
         } else {
             // delay...
             match self.comms.cpu_throttle.load(Ordering::Relaxed) {
@@ -349,7 +391,7 @@ impl System {
                 },
 
                 1 => {
-                    let mut cur_ips = 95_000_000.0;
+                    let mut cur_ips = f64::MAX;
                     while cur_ips > 93_750_000.0 {
                         cur_ips = ((self.comms.total_cpu_steps.get() - self.last_cpu_steps) as f64) / self.start_time.elapsed().as_secs_f64();
                     }
@@ -358,13 +400,18 @@ impl System {
                 _ => {},
             }
 
+            let mut result = Ok(());
             if !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
-                cycles_ran += self.cpu.borrow_mut().run_for(cpu_cycles)?;
-
+                let mut cpu = self.cpu.borrow_mut();
+                let start_steps = cpu.num_steps();
+                result = cpu.run_for(cpu_cycles, execution_breakpoints);
                 // accumulate total cycles ran
+                cycles_ran = cpu.num_steps() - start_steps;
                 self.comms.total_cpu_steps.add(cycles_ran as usize);
             }
-        }
+
+            result
+        }.map(|_| 0); // convert Result<(), InstructionFault> to Result<u64, InstructionFault>
 
         // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
         self.comms.break_cpu_cycles.store(false, Ordering::Relaxed);
@@ -392,6 +439,10 @@ impl System {
 
         if trigger_int != 0 {
             let _ = self.cpu.borrow_mut().rcp_interrupt();
+        }
+
+        if run_result.is_err() {
+            return run_result;
         }
 
         Ok(next_cycle_count)

@@ -206,6 +206,10 @@ impl GameWindow for Listing {
                     response_channel: Some(self.debugging_request_response_tx.clone()),
                 };
                 let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                // Also enable follow PC
+                self.listing_address = None;
+                self.listing_memory.clear();
             }
 
             if self.listing_address.is_none() {
@@ -364,11 +368,9 @@ impl GameWindow for Listing {
                             }
 
                             // then breakpoints
-                            let (is_breakpoint, is_enabled, breakpoint_memory) = self.breakpoints.get(&virtual_address).map_or_else(|| (false, false, None), |info| {
-                                if (info.mode & debugger::BP_EXEC) != 0 { (true, info.enable, Some(info.memory)) } else { (true, info.enable, None) }
-                            });
+                            let is_enabled = self.breakpoints.get(&virtual_address).map_or_else(|| None, |info| Some(info.enable));
 
-                            if is_breakpoint {
+                            if let Some(is_enabled) = is_enabled {
                                 let center = [cursor_pos[0] + line_height / 2.0, cursor_pos[1] + line_height / 2.0];
                                 let radius = (line_height - 4.0) / 2.0;
                                 // line_fill_color = Some([BREAKPOINT_COLOR[0], BREAKPOINT_COLOR[1], BREAKPOINT_COLOR[2], 0.2]);
@@ -407,12 +409,11 @@ impl GameWindow for Listing {
                             ui.text_colored(ADDRESS_COLOR, format!("{:08X}", virtual_address as u32));
 
                             // display opcode
-                            let opcode = if let Some(memory) = breakpoint_memory { memory } else { *inst };
                             ui.table_next_column();
-                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", opcode));
+                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", *inst));
 
                             // disassembly instruction
-                            let disassembly = cpu::Cpu::disassemble(virtual_address, opcode);
+                            let disassembly = cpu::Cpu::disassemble(virtual_address, *inst);
 
                             // display instruction mnemonic
                             ui.table_next_column();
