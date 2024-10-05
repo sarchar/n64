@@ -53,6 +53,8 @@ pub enum DebuggerCommandRequest {
     ChangeBreakpointMode(u64, u8),
     /// Remove an existing breakpoint
     RemoveBreakpoint(u64), // virtual address of a breakpoint
+    /// Change a cpu register
+    SetRegister(usize, u64),
 }
 
 pub enum DebuggerCommandResponse {
@@ -584,6 +586,10 @@ impl Debugger {
                 DebuggerCommandRequest::RemoveBreakpoint(virtual_address) => {
                     let cpu = self.system.cpu.borrow_mut();
                     let _ = self.breakpoints.borrow_mut().remove_breakpoint(cpu, virtual_address);
+                },
+
+                DebuggerCommandRequest::SetRegister(rnum, value) => {
+                    self.system.cpu.borrow_mut().regs_mut()[rnum] = value;
                 },
             }
         }

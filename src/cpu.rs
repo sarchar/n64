@@ -847,6 +847,10 @@ impl Cpu {
         &self.gpr
     }
 
+    pub fn regs_mut(&mut self) -> &mut [u64] {
+        &mut self.gpr
+    }
+
     pub fn regs_copy(&self) -> [u64; 32] {
         self.gpr.clone()
     }

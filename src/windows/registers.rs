@@ -238,10 +238,19 @@ impl GameWindow for Registers {
 
                     // id for input_text needs to be unique to allow editing to work
                     if ui.input_text(format!("##r{}", rnum), &mut self.register_value_strings[rnum as usize])
-                           .chars_hexadecimal(true)
                            .enter_returns_true(true)
                            .build() {
-                        println!("here");               
+                        if let Some(value) = Utils::parse_u64_se32(&self.register_value_strings[rnum as usize]) {
+                            let command = debugger::DebuggerCommand {
+                                command_request: debugger::DebuggerCommandRequest::SetRegister(rnum as usize, value),
+                                response_channel: None,
+                            };
+                            let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                            // update the value
+                            self.register_values[rnum as usize] = value;
+                            self.register_value_strings[rnum as usize] = format!("0x{:016X}", value);
+                        }
                     }
 
                     if ui.is_item_hovered() {
