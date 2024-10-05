@@ -1,6 +1,6 @@
 use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
-use imgui::DrawList;
+use imgui::{DrawList, sys::{ImGuiSeparatorFlags_SpanAllColumns, ImGuiSeparatorFlags_Horizontal}};
 use n64::debugger;
 use gui::game::{GameWindow, Utils};
 
@@ -164,6 +164,8 @@ impl GameWindow for Breakpoints {
               .opened(&mut opened)
               .build(|| {
 
+            ui.columns(2, "column string", true);
+
             Utils::flag_button(ui, Some(&mut self.show_resizers), "R", Some("Show column resizers"));
 
             ui.same_line();
@@ -177,8 +179,8 @@ impl GameWindow for Breakpoints {
             }
             self.render_popups(ui);
 
-            ui.separator();
-
+            Utils::good_separator(ui);
+            
             let columns =  [
                 imgui::TableColumnSetup { name: "Enable"  , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(0) },
                 imgui::TableColumnSetup { name: "RWX"     , flags: imgui::TableColumnFlags::WIDTH_FIXED  , init_width_or_weight: 10.0, user_id: ui.new_id(1) },
@@ -285,7 +287,61 @@ impl GameWindow for Breakpoints {
                     size_token.end();
                 }
             }
-            
+
+            ui.next_column();
+
+            let mut interrupt = false;
+            ui.checkbox("Interrupt", &mut interrupt);            
+            if ui.is_item_hovered() { ui.tooltip_text("Interrupt (select which interrupts below)"); }
+            ui.same_line();
+            let mut tlb_mod = false;
+            ui.checkbox("TLB Mod", &mut tlb_mod);            
+            if ui.is_item_hovered() { ui.tooltip_text("TLB modification"); }
+            ui.same_line();
+            let mut tlb_load = false;
+            ui.checkbox("TLB Load", &mut tlb_load);            
+            if ui.is_item_hovered() { ui.tooltip_text("TLB Miss exception (load or instruction fetch)"); }
+
+            let mut tlb_store = false;
+            ui.checkbox("TLB Store", &mut tlb_store);            
+            if ui.is_item_hovered() { ui.tooltip_text("TLB Miss exception (store)"); }
+            ui.same_line();
+            let mut adel = false;
+            ui.checkbox("Addr Load", &mut adel);            
+            if ui.is_item_hovered() { ui.tooltip_text("Address Error exception (load or instruction fetch)"); }
+            ui.same_line();
+            let mut ades = false;
+            ui.checkbox("Addr Store", &mut ades);            
+            if ui.is_item_hovered() { ui.tooltip_text("Address Error exception (store)"); }
+
+            let mut syscall = false;
+            ui.checkbox("Syscall", &mut syscall);            
+            ui.same_line();
+            let mut breakpoint = false;
+            ui.checkbox("Breakpoint", &mut breakpoint);            
+            ui.same_line();
+            let mut reserved = false;
+            ui.checkbox("Reserved", &mut reserved);
+            if ui.is_item_hovered() { ui.tooltip_text("Reserved Instruction exception"); }
+
+            let mut coprocessor = false;
+            ui.checkbox("Coprocessor", &mut coprocessor);            
+            if ui.is_item_hovered() { ui.tooltip_text("Coprocessor Unusable exception"); }
+            ui.same_line();
+            let mut overflow = false;
+            ui.checkbox("Overflow", &mut overflow);            
+            if ui.is_item_hovered() { ui.tooltip_text("Arithmetic Overflow exception"); }
+            ui.same_line();
+            let mut trap = false;
+            ui.checkbox("Trap", &mut trap);            
+
+            let mut fpe = false;
+            ui.checkbox("FPE", &mut fpe);            
+            if ui.is_item_hovered() { ui.tooltip_text("Floating-point exception"); }
+
+            Utils::good_separator(ui);
+
+            ui.text("test");
         });
 
         if !opened {

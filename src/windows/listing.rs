@@ -34,6 +34,11 @@ pub struct Listing {
     requested_cpu_state: bool,
     requested_breakpoints: bool,
 
+    /// number of cycles to step when pressing Step
+    step_size: i32,
+    /// actual cycles stepped from our last step
+    last_step_cycles: i32,
+    
     // when listing_address is Some(), we're looking at a specific address
     // when None, following PC
     listing_address: Option<u64>,
@@ -72,6 +77,8 @@ impl Listing {
             debugging_request_response_tx,
             requested_cpu_state: false,
             requested_breakpoints: false,
+            step_size: 1,
+            last_step_cycles: 1,
             listing_address: None,
             listing_memory: Vec::new(),
             cursor_address: None,
@@ -91,6 +98,16 @@ impl Listing {
         } else {
             ((self.listing_address.unwrap() as i64) + (self.instruction_offset * 4)) as u64
         }
+    }
+
+    fn request_listing_memory(&self) {
+        // send the request-memory command
+        let address = (self.listing_address.unwrap() as i64) + (self.instruction_offset << 2);
+        let command = debugger::DebuggerCommand {
+            command_request: debugger::DebuggerCommandRequest::ReadBlock(0, address as u64, self.num_instructions_displayed as usize),
+            response_channel: Some(self.debugging_request_response_tx.clone()),
+        };
+        let _ = debugger::Debugger::send_command(&self.comms, command);
     }
 
     fn update(&mut self, _delta_time: f32) {
@@ -143,6 +160,10 @@ impl Listing {
                     self.requested_breakpoints = false;
                 },
 
+                debugger::DebuggerCommandResponse::StepCpuDone(num_cycles) => {
+                    self.last_step_cycles = num_cycles as i32;
+                },
+
                 _ => {},
             }
         } 
@@ -175,13 +196,7 @@ impl GameWindow for Listing {
                 self.listing_address = Some((self.listing_address.unwrap() as i64 + (-ui.io().mouse_wheel as i64) * 4) as u64);
 
                 // send the request-memory command
-                let address = (self.listing_address.unwrap() as i64) + (self.instruction_offset << 2);
-                let command = debugger::DebuggerCommand {
-                    command_request: debugger::DebuggerCommandRequest::ReadBlock(0, address as u64, self.num_instructions_displayed as usize),
-                    response_channel: Some(self.debugging_request_response_tx.clone()),
-                };
-
-                let _ = debugger::Debugger::send_command(&self.comms, command);
+                self.request_listing_memory();
             }
 
             if self.cpu_state.running && ui.button("Stop") {
@@ -197,12 +212,23 @@ impl GameWindow for Listing {
                 };
                 let _ = debugger::Debugger::send_command(&self.comms, command);
             }
-            ui.same_line();
 
-            // ui.input_int("", &mut self.step_cycle_count)
+            ui.same_line();
+            {
+                let _width = ui.push_item_width(128.0);
+                let mut new_step_size = self.step_size;
+                ui.input_int("##step_size", &mut new_step_size).step(1).step_fast(100).build();
+                new_step_size = std::cmp::max(new_step_size, 1);
+                if new_step_size != self.step_size {
+                    self.step_size = new_step_size;
+                    self.last_step_cycles = self.step_size;
+                }
+            }
+
+            ui.same_line();
             if ui.button("Step") {
                 let command = debugger::DebuggerCommand {
-                    command_request: debugger::DebuggerCommandRequest::StepCpu(1),
+                    command_request: debugger::DebuggerCommandRequest::StepCpu(self.step_size as u64),
                     response_channel: Some(self.debugging_request_response_tx.clone()),
                 };
                 let _ = debugger::Debugger::send_command(&self.comms, command);
@@ -212,16 +238,66 @@ impl GameWindow for Listing {
                 self.listing_memory.clear();
             }
 
-            if self.listing_address.is_none() {
-                ui.text(format!("Address: ${:08X}", self.cpu_state.next_instruction_pc as u32));
-            } else {
-                ui.text(format!("Address: ${:08X}", self.listing_address.unwrap() as u32));
+            ui.same_line();
+            if ui.button("Step over") {
+                let command = debugger::DebuggerCommand {
+                    command_request: debugger::DebuggerCommandRequest::StepOver,
+                    response_channel: None,
+                };
+                let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                // Also enable follow PC
+                self.listing_address = None;
+                self.listing_memory.clear();
             }
 
             ui.same_line();
-            if ui.button("Follow PC") {
-                self.listing_address = None;
-                self.listing_memory.clear();
+            let message = if self.last_step_cycles != self.step_size {
+                format!("(stepped {} cycles)", self.last_step_cycles)
+            } else {
+                format!("")
+            };
+            ui.text(format!("{}", message));
+
+            ui.text("Address:");
+            ui.same_line();
+            {
+                let _width = ui.push_item_width(96.0);
+                let mut address_text = if self.listing_address.is_none() {
+                    format!("${:08X}", self.cpu_state.next_instruction_pc as u32)
+                } else {
+                    format!("${:08X}", self.listing_address.unwrap() as u32)
+                };
+
+                if ui.input_text("##listing_address", &mut address_text).enter_returns_true(true).build() {
+                    if let Some(address) = Utils::parse_u64_se32(&address_text) {
+                        self.listing_address = Some(address);
+                        self.request_listing_memory();
+                    }
+                }
+            }
+
+            ui.same_line();
+            let mut follow_pc = self.listing_address.is_none();
+            if ui.checkbox("Follow PC", &mut follow_pc) {
+                if follow_pc {
+                    self.listing_address = None;
+                    self.listing_memory.clear();
+                } else {
+                    self.listing_address = Some(self.cpu_state.next_instruction_pc);
+                    self.request_listing_memory();
+                }
+            }
+
+            ui.same_line();
+            if ui.button("Run to cursor") {
+                if let Some(cursor_address) = self.cursor_address {
+                    // let command = debugger::DebuggerCommand {
+                    //     command_request: debugger::DebuggerCommandRequest::RunTo(cursor_address),
+                    //     response_channel: None,
+                    // };
+                    // let _ = debugger::Debugger::send_command(&self.comms, command);
+                }
             }
             
             // draw the `A` button

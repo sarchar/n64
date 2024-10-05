@@ -338,7 +338,7 @@ impl System {
     pub fn run_for(&mut self, cpu_cycles: u64, execution_breakpoints: &HashSet<u64>) -> Result<u64, cpu::InstructionFault> {
         let mut cycles_ran = 0;
 
-        let run_result = if self.comms.settings.read().unwrap().cpu_interpreter_only {
+        let mut run_result = if self.comms.settings.read().unwrap().cpu_interpreter_only {
             let mut cpu = self.cpu.borrow_mut();
             let mut result = Ok(());
 
@@ -438,7 +438,8 @@ impl System {
         };
 
         if trigger_int != 0 {
-            let _ = self.cpu.borrow_mut().rcp_interrupt();
+            assert!(run_result.is_ok(), "if this happens it means some RCP interrupt occurred in the same cycle as a CPU exception");
+            run_result = self.cpu.borrow_mut().rcp_interrupt().map(|_| 0);
         }
 
         if run_result.is_err() {

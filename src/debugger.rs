@@ -37,6 +37,8 @@ pub enum DebuggerCommandRequest {
     RunCpu,
     /// Step Cpu
     StepCpu(u64),
+    /// Step over two instructions - this is a basic that that adds $08 to the current PC and uses that as a breakpoint
+    StepOver,
     /// Read memory
     ReadBlock(u64, u64, usize), // (id, address, size in words)
     /// Get list of breakpoints
@@ -60,6 +62,9 @@ pub enum DebuggerCommandResponse {
 
     /// Response to [DebuggerCommandReqeust::GetBreakpoints] containing a list of [BreakpointInfo]s
     Breakpoints(HashMap<u64, BreakpointInfo>),
+
+    /// When calling StepCpu, return how many cycles were actually stepped
+    StepCpuDone(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -133,7 +138,6 @@ impl Breakpoints {
     fn add_breakpoint(&mut self, mut cpu: RefMut<'_, cpu::Cpu>, breakpoint_info: BreakpointInfo) {
         let enable = breakpoint_info.enable;
         let virtual_address = breakpoint_info.address;
-        let is_execute = (breakpoint_info.mode & BP_EXEC) != 0;
 
         if self.table.contains_key(&virtual_address) {
             warn!(target: "DEBUGGER", "can't duplicate breakpoints");
@@ -270,7 +274,8 @@ impl Breakpoints {
 pub struct Debugger {
     exit_requested: bool,
     cpu_running: bool,
-    cpu_run_for: u64,
+    next_cpu_run_for: u64,
+    step_over_address: Option<u64>,
 
     ctrlc_count: u32,
 
@@ -306,10 +311,11 @@ impl Debugger {
         breakpoints.borrow_mut().set_debugger_bus(Some(debugger_bus.clone()));
 
         Debugger {
-            exit_requested  : false,
-            cpu_running     : true,
-            cpu_run_for     : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
-            ctrlc_count     : 0,
+            exit_requested   : false,
+            cpu_running      : true,
+            next_cpu_run_for : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
+            step_over_address: None,
+            ctrlc_count      : 0,
             breakpoints,
             system,
             command_receiver,
@@ -330,7 +336,7 @@ impl Debugger {
         // self.cpu_running = false;
         while !self.exit_requested { 
             if self.cpu_running {
-                self.cpu_run_for = self.run_for(self.cpu_run_for); 
+                self.next_cpu_run_for = self.run_for(self.next_cpu_run_for); 
             }
 
             self.update();
@@ -416,12 +422,13 @@ impl Debugger {
 
     #[inline]
     fn run_for(&mut self, num_cycles: u64) -> u64 {
-        match self.system.run_for(num_cycles, &self.breakpoints.borrow().execution_breakpoints) {
+        let result = self.system.run_for(num_cycles, &self.breakpoints.borrow().execution_breakpoints);
+        match result {
             Ok(next_cycles) => next_cycles,
 
             // Ignore CPU faults for now -- TODO: breakpoint on certain exceptions?
-            err @ Err(cpu::InstructionFault::OtherException(_)) => {
-                println!("got {:?}", err);
+            _err @ Err(cpu::InstructionFault::OtherException(_)) => {
+                // println!("err: ${:?}", _err);
                 self.system.rcp.borrow().calculate_free_cycles()
             },
             
@@ -433,6 +440,16 @@ impl Debugger {
                 // stop the CPU
                 self.cpu_running = false;
 
+                // on all breaks, clear the step over address
+                if let Some(break_pc) = self.step_over_address {
+                    if self.breakpoints.borrow_mut().execution_breakpoints.remove(&break_pc) {
+                        let mut cpu = self.system.cpu.borrow_mut();
+                        if let Ok(Some(address)) = cpu.translate_address(break_pc, false, false) {
+                            cpu.invalidate_block_cache(address.physical_address, 4);
+                        }
+                    }
+                }
+                
                 // recalculate cycles that can be run
                 self.system.rcp.borrow().calculate_free_cycles()
             },
@@ -482,19 +499,48 @@ impl Debugger {
                 },
 
                 DebuggerCommandRequest::RunCpu => {
-                    self.cpu_running = true;
-                    if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
-                        self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
-                    }
+                    self.start_cpu();
                 },
 
                 DebuggerCommandRequest::StepCpu(num_cycles) => {
                     if self.cpu_running || num_cycles == 0 { continue 'next_command; }
 
-                    if num_cycles > 0 {
-                        self.cpu_run_for = self.run_for(num_cycles);
+                    let mut cycles_ran_for = 0;
+                    while cycles_ran_for < num_cycles {
+                        let cycle_start = self.system.cpu.borrow().num_steps();
+                        let max_cycles = std::cmp::min(num_cycles - cycles_ran_for, self.next_cpu_run_for);
+                        self.next_cpu_run_for = self.run_for(max_cycles);
+                        cycles_ran_for += self.system.cpu.borrow().num_steps() - cycle_start;
+                    }
+
+                    if let Some(response_channel) = req.response_channel {
+                        let _ = response_channel.send(DebuggerCommandResponse::StepCpuDone(cycles_ran_for));
                     }
                 },
+
+                DebuggerCommandRequest::StepOver => {
+                    if self.cpu_running { continue 'next_command; }
+                    
+                    let break_pc = {
+                        let cpu = self.system.cpu.borrow();
+                        cpu.next_instruction_pc() + if cpu.next_is_delay_slot() { 4 } else { 8 }
+                    };
+
+                    // insert the stepover address into execution_breakpoints
+                    if self.breakpoints.borrow_mut().execution_breakpoints.insert(break_pc) { // if it didn't exist before,
+                        // invalidate the JIT at the address for the stepover
+                        let mut cpu = self.system.cpu.borrow_mut();
+                        if let Ok(Some(address)) = cpu.translate_address(break_pc, false, false) {
+                            cpu.invalidate_block_cache(address.physical_address, 4);
+                        }
+
+                        // and set step over address
+                        self.step_over_address = Some(break_pc);
+                    }
+
+                    // run the CPU
+                    self.start_cpu();
+                }
 
                 DebuggerCommandRequest::ReadBlock(id, virtual_address, size_in_words) => {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
@@ -541,6 +587,13 @@ impl Debugger {
             }
         }
     }    
+
+    fn start_cpu(&mut self) {
+        self.cpu_running = true;
+        if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
+            self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
+        }
+    }
 
     // fn handle_line(&mut self, line: &str) -> Result<(), String> {
     //     let lines = line.split(";").collect::<Vec<&str>>();
@@ -800,7 +853,6 @@ impl Addressable for DebuggerBus {
     }
 
     fn read_u32(&mut self, offset: usize) -> Result<u32, ReadWriteFault> {
-        println!("DebuggerBus::read_u32");
         self.check_read_breakpoint(&[offset as u64], |bus| {
             bus.read_u32(offset)
         })

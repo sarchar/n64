@@ -62,7 +62,7 @@ const ExceptionCode_Tr   : u64 = 13; // Trap instruction
 const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
-const InterruptCode_RPC: u64 = 0x04;
+const InterruptCode_RCP: u64 = 0x04;
 const InterruptCode_Timer: u64 = 0x80;
 
 #[derive(Debug, Default)]
@@ -1783,7 +1783,7 @@ impl Cpu {
     // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
     #[inline(always)]
     pub fn rcp_interrupt(&mut self) -> Result<(), InstructionFault> {
-        self.interrupt(InterruptCode_RPC)
+        self.interrupt(InterruptCode_RCP)
     }
 
     #[inline(always)]
@@ -2113,8 +2113,6 @@ impl Cpu {
     // run the JIT core, return the number of cycles actually ran
     // self.next_instruction_pc contains the address of code we start executing from
     pub fn run_for(&mut self, max_cycles: u64, execution_breakpoints: &HashSet<u64>) -> Result<(), InstructionFault> {
-        // TODO: Catch PC address and TLB exceptions
-
         trace!(target: "JIT-RUN", "run_for started at ${:08X}, max_cycles={}", self.next_instruction_pc as u32, max_cycles);
 
         let steps_start = self.num_steps;
@@ -3009,7 +3007,9 @@ impl Cpu {
                 return Err(InstructionFault::OtherException(ExceptionCode_TLBL));
             }
 
-            Err(x) => { return Err(x); },
+            Err(x) => { 
+                return Err(x);
+            },
         });
 
         // determine next cop index based on the opcode 0b010_0xx are the copN instructions
@@ -3032,10 +3032,8 @@ impl Cpu {
             // Most common situation
             result @ Ok(_) => result,
 
-            // Other (cpu) exceptions continue execution
-            Err(InstructionFault::OtherException(_)) => {
-                Ok(())
-            }
+            // Other (cpu) exceptions continue execution, but return the exception code to the debugger
+            err @ Err(InstructionFault::OtherException(_)) => err,
 
             // Raise FPE on InstructionFault::FloatingPointException
             Err(InstructionFault::FloatingPointException) => { 

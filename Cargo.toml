@@ -82,7 +82,7 @@ optional = true
 [dependencies.imgui]
 optional = true
 git = "https://github.com/sarchar/imgui-rs"
-features = ["tables-api"]
+features = ["tables-api", "docking"]
 
 [dependencies.imgui-winit-support]
 optional = true

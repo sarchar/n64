@@ -65,7 +65,7 @@ impl Registers {
             highlighted_registers: [None; 32],
             use_abi_names: true,
             show_64bit_regs: true,
-            num_columns: 1,
+            num_columns: 2,
             requested_register_state: false,
             requested_cpu_state: false,
         }    

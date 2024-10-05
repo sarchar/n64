@@ -1993,6 +1993,12 @@ impl Utils {
         }
         None
     }
+
+    pub fn good_separator(ui: &imgui::Ui) {
+        unsafe { 
+            imgui::sys::igSeparatorEx(imgui::sys::ImGuiSeparatorFlags_Horizontal as i32); 
+        }
+    }
 }
 
 pub trait GameWindow {
