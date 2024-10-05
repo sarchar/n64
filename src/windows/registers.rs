@@ -11,12 +11,15 @@ pub struct Registers {
     debugging_request_response_rx: Receiver<debugger::DebuggerCommandResponse>,
     debugging_request_response_tx: Sender<debugger::DebuggerCommandResponse>,
 
+    // cpu running state
+    cpu_running: bool,
+    
     // register values
     register_values: [u64; 32],
     register_value_strings: Vec<String>,
 
     // highlight individual registers
-    highlighted_registers: [Option<HighlightInfo>; 32],
+    highlighted_registers: [HighlightInfo; 32],
     
     // display registers using ABI names
     use_abi_names: bool,
@@ -33,10 +36,13 @@ pub struct Registers {
 }
 
 const HIGHLIGHT_COLORS: [[f32; 4]; 3] = [
-    [0.6, 0.0, 0.0, 1.0],
-    [0.0, 0.6, 0.0, 1.0],
-    [0.0, 0.0, 0.6, 1.0],
+    [0.4, 0.1, 0.1, 1.0],
+    [0.1, 0.4, 0.1, 1.0],
+    [0.1, 0.1, 0.4, 1.0],
 ];
+
+const FADE_OUT_TIME: f32 = 0.5;
+const FADE_COLOR   : [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 
 #[derive(Copy, Clone, Debug, Default)]
 struct HighlightInfo {
@@ -60,9 +66,10 @@ impl Registers {
             comms,
             debugging_request_response_rx,
             debugging_request_response_tx,
+            cpu_running: true,
             register_values: [0; 32],
             register_value_strings,
-            highlighted_registers: [None; 32],
+            highlighted_registers: [HighlightInfo::default(); 32],
             use_abi_names: true,
             show_64bit_regs: true,
             num_columns: 2,
@@ -70,12 +77,8 @@ impl Registers {
             requested_cpu_state: false,
         }    
     }
-}
 
-impl GameWindow for Registers {
-    fn render_ui(&mut self, ui: &imgui::Ui) -> bool {
-        let mut opened = true;
-        
+    fn update(&mut self, delta_time: f32, frame_bg: [f32; 4]) {
         // request and process the register data
         if !self.requested_register_state {
             let command = debugger::DebuggerCommand {
@@ -97,10 +100,27 @@ impl GameWindow for Registers {
                 self.requested_cpu_state = true;
             }
         }
+
+        // animate durations
+        for i in 0..32 {
+            if let Some(ref mut duration) = self.highlighted_registers[i].duration {
+                *duration -= delta_time;
+                if *duration <= 0.0 {
+                    self.highlighted_registers[i].duration = None;
+                }
+            }
+        }
         
         while let Ok(response) = self.debugging_request_response_rx.try_recv() {
             match response {
                 debugger::DebuggerCommandResponse::CpuRegisters(regs) => {
+                    // look over which registers have changed and start a fade duration
+                    for i in 0..32 {
+                        if regs[i] != self.register_values[i] {
+                            self.highlighted_registers[i].duration = Some(FADE_OUT_TIME);
+                        }
+                    }
+
                     self.register_values = regs;
 
                     for i in 0..32 {
@@ -115,13 +135,11 @@ impl GameWindow for Registers {
                 },
 
                 debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
+                    self.cpu_running = cpu_state.running;
+                    
                     // clear out all non-timed highlighted registers
                     for i in 0..32 {
-                        if self.highlighted_registers[i].is_some() {
-                            if self.highlighted_registers[i].as_ref().unwrap().duration.is_none() {
-                                self.highlighted_registers[i] = None;
-                            }
-                        }
+                        self.highlighted_registers[i].color = frame_bg;
                     }
 
                     if let Some(memory) = cpu_state.instruction_memory {
@@ -130,18 +148,12 @@ impl GameWindow for Registers {
                         for (_, ref operand) in disassembly.iter().enumerate().skip(1) {
                             match operand {
                                 DisassembledInstruction::Register(rnum) => {
-                                    self.highlighted_registers[*rnum as usize] = Some(HighlightInfo {
-                                        color: HIGHLIGHT_COLORS[hl],
-                                        ..Default::default()
-                                    });
+                                    self.highlighted_registers[*rnum as usize].color = HIGHLIGHT_COLORS[hl];
                                     hl += 1;
                                 },
 
                                 DisassembledInstruction::OffsetRegister(_, rnum) => {
-                                    self.highlighted_registers[*rnum as usize] = Some(HighlightInfo {
-                                        color: HIGHLIGHT_COLORS[hl],
-                                        ..Default::default()
-                                    });
+                                    self.highlighted_registers[*rnum as usize].color = HIGHLIGHT_COLORS[hl];
                                     hl += 1;
                                 },
 
@@ -159,6 +171,16 @@ impl GameWindow for Registers {
                 _ => {},
             }
         }
+    }
+}
+
+impl GameWindow for Registers {
+    fn render_ui(&mut self, ui: &imgui::Ui) -> bool {
+        let mut opened = true;
+
+        let frame_bg = ui.style_color(imgui::StyleColor::FrameBg);
+
+        self.update(ui.io().delta_time, frame_bg);
 
         let window = ui.window("Registers");
         window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
@@ -200,16 +222,19 @@ impl GameWindow for Registers {
                     ui.same_line_with_spacing(0.0, 0.0);
 
                     // determine bg color for the text input
-                    let mut style_tokens = Vec::new();
-                    if let Some(ref mut hl) = self.highlighted_registers[rnum] {
-                        style_tokens.push(ui.push_style_color(imgui::StyleColor::FrameBg, hl.color));
-                        // hl.duration -= ui.io().delta_time;
-                        // if hl.duration < 0.0 {
-                        //     hl.duration = None;
-                        // }
-                    }
+                    let bg_color = if let Some(ref duration) = self.highlighted_registers[rnum].duration {
+                        if self.cpu_running {
+                            self.highlighted_registers[rnum].color
+                        } else {
+                            let perc = *duration / FADE_OUT_TIME;
+                            Utils::interpolate_colors(self.highlighted_registers[rnum].color, Utils::average_colors(self.highlighted_registers[rnum].color, FADE_COLOR), perc)
+                        }
+                    } else {
+                        self.highlighted_registers[rnum].color
+                    };
 
-                    let token = ui.push_item_width(text_input_size);
+                    let _color_token = ui.push_style_color(imgui::StyleColor::FrameBg, bg_color);
+                    let _token = ui.push_item_width(text_input_size);
 
                     // id for input_text needs to be unique to allow editing to work
                     if ui.input_text(format!("##r{}", rnum), &mut self.register_value_strings[rnum as usize])
@@ -218,15 +243,10 @@ impl GameWindow for Registers {
                            .build() {
                         println!("here");               
                     }
-                    token.end();
 
                     if ui.is_item_hovered() {
                         let details = format!("Dec: {} (64-bit)\nDec: {} (32-bit)", self.register_values[rnum], self.register_values[rnum] as u32);
                         ui.tooltip_text(details);
-                    }
-
-                    for st in style_tokens {
-                        st.end();
                     }
 
                     if col != (self.num_columns - 1) {

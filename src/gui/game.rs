@@ -1999,6 +1999,25 @@ impl Utils {
             imgui::sys::igSeparatorEx(imgui::sys::ImGuiSeparatorFlags_Horizontal as i32); 
         }
     }
+
+    pub fn average_colors(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+        [
+            (a[0] + b[0]) / 2.0,
+            (a[1] + b[1]) / 2.0,
+            (a[2] + b[2]) / 2.0,
+            (a[3] + b[3]) / 2.0,
+        ]
+    }
+
+    
+    pub fn interpolate_colors(zero: [f32; 4], one: [f32; 4], t: f32) -> [f32; 4] {
+        [
+            zero[0] * (1.0 - t) + one[0] * t,
+            zero[1] * (1.0 - t) + one[1] * t,
+            zero[2] * (1.0 - t) + one[2] * t,
+            zero[3] * (1.0 - t) + one[3] * t,
+        ]
+    }
 }
 
 pub trait GameWindow {
