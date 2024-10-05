@@ -39,6 +39,8 @@ pub enum DebuggerCommandRequest {
     StepCpu(u64),
     /// Step over two instructions - this is a basic that that adds $08 to the current PC and uses that as a breakpoint
     StepOver,
+    /// Run to address
+    RunTo(u64),
     /// Read memory
     ReadBlock(u64, u64, usize), // (id, address, size in words)
     /// Get list of breakpoints
@@ -275,7 +277,7 @@ pub struct Debugger {
     exit_requested: bool,
     cpu_running: bool,
     next_cpu_run_for: u64,
-    step_over_address: Option<u64>,
+    run_to_address: Option<u64>,
 
     ctrlc_count: u32,
 
@@ -314,7 +316,7 @@ impl Debugger {
             exit_requested   : false,
             cpu_running      : true,
             next_cpu_run_for : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
-            step_over_address: None,
+            run_to_address   : None,
             ctrlc_count      : 0,
             breakpoints,
             system,
@@ -440,11 +442,11 @@ impl Debugger {
                 // stop the CPU
                 self.cpu_running = false;
 
-                // on all breaks, clear the step over address
-                if let Some(break_pc) = self.step_over_address {
-                    if self.breakpoints.borrow_mut().execution_breakpoints.remove(&break_pc) {
+                // on all breaks, clear the runto address
+                if let Some(run_to_address) = self.run_to_address {
+                    if self.breakpoints.borrow_mut().execution_breakpoints.remove(&run_to_address) {
                         let mut cpu = self.system.cpu.borrow_mut();
-                        if let Ok(Some(address)) = cpu.translate_address(break_pc, false, false) {
+                        if let Ok(Some(address)) = cpu.translate_address(run_to_address, false, false) {
                             cpu.invalidate_block_cache(address.physical_address, 4);
                         }
                     }
@@ -526,21 +528,20 @@ impl Debugger {
                         cpu.next_instruction_pc() + if cpu.next_is_delay_slot() { 4 } else { 8 }
                     };
 
-                    // insert the stepover address into execution_breakpoints
-                    if self.breakpoints.borrow_mut().execution_breakpoints.insert(break_pc) { // if it didn't exist before,
-                        // invalidate the JIT at the address for the stepover
-                        let mut cpu = self.system.cpu.borrow_mut();
-                        if let Ok(Some(address)) = cpu.translate_address(break_pc, false, false) {
-                            cpu.invalidate_block_cache(address.physical_address, 4);
-                        }
-
-                        // and set step over address
-                        self.step_over_address = Some(break_pc);
-                    }
-
+                    self.set_run_to_address(break_pc);
+                    
                     // run the CPU
                     self.start_cpu();
                 }
+
+                DebuggerCommandRequest::RunTo(virtual_address) => {
+                    if self.cpu_running { continue 'next_command; }
+
+                    self.set_run_to_address(virtual_address);
+
+                    // run the CPU
+                    self.start_cpu();
+                },
 
                 DebuggerCommandRequest::ReadBlock(id, virtual_address, size_in_words) => {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
@@ -592,6 +593,20 @@ impl Debugger {
         self.cpu_running = true;
         if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
             self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
+        }
+    }
+
+    fn set_run_to_address(&mut self, virtual_address: u64) {
+        // insert the runto address into execution_breakpoints
+        if self.breakpoints.borrow_mut().execution_breakpoints.insert(virtual_address) { // if it didn't exist before,
+            // invalidate the JIT at the address for the stepover
+            let mut cpu = self.system.cpu.borrow_mut();
+            if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
+                cpu.invalidate_block_cache(address.physical_address, 4);
+            }
+
+            // and set runto address
+            self.run_to_address = Some(virtual_address);
         }
     }
 

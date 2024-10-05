@@ -292,11 +292,11 @@ impl GameWindow for Listing {
             ui.same_line();
             if ui.button("Run to cursor") {
                 if let Some(cursor_address) = self.cursor_address {
-                    // let command = debugger::DebuggerCommand {
-                    //     command_request: debugger::DebuggerCommandRequest::RunTo(cursor_address),
-                    //     response_channel: None,
-                    // };
-                    // let _ = debugger::Debugger::send_command(&self.comms, command);
+                    let command = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::RunTo(cursor_address),
+                        response_channel: None,
+                    };
+                    let _ = debugger::Debugger::send_command(&self.comms, command);
                 }
             }
             
