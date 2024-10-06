@@ -55,6 +55,16 @@ pub enum DebuggerCommandRequest {
     RemoveBreakpoint(u64), // virtual address of a breakpoint
     /// Change a cpu register
     SetRegister(usize, u64),
+    /// Get Cop1 fpu registers
+    GetCop1State,
+    /// Set a Cop1 fgr value
+    SetFgrFloat64(usize, f64),
+    /// Set a Cop1 fgr value
+    SetFgrFloat32(usize, f32),
+    /// Set a Cop1 fgr value
+    SetFgrInt64(usize, u64),
+    /// Set a Cop1 fgr value
+    SetFgrInt32(usize, u32),
 }
 
 pub enum DebuggerCommandResponse {
@@ -69,6 +79,9 @@ pub enum DebuggerCommandResponse {
 
     /// When calling StepCpu, return how many cycles were actually stepped
     StepCpuDone(u64),
+
+    /// Fpu registers
+    Cop1State { fgr: [cop1::Fgr; 32], fcr: u32, fr_bit: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +350,9 @@ impl Debugger {
     }
 
     pub fn run(&mut self) -> Result<(), ()> {
+        // let cpu = self.system.cpu.borrow_mut();
+        // self.breakpoints.borrow_mut().add_breakpoint(cpu, BreakpointInfo { address: 0xFFFFFFFF800D34BC, mode: BP_EXEC, enable: true });
+
         // self.cpu_running = false;
         while !self.exit_requested { 
             if self.cpu_running {
@@ -590,6 +606,35 @@ impl Debugger {
 
                 DebuggerCommandRequest::SetRegister(rnum, value) => {
                     self.system.cpu.borrow_mut().regs_mut()[rnum] = value;
+                },
+
+                DebuggerCommandRequest::GetCop1State => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    let cpu = self.system.cpu.borrow_mut();
+                    let fgr: [cop1::Fgr; 32] = cpu.cop1().fgr_clone();
+                    let fr_bit = cpu.cop1().fr_bit();
+                    let fcr = cpu.cop1().fcr_control_status();
+                    response_channel.send(DebuggerCommandResponse::Cop1State { fgr, fcr, fr_bit }).unwrap();
+                }
+
+                DebuggerCommandRequest::SetFgrFloat64(fgrnum, value) => {
+                    let mut cpu = self.system.cpu.borrow_mut();
+                    cpu.cop1_mut().set_fgr_f64(fgrnum, value);
+                },
+
+                DebuggerCommandRequest::SetFgrFloat32(fgrnum, value) => {
+                    let mut cpu = self.system.cpu.borrow_mut();
+                    cpu.cop1_mut().set_fgr_f32(fgrnum, value);
+                },
+
+                DebuggerCommandRequest::SetFgrInt64(fgrnum, value) => {
+                    let mut cpu = self.system.cpu.borrow_mut();
+                    cpu.cop1_mut().set_fgr_u64(fgrnum, value);
+                },
+
+                DebuggerCommandRequest::SetFgrInt32(fgrnum, value) => {
+                    let mut cpu = self.system.cpu.borrow_mut();
+                    cpu.cop1_mut().set_fgr_u32(fgrnum, value);
                 },
             }
         }

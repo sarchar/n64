@@ -41,9 +41,6 @@ const HIGHLIGHT_COLORS: [[f32; 4]; 3] = [
     [0.1, 0.1, 0.4, 1.0],
 ];
 
-const FADE_OUT_TIME: f32 = 0.5;
-const FADE_COLOR   : [f32; 4] = [0.8, 0.8, 0.8, 1.0];
-
 #[derive(Copy, Clone, Debug, Default)]
 struct HighlightInfo {
     color   : [f32; 4],
@@ -117,7 +114,7 @@ impl Registers {
                     // look over which registers have changed and start a fade duration
                     for i in 0..32 {
                         if regs[i] != self.register_values[i] {
-                            self.highlighted_registers[i].duration = Some(FADE_OUT_TIME);
+                            self.highlighted_registers[i].duration = Some(Utils::DATA_CHANGED_FADE_TIME);
                         }
                     }
 
@@ -226,8 +223,8 @@ impl GameWindow for Registers {
                         if self.cpu_running {
                             self.highlighted_registers[rnum].color
                         } else {
-                            let perc = *duration / FADE_OUT_TIME;
-                            Utils::interpolate_colors(self.highlighted_registers[rnum].color, Utils::average_colors(self.highlighted_registers[rnum].color, FADE_COLOR), perc)
+                            let perc = *duration / Utils::DATA_CHANGED_FADE_TIME;
+                            Utils::interpolate_colors(self.highlighted_registers[rnum].color, Utils::average_colors(self.highlighted_registers[rnum].color, Utils::DATA_CHANGED_FADE_COLOR), perc)
                         }
                     } else {
                         self.highlighted_registers[rnum].color

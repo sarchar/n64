@@ -816,6 +816,14 @@ impl Cpu {
         Ok(())
     }
 
+    pub fn cop1(&self) -> &cop1::Cop1 {
+        &self.cop1
+    }
+
+    pub fn cop1_mut(&mut self) -> &mut cop1::Cop1 {
+        &mut self.cop1
+    }
+
     pub fn num_steps(&self) -> u64 {
         self.num_steps
     }

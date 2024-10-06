@@ -18,6 +18,7 @@ use crate::*;
 use crate::windows::listing::Listing;
 use crate::windows::registers::Registers;
 use crate::windows::breakpoints::Breakpoints;
+use crate::windows::cop1::Cop1State;
 use gui::{App, AppWindow};
 
 use n64::{SystemCommunication, ButtonState};
@@ -950,6 +951,7 @@ impl App for Game {
         ret.windows.push(Box::new(Listing::new(comms.clone())));
         ret.windows.push(Box::new(Registers::new(comms.clone())));
         ret.windows.push(Box::new(Breakpoints::new(comms.clone())));
+        ret.windows.push(Box::new(Cop1State::new(comms.clone())));
 
         ret
     }
@@ -1923,8 +1925,11 @@ impl Game {
 pub struct Utils;
 
 impl Utils {
-    const BUTTON_COLOR        : [f32; 4] = [    1.0    , 0.0, 0.0, 1.0];
-    const BUTTON_HOVERED_COLOR: [f32; 4] = [196.0/255.0, 0.0, 0.0, 1.0];
+    pub const BUTTON_COLOR        : [f32; 4] = [    1.0    , 0.0, 0.0, 1.0];
+    pub const BUTTON_HOVERED_COLOR: [f32; 4] = [196.0/255.0, 0.0, 0.0, 1.0];
+
+    pub const DATA_CHANGED_FADE_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
+    pub const DATA_CHANGED_FADE_TIME : f32      = 0.5;
 
     // create a toggle-able toolbar button, returning true when the state changes and the current state in `state`
     // pass None for no state tracking
@@ -1967,6 +1972,29 @@ impl Utils {
         ui.open_popup("###messagebox");
     }
 
+    // Parse `s` as either hexadecimal or decimal without sign extension
+    pub fn parse_u64<T: AsRef<str>>(s: &T) -> Option<u64> {
+        let s: &str = s.as_ref().trim();
+        if let Some(hex) = {
+            if s.starts_with("$") {
+                Some(&s[1..])
+            } else if s.starts_with("0x") {
+                Some(&s[2..])
+            } else {
+                None
+            }
+        } {
+            if let Ok(mut v) = u64::from_str_radix(hex, 16) {
+                return Some(v);
+            }
+        } else {
+            if let Ok(v) = u64::from_str_radix(s, 10) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
     // Parse `s` as either hexadecimal or decimal. Hex numbers of length exactly 8
     // will be sign extended
     pub fn parse_u64_se32<T: AsRef<str>>(s: &T) -> Option<u64> {
@@ -1994,7 +2022,17 @@ impl Utils {
         None
     }
 
-    pub fn good_separator(ui: &imgui::Ui) {
+    pub fn parse_u64_float<F: std::str::FromStr, T: AsRef<str>>(s: &T) -> Option<F> {
+        let s: &str = s.as_ref().trim();
+        if let Ok(float) = s.parse::<F>() {
+            Some(float)
+        } else {
+            None
+        }
+    }
+
+    // take an imgui::Ui for a required context to exist
+    pub fn good_separator(_ui: &imgui::Ui) {
         unsafe { 
             imgui::sys::igSeparatorEx(imgui::sys::ImGuiSeparatorFlags_Horizontal as i32); 
         }

@@ -162,11 +162,11 @@ struct InstructionDecode {
 // we use a union to allow all options
 #[derive(Copy, Clone)]
 #[repr(C)]
-union Fgr {
-    as_u64: u64,
-    as_u32: u32,
-    as_f32: f32,
-    as_f64: f64,
+pub union Fgr {
+    pub as_u64: u64,
+    pub as_u32: u32,
+    pub as_f32: f32,
+    pub as_f64: f64,
 }
 
 pub struct Cop1 {
@@ -228,13 +228,41 @@ impl Cop1 {
         }
     }
 
+    pub fn fgr_clone(&self) -> [Fgr; 32] {
+        self.fgr.clone()
+    }
+
     // Set the FR bit from the Status register.
     pub fn set_fr(&mut self, fr: bool) {
         self.fr_bit = fr;
     }
 
+    pub fn fr_bit(&self) -> bool {
+        self.fr_bit
+    }
+
+    pub fn fcr_control_status(&self) -> u32 {
+        self.fcr_control_status as u32
+    }
+
     pub fn condition_signal(&self) -> bool {
         self.condition_signal
+    }
+
+    pub fn set_fgr_f64(&mut self, fgrnum: usize, value: f64) {
+        self.fgr[fgrnum].as_f64 = value;
+    }
+
+    pub fn set_fgr_f32(&mut self, fgrnum: usize, value: f32) {
+        self.fgr[fgrnum].as_f32 = value;
+    }
+
+    pub fn set_fgr_u64(&mut self, fgrnum: usize, value: u64) {
+        self.fgr[fgrnum].as_u64  = value;
+    }
+
+    pub fn set_fgr_u32(&mut self, fgrnum: usize, value: u32) {
+        self.fgr[fgrnum].as_u32 = value;
     }
 
     // move the condition signal value into al. clobbers v_tmp

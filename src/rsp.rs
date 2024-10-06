@@ -1595,7 +1595,10 @@ impl RspCpuCore {
                         self.rdp.lock().unwrap().read_u32(0x0010_0010)?
                     },
 
-                    _ => todo!("unhandled cop0 register read $c{}", self.inst.rd),
+                    _ => {
+                        warn!(target: "RSP", "unhandled cop0 register read $c{}", self.inst.rd);
+                        0
+                    },
                 };
 
                 Ok(())
