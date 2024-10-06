@@ -956,7 +956,7 @@ impl App for Game {
         ret
     }
 
-    fn update(&mut self, appwnd: &AppWindow, _delta_time: f32) {
+    fn update(&mut self, appwnd: &AppWindow, _delta_time: f32, game_has_focus: bool) {
         self.ui_frame_count += 1;
         if (self.ui_frame_count % 10) == 0 {
             self.ui_fps = 10.0 / self.ui_last_fps_time.elapsed().as_secs_f64();
@@ -1078,7 +1078,7 @@ impl App for Game {
         }
 
         // Reset
-        if appwnd.input().key_pressed(KeyCode::F11) {
+        if appwnd.input().key_pressed(KeyCode::F2) {
             let soft_reset = appwnd.input().key_held(KeyCode::ControlLeft);
 
             // send reset 1 for hard reset, 2 for soft reset
@@ -1086,7 +1086,8 @@ impl App for Game {
             self.comms.reset_signal.store(if soft_reset { 2 } else { 1 }, Ordering::SeqCst);
             self.comms.break_cpu();
 
-            // TODO reset rendering states
+            // TODO reset rendering states ?
+            // TODO free texture cache ?
         }
 
         // fast-forward
@@ -1102,7 +1103,7 @@ impl App for Game {
         }
 
         if self.check_inputs {
-            self.update_game_inputs(appwnd);
+            self.update_game_inputs(appwnd, game_has_focus);
             self.check_inputs = false;
         }
 
@@ -1422,49 +1423,49 @@ impl App for Game {
 }
 
 impl Game {
-    fn update_game_inputs(&mut self, appwnd: &AppWindow) {
-        let set_button_state = |state: &mut ButtonState, is_pressed: bool| {
+    fn update_game_inputs(&mut self, appwnd: &AppWindow, allow_keyboard_input: bool) {
+        let update_button_state = |state: &mut ButtonState, is_pressed: bool| {
             let pressed  = (!state.pressed && !state.held) &&  is_pressed;
             let held     = ( state.pressed ||  state.held) &&  is_pressed;
             let released = ( state.pressed ||  state.held) && !is_pressed;
-            *state = ButtonState {
-                held    : held,
-                pressed : pressed,
-                released: released
-            };
+            *state = ButtonState { held, pressed, released };
+        };
+
+        let is_key_down = |keycode| {
+            allow_keyboard_input && (appwnd.input().key_pressed(keycode) || appwnd.input().key_held(keycode))
         };
 
         let controllers = &mut self.comms.controllers.write().unwrap();
         let controller = &mut controllers[self.active_controller_port as usize];
-        set_button_state(&mut controller.a    , appwnd.gamepad_ispressed(0, gilrs::Button::South)         || appwnd.input().key_held(KeyCode::Slash));
-        set_button_state(&mut controller.b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)          || appwnd.input().key_held(KeyCode::Period));
-        set_button_state(&mut controller.z    , appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger2)  || appwnd.input().key_held(KeyCode::Space));
-        set_button_state(&mut controller.start, appwnd.gamepad_ispressed(0, gilrs::Button::Start)         || appwnd.input().key_held(KeyCode::Enter));
+        update_button_state(&mut controller.a    , appwnd.gamepad_ispressed(0, gilrs::Button::South)         || is_key_down(KeyCode::Slash));
+        update_button_state(&mut controller.b    , appwnd.gamepad_ispressed(0, gilrs::Button::West)          || is_key_down(KeyCode::Period));
+        update_button_state(&mut controller.z    , appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger2)  || is_key_down(KeyCode::Space));
+        update_button_state(&mut controller.start, appwnd.gamepad_ispressed(0, gilrs::Button::Start)         || is_key_down(KeyCode::Enter));
 
-        set_button_state(&mut controller.l_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger)  || appwnd.input().key_held(KeyCode::Semicolon));
-        set_button_state(&mut controller.r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || appwnd.input().key_held(KeyCode::Quote));
+        update_button_state(&mut controller.l_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::LeftTrigger)  || is_key_down(KeyCode::Semicolon));
+        update_button_state(&mut controller.r_trigger, appwnd.gamepad_ispressed(0, gilrs::Button::RightTrigger) || is_key_down(KeyCode::Quote));
 
         // C buttons - IJKL
         const DEADZONE: f32 = 0.2;
-        set_button_state(&mut controller.c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) >  DEADZONE) || appwnd.input().key_held(KeyCode::KeyI));
-        set_button_state(&mut controller.c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) < -DEADZONE) || appwnd.input().key_held(KeyCode::KeyK));
-        set_button_state(&mut controller.c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) < -DEADZONE) || appwnd.input().key_held(KeyCode::KeyJ));
-        set_button_state(&mut controller.c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) >  DEADZONE) || appwnd.input().key_held(KeyCode::KeyL));
+        update_button_state(&mut controller.c_up   , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) >  DEADZONE) || is_key_down(KeyCode::KeyI));
+        update_button_state(&mut controller.c_down , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickY) < -DEADZONE) || is_key_down(KeyCode::KeyK));
+        update_button_state(&mut controller.c_left , (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) < -DEADZONE) || is_key_down(KeyCode::KeyJ));
+        update_button_state(&mut controller.c_right, (appwnd.gamepad_getaxis(0, gilrs::Axis::RightStickX) >  DEADZONE) || is_key_down(KeyCode::KeyL));
 
         // DPad - Arrow keys
-        set_button_state(&mut controller.d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || appwnd.input().key_held(KeyCode::ArrowUp));
-        set_button_state(&mut controller.d_down , appwnd.gamepad_ispressed(0, gilrs::Button::DPadDown)    || appwnd.input().key_held(KeyCode::ArrowDown));
-        set_button_state(&mut controller.d_left , appwnd.gamepad_ispressed(0, gilrs::Button::DPadLeft)    || appwnd.input().key_held(KeyCode::ArrowLeft));
-        set_button_state(&mut controller.d_right, appwnd.gamepad_ispressed(0, gilrs::Button::DPadRight)   || appwnd.input().key_held(KeyCode::ArrowRight));
+        update_button_state(&mut controller.d_up   , appwnd.gamepad_ispressed(0, gilrs::Button::DPadUp)      || is_key_down(KeyCode::ArrowUp));
+        update_button_state(&mut controller.d_down , appwnd.gamepad_ispressed(0, gilrs::Button::DPadDown)    || is_key_down(KeyCode::ArrowDown));
+        update_button_state(&mut controller.d_left , appwnd.gamepad_ispressed(0, gilrs::Button::DPadLeft)    || is_key_down(KeyCode::ArrowLeft));
+        update_button_state(&mut controller.d_right, appwnd.gamepad_ispressed(0, gilrs::Button::DPadRight)   || is_key_down(KeyCode::ArrowRight));
 
         // Analog Stick - WASD
         // x-axis assign -1 to A and 1 to D
-        let mut x_kb = (-(appwnd.input().key_held(KeyCode::KeyA) as i32) + (appwnd.input().key_held(KeyCode::KeyD) as i32)) as f32;
+        let mut x_kb = (-(is_key_down(KeyCode::KeyA) as i32) + (is_key_down(KeyCode::KeyD) as i32)) as f32;
         x_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickX);
         controller.x_axis = x_kb.clamp(-1.0, 1.0);
 
         // y-axis assign -1 to S and 1 to W
-        let mut y_kb = (-(appwnd.input().key_held(KeyCode::KeyS) as i32) + (appwnd.input().key_held(KeyCode::KeyW) as i32)) as f32;
+        let mut y_kb = (-(is_key_down(KeyCode::KeyS) as i32) + (is_key_down(KeyCode::KeyW) as i32)) as f32;
         y_kb += appwnd.gamepad_getaxis(0, gilrs::Axis::LeftStickY);
         controller.y_axis = y_kb.clamp(-1.0, 1.0);
     }
@@ -1984,7 +1985,7 @@ impl Utils {
                 None
             }
         } {
-            if let Ok(mut v) = u64::from_str_radix(hex, 16) {
+            if let Ok(v) = u64::from_str_radix(hex, 16) {
                 return Some(v);
             }
         } else {

@@ -76,7 +76,7 @@ impl Cop1State {
             highlighted_registers: [HighlightInfo::default(); 32],
             use_f64: false,
             show_hex: false,
-            num_columns: 2,
+            num_columns: 4,
             requested_register_state: false,
             requested_cpu_state: false,
         }    

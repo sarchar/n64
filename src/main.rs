@@ -47,7 +47,11 @@ struct Args {
 
     /// Use the interpreter core only (no JIT)
     #[arg(short('I'), long("interpreter"))]
-    use_interpreter_cpu_core: bool
+    use_interpreter_cpu_core: bool,
+
+    /// Use Docking features of imgui (useful for debugger). Places the game render into a imgui window
+    #[arg(short('D'), long("docking"))]
+    enable_docking: bool,
 }
 
 fn main() {

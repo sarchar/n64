@@ -492,9 +492,19 @@ impl Debugger {
                     let instruction_memory = if let Some((instruction_offset, instruction_count)) = read_instruction_memory {
                         let virtual_address = (next_instruction_pc as i64).wrapping_add(instruction_offset * 4);
                         if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
-                            // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}", next_instruction_pc, address.physical_address, instruction_offset);
-                            let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (instruction_count * 4) as u32).unwrap();
-                            Some(memory)
+                            // HACK for now -- upon reset the listing tries to read before PIF rom, which gets interpreted as an out of bounds cartridge rom read
+                            if address.physical_address > 0x1FB0_0000 && address.physical_address < 0x1FC0_0000 {
+                                // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}, instruction_count={}", next_instruction_pc, address.physical_address, instruction_offset,instruction_count);
+                                // we need instruction_offset zero words
+                                let mut new_memory = Vec::new();
+                                new_memory.resize((0x1FC0_0000 - address.physical_address as usize) / 4, 0);
+                                let memory = self.system.rcp.borrow_mut().read_block(0x1FC0_0000, ((instruction_count - new_memory.len()) * 4) as u32).unwrap();
+                                new_memory.extend_from_slice(&memory);
+                                Some(new_memory)
+                            } else {
+                                let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (instruction_count * 4) as u32).unwrap();
+                                Some(memory)
+                            }
                         } else {
                             None
                         }
@@ -568,8 +578,19 @@ impl Debugger {
                         let mut cpu = self.system.cpu.borrow_mut();
                         if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
                             // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}", next_instruction_pc, address.physical_address, instruction_offset);
-                            let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (size_in_words * 4) as u32).unwrap();
-                            Some(memory)
+                            // HACK for now -- upon reset the listing tries to read before PIF rom, which gets interpreted as an out of bounds cartridge rom read
+                            if address.physical_address > 0x1FB0_0000 && address.physical_address < 0x1FC0_0000 {
+                                // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}, instruction_count={}", next_instruction_pc, address.physical_address, instruction_offset,instruction_count);
+                                // we need instruction_offset zero words
+                                let mut new_memory = Vec::new();
+                                new_memory.resize((0x1FC0_0000 - address.physical_address as usize) / 4, 0);
+                                let memory = self.system.rcp.borrow_mut().read_block(0x1FC0_0000, ((size_in_words - new_memory.len()) * 4) as u32).unwrap();
+                                new_memory.extend_from_slice(&memory);
+                                Some(new_memory)
+                            } else {
+                                let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (size_in_words * 4) as u32).unwrap();
+                                Some(memory)
+                            }
                         } else {
                             None
                         }
@@ -645,6 +666,10 @@ impl Debugger {
         if self.system.comms.cpu_throttle.load(Ordering::Relaxed) == 1 { // if throttling is enabled, skip for a single call to avoid a speedup
             self.system.comms.cpu_throttle.store(2, Ordering::Relaxed);
         }
+    }
+
+    pub fn stop_cpu(&mut self) {
+        self.cpu_running = false;
     }
 
     fn set_run_to_address(&mut self, virtual_address: u64) {

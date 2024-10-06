@@ -1037,6 +1037,9 @@ impl Addressable for PeripheralInterface {
                 assert!((length & 0x03) == 0); // length needs to be 32-bit (and really 64-bit, since this is going to DRAM)
                 let start = (offset & !0x1000_0000) >> 2;
                 let end = start + (length as usize >> 2);
+                if end >= self.cartridge_rom.len() {
+                    println!("about to fail reading from start=${:08X}", start);
+                }
                 Ok((&self.cartridge_rom[start..end]).to_vec())
             }
         } else {

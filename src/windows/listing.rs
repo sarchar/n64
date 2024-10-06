@@ -110,7 +110,108 @@ impl Listing {
         let _ = debugger::Debugger::send_command(&self.comms, command);
     }
 
-    fn update(&mut self, _delta_time: f32) {
+    // Certain keys work no matter what, as long as the Listing window is open.  Others only work when the Listing window is in focus.
+    fn update_inputs(&mut self, ui: &imgui::Ui) {
+        // Start/Stop execution
+        if self.cpu_state.running && ui.is_key_pressed(imgui::Key::Escape) {
+            let command = debugger::DebuggerCommand {
+                command_request: debugger::DebuggerCommandRequest::StopCpu,
+                response_channel: Some(self.debugging_request_response_tx.clone()),
+            };
+            let _ = debugger::Debugger::send_command(&self.comms, command);
+        } else if !self.cpu_state.running && ui.is_key_pressed(imgui::Key::F5) {
+            let command = debugger::DebuggerCommand {
+                command_request: debugger::DebuggerCommandRequest::RunCpu,
+                response_channel: Some(self.debugging_request_response_tx.clone()),
+            };
+            let _ = debugger::Debugger::send_command(&self.comms, command);
+        }
+
+        // Step over
+        if ui.is_key_pressed(imgui::Key::F10) {
+            let command = debugger::DebuggerCommand {
+                command_request: debugger::DebuggerCommandRequest::StepOver,
+                response_channel: Some(self.debugging_request_response_tx.clone()),
+            };
+            let _ = debugger::Debugger::send_command(&self.comms, command);
+        }
+
+        // Step (into)
+        if ui.is_key_pressed(imgui::Key::F11) {
+            let command = debugger::DebuggerCommand {
+                command_request: debugger::DebuggerCommandRequest::StepCpu(self.step_size as u64),
+                response_channel: Some(self.debugging_request_response_tx.clone()),
+            };
+            let _ = debugger::Debugger::send_command(&self.comms, command);
+        }
+
+        // Any following keys require window focus
+        if !ui.is_window_focused() { return; }
+
+        // Toggle breakpoint where the cursor is
+        if ui.is_key_pressed(imgui::Key::F9) {
+            if let Some(cursor_address) = self.cursor_address {
+                if let Some(ref breakpoint_info) = self.breakpoints.get(&cursor_address) {
+                    // delete the breakpoint
+                    let command = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::RemoveBreakpoint(breakpoint_info.address),
+                        response_channel: None,
+                    };
+
+                    let _ = debugger::Debugger::send_command(&self.comms, command);
+                } else {
+                    // create the breakpoint
+                    let breakpoint_info = debugger::BreakpointInfo {
+                        address: cursor_address,
+                        mode   : debugger::BP_EXEC,
+                        enable : true,
+                        ..Default::default()
+                    };
+
+                    let command = debugger::DebuggerCommand {
+                        command_request: debugger::DebuggerCommandRequest::SetBreakpoint(breakpoint_info.clone()),
+                        response_channel: None,
+                    };
+
+                    let _ = debugger::Debugger::send_command(&self.comms, command);
+
+                    self.breakpoints.insert(cursor_address, breakpoint_info);
+                }
+            }
+        }
+
+        // TODO support Shift+Up/Down
+        if ui.is_key_pressed(imgui::Key::DownArrow) {
+            if let Some(cursor_address) = self.cursor_address {
+                self.cursor_address = Some(cursor_address.wrapping_add(4));
+            } else {
+                if let Some(listing_address) = self.listing_address {
+                    self.cursor_address = Some(listing_address.wrapping_add(4));
+                } else {
+                    self.cursor_address = Some(self.cpu_state.next_instruction_pc.wrapping_add(4));
+                }
+            }
+            self.cursor_length = 1;
+        }
+
+        if ui.is_key_pressed(imgui::Key::UpArrow) {
+            if let Some(cursor_address) = self.cursor_address {
+                self.cursor_address = Some(cursor_address.wrapping_sub(4));
+            } else {
+                if let Some(listing_address) = self.listing_address {
+                    self.cursor_address = Some(listing_address.wrapping_sub(4));
+                } else {
+                    self.cursor_address = Some(self.cpu_state.next_instruction_pc.wrapping_sub(4));
+                }
+            }
+            self.cursor_length = 1;
+        }
+    }
+
+    // must be called from within a window()
+    fn update(&mut self, ui: &imgui::Ui) {
+        self.update_inputs(ui);
+        
         self.instruction_offset = -(self.num_instructions_displayed as i64) / 2 + 1;
 
         // get cpu state
@@ -172,8 +273,6 @@ impl Listing {
 
 impl GameWindow for Listing {
     fn render_ui(&mut self, ui: &imgui::Ui) -> bool {
-        self.update(ui.io().delta_time);
-
         let mut opened = true;
         let window = ui.window("Listing");
         window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
@@ -183,6 +282,9 @@ impl GameWindow for Listing {
               // run outside of the content area of the window, which means a scrollbar will appear...so disable it
               .flags(imgui::WindowFlags::NO_SCROLLBAR | imgui::WindowFlags::NO_SCROLL_WITH_MOUSE)
               .build(|| {
+
+            // update and process inputs
+            self.update(ui);
 
             let mouse_pos = ui.io().mouse_pos;
 
@@ -232,10 +334,6 @@ impl GameWindow for Listing {
                     response_channel: Some(self.debugging_request_response_tx.clone()),
                 };
                 let _ = debugger::Debugger::send_command(&self.comms, command);
-
-                // Also enable follow PC
-                self.listing_address = None;
-                self.listing_memory.clear();
             }
 
             ui.same_line();
@@ -245,10 +343,6 @@ impl GameWindow for Listing {
                     response_channel: None,
                 };
                 let _ = debugger::Debugger::send_command(&self.comms, command);
-
-                // Also enable follow PC
-                self.listing_address = None;
-                self.listing_memory.clear();
             }
 
             ui.same_line();

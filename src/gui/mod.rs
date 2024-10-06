@@ -322,7 +322,7 @@ pub trait App {
 
     /// Called once per frame to update the internal state of the app
     /// Check key presses and controllers that may affect render() here
-    fn update(&mut self, appwnd: &AppWindow, delta_time: f32);
+    fn update(&mut self, appwnd: &AppWindow, delta_time: f32, game_has_focus: bool);
 
     /// Called once per frame to render the app
     fn render(&mut self, appwnd: &AppWindow, view: &wgpu::TextureView);
@@ -343,6 +343,7 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     let appwnd = AppWindow::new("Sarchar's N64 Emulator", width, height, !args.force_opengl, change_logging, gilrs).await;
 
     let mut imgui = imgui::Context::create();
+
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
     platform.attach_window(imgui.io_mut(), appwnd.window(), imgui_winit_support::HiDpiMode::Default);
 
@@ -366,6 +367,11 @@ pub async fn run<T: App + 'static>(args: crate::Args,
     // disable window dragging by clicking in the content area
     imgui.io_mut().config_windows_move_from_title_bar_only = true;
 
+    // enable docking if required
+    if args.enable_docking {
+        imgui.io_mut().config_flags |= ConfigFlags::DOCKING_ENABLE;
+    }
+
     // create the communication channels
     let hle_command_buffer = HleCommandBuffer::with_capacity(1024 * 16);
     let mut comms = SystemCommunication::new(Some(hle_command_buffer));
@@ -379,6 +385,9 @@ pub async fn run<T: App + 'static>(args: crate::Args,
         let system = create_system(thread_comms);
         let mi_update_channel = system.rcp.borrow_mut().mi.get_update_channel();
         let mut debugger = n64::debugger::Debugger::new(system);
+        if args.enable_docking { // just assume docking means to not immediately start the cpu 
+            debugger.stop_cpu();
+        }
         tx.send(mi_update_channel).unwrap();
         debugger.run().unwrap();
     });
@@ -400,6 +409,27 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
     let mut renderer = Renderer::new(&mut imgui, appwnd.device(), appwnd.queue(), renderer_config);
     let mut last_frame = Instant::now();
+
+    let docking_game_texture_id = if args.enable_docking {
+        let game_texture_config = imgui_wgpu::TextureConfig {
+            size: wgpu::Extent3d {
+                width, height,
+                ..Default::default()
+            },
+            label: Some("docking game window texture"),
+            format: Some(wgpu::TextureFormat::Bgra8UnormSrgb),
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            ..Default::default()
+        };
+
+        let game_texture = imgui_wgpu::Texture::new(appwnd.device(), &renderer, game_texture_config);
+        Some(renderer.textures.insert(game_texture))
+    } else {
+        None
+    };
+
+    let mut game_has_focus = false;
+
     AppWindow::run(appwnd, move |appwnd: &mut AppWindow, event| {
         match event {
             Event::WindowEvent {
@@ -432,12 +462,42 @@ pub async fn run<T: App + 'static>(args: crate::Args,
                 // must process input at some point
                 appwnd.process_input();
 
-                // render bg
-                app.update(appwnd, ui.io().delta_time);
-                app.render(appwnd, &view);
+                // update game state and handle input
+                app.update(appwnd, ui.io().delta_time, game_has_focus);
 
-                // render ui
+                // render bg
+                if let Some(texture_id) = docking_game_texture_id {
+                    app.render(appwnd, renderer.textures.get(texture_id).unwrap().view());
+
+                    // Create the root dockspace
+                    ui.dockspace_over_main_viewport();
+
+                    // Create the Game Window for docking views
+                    ui.window("Game")
+                        .build(|| {
+                            // keep the aspect ratio height/width
+                            let ratio = (height as f32) / (width as f32);
+                            let mut region = ui.content_region_avail();
+                            if region[0] < region[1] {
+                                region[1] = region[0] * ratio;
+                            } else if region[1] < region[0] {
+                                region[0] = region[1] / ratio;
+                            }
+                            
+                            Image::new(texture_id, [region[0], region[1]]).build(ui);
+
+                            game_has_focus = ui.is_window_focused();
+                        });
+                } else {
+                    app.render(appwnd, &view);
+                }
+
+                // Render the rest of the game UI
                 app.render_ui(appwnd, &ui);
+
+                if !args.enable_docking {
+                    game_has_focus = !ui.is_window_focused_with_flags(imgui::WindowFocusedFlags::ANY_WINDOW);
+                }
 
                 // render imgui to wgpu
                 {
