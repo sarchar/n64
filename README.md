@@ -1,9 +1,21 @@
 # WIP N64 Emulator
 
-This is a work-in-progress N64 emulator written in Rust. I've been in the
-emulation scene for decades but mostly only focused on the NES/SNES/GB era of
-consoles. It's time I conquered 3D.
+This is a work-in-progress N64 emulator written in Rust.  I've never written a 
+large project in Rust before this.
 
+Currently, it is capable of running a few commercial games via HLE.  My goal 
+is to create a reasonably fast but accurate emulator.  
+
+# Features
+
+* Fully passes all but the RDP tests in n64-systemtest, using the interpreter core
+* JIT dynrec CPU core, passing *almost* all n64-systemtest tests
+* avx256/512-based RSP core
+* Full PIF emulation (requires boot rom to run)
+* Basic HLE support
+* WIP graphical debugger
+* Audio partially supported via LLE
+  
 # Requirements
 
 You'll need a PIF rom (sorry, can't help you out here. Google is your friend)
@@ -21,13 +33,13 @@ Clone the repository and execute:
 $ cargo run --release -- n64-systemtest.z64
 ```
 
-Or if you want to use the debugger,
-
-```
-$ cargo run --release -- n64-systemtest.z64 -D
-```
+Pass `-h` to see a list of command line arguments.  I recommend enabling docking when
+using the debugger with `-D`.
 
 # Screenshots
+
+* Debugger (WIP):
+![image](https://github.com/user-attachments/assets/2200ba80-2afa-43ef-b44f-6dca49370b8c)
 
 * Current test rate (failed 4 out of 3555 tests):
 ![image](https://github.com/sarchar/n64/assets/4928176/568e5671-af3b-4144-b7b9-6386299ac27b)
