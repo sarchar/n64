@@ -18,30 +18,30 @@ use memoffset::offset_of;
 use crate::*;
 
 // Exception handling registers
-const Cop0_Index   : usize = 0;
-const Cop0_Random  : usize = 1;
-const Cop0_EntryLo0: usize = 2;
-const Cop0_EntryLo1: usize = 3;
-const Cop0_Context : usize = 4;
-const Cop0_PageMask: usize = 5;
-const Cop0_Wired   : usize = 6;
-const Cop0_BadVAddr: usize = 8; // Bad Virtual Address
-const Cop0_Count   : usize = 9;
-const Cop0_EntryHi : usize = 10;
-const Cop0_Compare : usize = 11;
-const Cop0_Status  : usize = 12;
-const Cop0_Cause   : usize = 13;
-const Cop0_EPC     : usize = 14; // Exception Program Counter
-const Cop0_PRId    : usize = 15; // Processor Revision Identifier
-const _COP0_WATCHLO : usize = 18;
-const _COP0_WATCHHI : usize = 19;
-const Cop0_XContext: usize = 20;
-const Cop0_PErr    : usize = 26; // Parity Error
-const Cop0_CacheErr: usize = 27;
-const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
+pub const Cop0_Index   : usize = 0;
+pub const Cop0_Random  : usize = 1;
+pub const Cop0_EntryLo0: usize = 2;
+pub const Cop0_EntryLo1: usize = 3;
+pub const Cop0_Context : usize = 4;
+pub const Cop0_PageMask: usize = 5;
+pub const Cop0_Wired   : usize = 6;
+pub const Cop0_BadVAddr: usize = 8; // Bad Virtual Address
+pub const Cop0_Count   : usize = 9;
+pub const Cop0_EntryHi : usize = 10;
+pub const Cop0_Compare : usize = 11;
+pub const Cop0_Status  : usize = 12;
+pub const Cop0_Cause   : usize = 13;
+pub const Cop0_EPC     : usize = 14; // Exception Program Counter
+pub const Cop0_PRId    : usize = 15; // Processor Revision Identifier
+pub const _COP0_WATCHLO : usize = 18;
+pub const _COP0_WATCHHI : usize = 19;
+pub const Cop0_XContext: usize = 20;
+pub const Cop0_PErr    : usize = 26; // Parity Error
+pub const Cop0_CacheErr: usize = 27;
+pub const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
 
-const Cop0_Config: usize = 16;
-const Cop0_LLAddr: usize = 17;
+pub const Cop0_Config: usize = 16;
+pub const Cop0_LLAddr: usize = 17;
 
 const _STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
@@ -863,6 +863,10 @@ impl Cpu {
         self.gpr.clone()
     }
 
+    pub fn cp0gpr_clone(&self) -> [u64; 32] {
+        self.cp0gpr.clone()
+    }
+
     pub fn abi_name(i: usize) -> &'static str {
         const NAMES: [&str; 32] = [
             "zr", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
@@ -1320,9 +1324,10 @@ impl Cpu {
         // set PC and discard the delay slot. PC is set to the vector base determined by the BEV bit in Cop0_Status.
         // TLB and XTLB miss are vectored to offsets 0 and 0x80, respectively
         // all others go to offset 0x180
-        self.pc = if (self.cp0gpr[Cop0_Status] & 0x200000) == 0 {  // check BEV==0
+        self.pc = if (self.cp0gpr[Cop0_Status] & (1 << 22)) == 0 {  // check BEV==0
             0xFFFF_FFFF_8000_0000
         } else { 
+            warn!(target: "CPU", "if anyone ever sees this occur, please let me know (bootstrap exception vector)");
             0xFFFF_FFFF_BFC0_0200
         } + if use_special && previous_exl == 0 { // check EXL==0 and tlb miss
             if self.kernel_64bit_addressing { 0x080 } else { 0x000 }
