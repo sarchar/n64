@@ -169,6 +169,12 @@ pub union Fgr {
     pub as_f64: f64,
 }
 
+impl std::fmt::Debug for Fgr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fgr {{ as_u64: 0x{:016X} }}", unsafe { self.as_u64 })
+    }
+}
+
 pub struct Cop1 {
     // The FPU only has two control registers, 0 (Implementation/Revision) and 31 (Control/Status)
     // and instead of a sparse array, we maintain two separate variables

@@ -18,6 +18,7 @@ use crate::*;
 use crate::windows::listing::Listing;
 use crate::windows::registers::Registers;
 use crate::windows::breakpoints::Breakpoints;
+use crate::windows::cop0::Cop0State;
 use crate::windows::cop1::Cop1State;
 use gui::{App, AppWindow};
 
@@ -247,6 +248,7 @@ pub struct Game {
     listing: Option<Box<Listing>>,
     registers: Option<Box<Registers>>,
     breakpoints: Option<Box<Breakpoints>>,
+    cop0state: Option<Box<Cop0State>>,
     cop1state: Option<Box<Cop1State>>,
 
     // copy of tweakables so we don't need the lock every frame
@@ -892,6 +894,7 @@ impl App for Game {
             listing: None,
             breakpoints: None,
             registers: None,
+            cop0state: None,
             cop1state: None,
 
             tweakables,
@@ -959,6 +962,7 @@ impl App for Game {
             ret.listing     = Some(Box::new(Listing::new(comms.clone())));
             ret.registers   = Some(Box::new(Registers::new(comms.clone())));
             ret.breakpoints = Some(Box::new(Breakpoints::new(comms.clone())));
+            ret.cop0state   = Some(Box::new(Cop0State::new(comms.clone())));
             ret.cop1state   = Some(Box::new(Cop1State::new(comms.clone())));
         }
 
@@ -1380,6 +1384,15 @@ impl App for Game {
                         }
                     }
 
+                    let mut cop0state_open = self.cop0state.is_some();
+                    if ui.checkbox("Cop0 State", &mut cop0state_open) {
+                        if self.cop0state.is_some() {
+                            self.cop0state = None;
+                        } else {
+                            self.cop0state = Some(Box::new(Cop0State::new(self.comms.clone())));
+                        }
+                    }
+
                     let mut cop1state_open = self.cop1state.is_some();
                     if ui.checkbox("Cop1 State", &mut cop1state_open) {
                         if self.cop1state.is_some() {
@@ -1469,6 +1482,12 @@ impl App for Game {
         if let Some(w) = self.registers.as_mut() {
             if !w.render_ui(ui) {
                 self.registers = None;
+            }
+        }
+
+        if let Some(w) = self.cop0state.as_mut() {
+            if !w.render_ui(ui) {
+                self.cop0state = None;
             }
         }
 

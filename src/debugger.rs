@@ -15,7 +15,7 @@ pub const BP_WRITE: u8 = 0x02;
 pub const BP_EXEC : u8 = 0x04;
 pub const BP_RW   : u8 = BP_READ | BP_WRITE;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CpuStateInfo {
     pub next_instruction_pc: u64,
     pub running: bool,
@@ -55,6 +55,8 @@ pub enum DebuggerCommandRequest {
     RemoveBreakpoint(u64), // virtual address of a breakpoint
     /// Change a cpu register
     SetRegister(usize, u64),
+    /// Get Cop0 control registers
+    GetCop0State,
     /// Get Cop1 fpu registers
     GetCop1State,
     /// Set a Cop1 fgr value
@@ -67,11 +69,15 @@ pub enum DebuggerCommandRequest {
     SetFgrInt32(usize, u32),
 }
 
+#[derive(Debug, Clone)]
 pub enum DebuggerCommandResponse {
     /// Response to [DebuggerCommandRequest::GetCpuState] containing the current CpuStateInfo structure
     CpuState(CpuStateInfo),
 
+    /// Full set of CPU gp registers
     CpuRegisters([u64; 32]),
+
+    /// Equivelent of a DMA read
     ReadBlock(u64, Option<Vec<u32>>), // id, data
 
     /// Response to [DebuggerCommandReqeust::GetBreakpoints] containing a list of [BreakpointInfo]s
@@ -80,6 +86,9 @@ pub enum DebuggerCommandResponse {
     /// When calling StepCpu, return how many cycles were actually stepped
     StepCpuDone(u64),
 
+    /// Cop0 control registers
+    Cop0State([u64; 32]),
+    
     /// Fpu registers
     Cop1State { fgr: [cop1::Fgr; 32], fcr: u32, fr_bit: bool },
 }
@@ -627,6 +636,13 @@ impl Debugger {
 
                 DebuggerCommandRequest::SetRegister(rnum, value) => {
                     self.system.cpu.borrow_mut().regs_mut()[rnum] = value;
+                },
+
+                DebuggerCommandRequest::GetCop0State => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    let cpu = self.system.cpu.borrow();
+                    let cp0regs = cpu.cp0gpr_clone();
+                    response_channel.send(DebuggerCommandResponse::Cop0State(cp0regs)).unwrap();
                 },
 
                 DebuggerCommandRequest::GetCop1State => {

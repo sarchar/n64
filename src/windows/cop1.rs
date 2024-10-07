@@ -1,4 +1,3 @@
-
 use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
 use n64::{cpu::{Cpu, DisassembledInstruction}, debugger::{self}};
@@ -53,6 +52,13 @@ struct HighlightInfo {
     duration: Option<f32>,
 }
 
+
+impl Drop for Cop1State {
+    fn drop(&mut self) {
+        self.comms.decrement_debugger_windows();
+    }
+}
+
 impl Cop1State {
     pub fn new(mut comms: SystemCommunication) -> Self {
         let (debugging_request_response_tx, debugging_request_response_rx) = channel::unbounded();
@@ -76,7 +82,7 @@ impl Cop1State {
             highlighted_registers: [HighlightInfo::default(); 32],
             use_f64: false,
             show_hex: false,
-            num_columns: 4,
+            num_columns: 2,
             requested_register_state: false,
             requested_cpu_state: false,
         }    
@@ -483,9 +489,3 @@ impl GameWindow for Cop1State {
     }
 }
 
-
-impl Drop for Cop1State {
-    fn drop(&mut self) {
-        self.comms.decrement_debugger_windows();
-    }
-}

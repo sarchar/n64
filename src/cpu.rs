@@ -45,22 +45,22 @@ pub const Cop0_LLAddr: usize = 17;
 
 const _STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
-const ExceptionCode_Int  : u64 = 0;  // interrupt
-const ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
-const ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
-const ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
-const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruction fetch)
-const ExceptionCode_AdES : u64 = 5;  // Address Error exception (store)
-const _ExceptionCode_IBE  : u64 = 6;  // Bus Error exception (instruction fetch)
-const _ExceptionCode_DBE  : u64 = 7;  // Bus Error exception (data reference: load or store)
-const ExceptionCode_Sys  : u64 = 8;  // Syscall exception
-const ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
-const ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
-const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
-const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
-const ExceptionCode_Tr   : u64 = 13; // Trap instruction
-const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
-const _ExceptionCode_WATCH: u64 = 23; // Watch exception
+pub const ExceptionCode_Int  : u64 = 0;  // interrupt
+pub const ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
+pub const ExceptionCode_TLBL : u64 = 2;  // TLB Miss exception (load or instruction fetch)
+pub const ExceptionCode_TLBS : u64 = 3;  // TLB Miss exception (store)
+pub const ExceptionCode_AdEL : u64 = 4;  // Address Error exception (load or instruction fetch)
+pub const ExceptionCode_AdES : u64 = 5;  // Address Error exception (store)
+pub const _ExceptionCode_IBE  : u64 = 6;  // Bus Error exception (instruction fetch)
+pub const _ExceptionCode_DBE  : u64 = 7;  // Bus Error exception (data reference: load or store)
+pub const ExceptionCode_Sys  : u64 = 8;  // Syscall exception
+pub const ExceptionCode_Bp   : u64 = 9;  // Breakpoint exception
+pub const ExceptionCode_RI   : u64 = 10; // Reserved Instruction exception
+pub const ExceptionCode_CpU  : u64 = 11; // Coprocessor Unusable exception
+pub const ExceptionCode_Ov   : u64 = 12; // Arithmetic Overflow exception
+pub const ExceptionCode_Tr   : u64 = 13; // Trap instruction
+pub const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
+pub const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
 const InterruptCode_RCP: u64 = 0x04;
 const InterruptCode_Timer: u64 = 0x80;
@@ -1783,13 +1783,14 @@ impl Cpu {
     }
 
     pub fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
+        // update Cause even if an interrupt exception doesn't occur
         self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
 
         // check if the interrupts are enabled
-        if ((interrupt_signal as u64) & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
+        if (interrupt_signal & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
             if (self.cp0gpr[Cop0_Status] & 0x07) == 0x01 { // IE must be set, and EXL and ERL both clear
-                // interrupts are executed outside of step_interpreter(), which means self.current_instruction_pc isn't correct
-                // and self.exception uses self.current_instruction_pc, so update it
+                // interrupts are executed outside of step_interpreter()/run_block(), which means self.current_instruction_pc 
+                // must be correctly set at the exits of those functions
                 self.exception(ExceptionCode_Int, false)?;
             }
         }
@@ -2226,9 +2227,12 @@ impl Cpu {
             }
 
             // PC and next_instruction_pc have changed, update current_instruction_pc for code that
-            // relies on these values outside of this module (ie, debugger)
+            // relies on these values outside of this module (ie, debugger, Cpu::interrupt)
             self.current_instruction_pc = self.next_instruction_pc;
             self.is_delay_slot = self.next_is_delay_slot;
+
+            // update Cop0_Random
+            let _ = Cpu::update_cop0_random(self, 0, false);
 
             // Cop0_Count increments at half the PClock, so we take half the cycles executed and add that to Count
             let cp0_count_increment = (self.num_steps - self.cp0_count_tracker) >> 1;
@@ -2238,12 +2242,9 @@ impl Cpu {
                 // Trigger timer interrupt if enough cycles occurred
                 if cp0_count_increment >= self.cp0_compare_distance as u64 {
                     debug!(target: "CPU", "CPU0: timer interrupt");
-                    let _ = self.timer_interrupt();
+                    self.timer_interrupt()?;
                 }
             }
-
-            // update Cop0_Random
-            let _ = Cpu::update_cop0_random(self, 0, false);
 
             // if a breakpoint was hit break out and tell the debugger
             if self.jit_breakpoint {
@@ -3874,7 +3875,7 @@ impl Cpu {
                             let tlb = &self.tlb[i];
 
                             // if ASID matches or G is set, check this TLB entry
-                            if (tlb.entry_hi & 0xFF) != asid && (tlb.entry_hi & 0x1000) == 0 { continue; }
+                            if (tlb.entry_hi & 0x1000) == 0 && (tlb.entry_hi & 0xFF) != asid { continue; }
 
                             // region must match
                             if ((tlb.entry_hi ^ entry_hi) & 0xC000_0000_0000_0000) != 0 { continue; }
