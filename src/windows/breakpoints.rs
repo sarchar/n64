@@ -344,10 +344,12 @@ impl GameWindow for Breakpoints {
             ui.text("test");
         });
 
-        if !opened {
-            self.comms.decrement_debugger_windows();
-        }
-
         opened
+    }
+}
+
+impl Drop for Breakpoints {
+    fn drop(&mut self) {
+        self.comms.decrement_debugger_windows();
     }
 }

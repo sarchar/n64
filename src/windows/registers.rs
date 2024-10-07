@@ -263,10 +263,12 @@ impl GameWindow for Registers {
             }
         });
 
-        if !opened {
-            self.comms.decrement_debugger_windows();
-        }
-
         opened
+    }
+}
+
+impl Drop for Registers {
+    fn drop(&mut self) {
+        self.comms.decrement_debugger_windows();
     }
 }

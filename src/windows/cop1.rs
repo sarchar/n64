@@ -479,10 +479,13 @@ impl GameWindow for Cop1State {
                              
         });
 
-        if !opened {
-            self.comms.decrement_debugger_windows();
-        }
-
         opened
+    }
+}
+
+
+impl Drop for Cop1State {
+    fn drop(&mut self) {
+        self.comms.decrement_debugger_windows();
     }
 }

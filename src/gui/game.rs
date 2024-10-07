@@ -244,6 +244,10 @@ pub struct Game {
 
     // open windows
     windows: Vec<Box<dyn GameWindow>>,
+    listing: Option<Box<Listing>>,
+    registers: Option<Box<Registers>>,
+    breakpoints: Option<Box<Breakpoints>>,
+    cop1state: Option<Box<Cop1State>>,
 
     // copy of tweakables so we don't need the lock every frame
     tweakables: n64::Tweakables,
@@ -885,6 +889,10 @@ impl App for Game {
             stats_window_opened: true,
             tweakables_window_opened: false,
             windows: Vec::new(),
+            listing: None,
+            breakpoints: None,
+            registers: None,
+            cop1state: None,
 
             tweakables,
 
@@ -907,7 +915,6 @@ impl App for Game {
             last_prefetch_reset_time: Instant::now(),
 
             last_interrupt_time: Instant::now(),
-
         };
 
         // Upload a null texture to texture 0 so that a game render always has a texture attached
@@ -948,10 +955,12 @@ impl App for Game {
         );
 
         // TEMP
-        ret.windows.push(Box::new(Listing::new(comms.clone())));
-        ret.windows.push(Box::new(Registers::new(comms.clone())));
-        ret.windows.push(Box::new(Breakpoints::new(comms.clone())));
-        ret.windows.push(Box::new(Cop1State::new(comms.clone())));
+        if ret.args.enable_docking {
+            ret.listing     = Some(Box::new(Listing::new(comms.clone())));
+            ret.registers   = Some(Box::new(Registers::new(comms.clone())));
+            ret.breakpoints = Some(Box::new(Breakpoints::new(comms.clone())));
+            ret.cop1state   = Some(Box::new(Cop1State::new(comms.clone())));
+        }
 
         ret
     }
@@ -1342,16 +1351,45 @@ impl App for Game {
             if let Some(windows_menu_token) = ui.begin_menu("Windows") {
                 ui.checkbox("Stats", &mut self.stats_window_opened);
                 ui.checkbox("Tweakables", &mut self.tweakables_window_opened);
+
                 if let Some(debugger_windows_token) = ui.begin_menu("Debugger") {
-                    if ui.menu_item("New Listing") {
-                        self.windows.push(Box::new(Listing::new(self.comms.clone())));
+                    let mut listing_open = self.listing.is_some();
+                    if ui.checkbox("Listing", &mut listing_open) {
+                        if self.listing.is_some() {
+                            self.listing = None;
+                        } else {
+                            self.listing = Some(Box::new(Listing::new(self.comms.clone())));
+                        }
                     }
-                    if ui.menu_item("New Registers") {
-                        self.windows.push(Box::new(Registers::new(self.comms.clone())));
+
+                    let mut registers_open = self.registers.is_some();
+                    if ui.checkbox("Registers", &mut registers_open) {
+                        if self.registers.is_some() {
+                            self.registers = None;
+                        } else {
+                            self.registers = Some(Box::new(Registers::new(self.comms.clone())));
+                        }
                     }
-                    if ui.menu_item("Breakpoints") {
-                        self.windows.push(Box::new(Breakpoints::new(self.comms.clone())));
+
+                    let mut breakpoints_open = self.breakpoints.is_some();
+                    if ui.checkbox("Breakpoints", &mut breakpoints_open) {
+                        if self.breakpoints.is_some() {
+                            self.breakpoints = None;
+                        } else {
+                            self.breakpoints = Some(Box::new(Breakpoints::new(self.comms.clone())));
+                        }
                     }
+
+                    let mut cop1state_open = self.cop1state.is_some();
+                    if ui.checkbox("Cop1 State", &mut cop1state_open) {
+                        if self.cop1state.is_some() {
+                            self.cop1state = None;
+                        } else {
+                            self.cop1state = Some(Box::new(Cop1State::new(self.comms.clone())));
+                        }
+                    }
+
+
                     debugger_windows_token.end();
                 }
                 windows_menu_token.end();
@@ -1416,6 +1454,30 @@ impl App for Game {
         }
 
         // render child windows.. anything returning false will be removed from the window list
+        if let Some(w) = self.listing.as_mut() {
+            if !w.render_ui(ui) {
+                self.listing = None;
+            }
+        }
+
+        if let Some(w) = self.breakpoints.as_mut() {
+            if !w.render_ui(ui) {
+                self.breakpoints = None;
+            }
+        }
+
+        if let Some(w) = self.registers.as_mut() {
+            if !w.render_ui(ui) {
+                self.registers = None;
+            }
+        }
+
+        if let Some(w) = self.cop1state.as_mut() {
+            if !w.render_ui(ui) {
+                self.cop1state = None;
+            }
+        }
+
         self.windows.retain_mut(|window| {
             window.render_ui(ui)
         });

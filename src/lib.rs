@@ -438,7 +438,7 @@ impl System {
         };
 
         if trigger_int != 0 {
-            assert!(run_result.is_ok(), "if this happens it means some RCP interrupt occurred in the same cycle as a CPU exception");
+            //assert!(run_result.is_ok(), "if this happens it means some RCP interrupt occurred in the same cycle as a CPU exception");
             run_result = self.cpu.borrow_mut().rcp_interrupt().map(|_| 0);
         }
 

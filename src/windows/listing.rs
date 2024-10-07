@@ -690,9 +690,12 @@ impl GameWindow for Listing {
             });
         });
 
-        if !opened {
-            self.comms.decrement_debugger_windows();
-        }
         opened
+    }
+}
+
+impl Drop for Listing {
+    fn drop(&mut self) {
+        self.comms.decrement_debugger_windows();
     }
 }
