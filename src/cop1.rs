@@ -281,6 +281,14 @@ impl Cop1 {
         FORMATS[format_modifier as usize]
     }
 
+    pub fn cop1_register_name(cr: usize) -> &'static str {
+        match cr {
+            0 => "fir",
+            31 => "fcsr",
+            _ => "f??",
+        }
+    }
+
     // move the condition signal value into al. clobbers v_tmp
     pub fn build_condition_signal_to_al(&self, assembler: &mut Assembler) {
         letsgo!(assembler

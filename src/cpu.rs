@@ -122,6 +122,7 @@ pub enum DisassembledInstruction {
     Mnemonic(String),
     Register(usize),
     Cop0Register(usize),
+    Cop1Register(usize),
     FpuRegister(usize),
     ConstantS16(i16),
     Address(u64),
@@ -9007,12 +9008,18 @@ impl Cpu {
         };
 
         // rt, rd as cgpr
-        let r_type_rt_rd_cgpr = |result: &mut Vec<_>, mn, copno| {
+        let r_type_rt_rd_cgpr = |result: &mut Vec<_>, mn, copno, is_cr| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
             match copno {
                 0 => result.push(DisassembledInstruction::Cop0Register(rd)),
-                1 => result.push(DisassembledInstruction::FpuRegister(rd)),
+                1 => {
+                    if is_cr {
+                        result.push(DisassembledInstruction::Cop1Register(rd))
+                    } else {
+                        result.push(DisassembledInstruction::FpuRegister(rd))
+                    }
+                },
                 _ => result.push(DisassembledInstruction::Register(rd)),
             }
         };
@@ -9194,7 +9201,9 @@ impl Cpu {
                     if COP_FN[rs as usize].starts_with("?") {
                         push_mnemonic(&mut result, format!("unknown cop{} func=${:02b}_{:03b}", copno, rs >> 3, rs & 0x07).as_str());
                     } else {
-                        r_type_rt_rd_cgpr(&mut result, format!("{}{}", COP_FN[rs as usize], copno).as_str(), copno);
+                        // TODO arg, we need to use different register names between the mfc/mtc and cfc/ctc instructions.
+                        let is_cr = rs == 2 || rs == 6;
+                        r_type_rt_rd_cgpr(&mut result, format!("{}{}", COP_FN[rs as usize], copno).as_str(), copno, is_cr);
                     }
                 } else {
                     match copno {

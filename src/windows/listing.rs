@@ -626,7 +626,16 @@ impl GameWindow for Listing {
                                         let reg_name = if self.use_abi_names {
                                             format!("{}", n64::cpu::Cpu::cop0_register_name(*rnum))
                                         } else {
-                                            format!("c{}", *rnum)
+                                            format!("cp0gpr{}", *rnum)
+                                        };
+                                        ui.text_colored(CP0_REGISTERS_COLOR, reg_name.as_str());
+                                    },
+
+                                    DisassembledInstruction::Cop1Register(rnum) => {
+                                        let reg_name = if self.use_abi_names {
+                                            format!("{}", n64::cop1::Cop1::cop1_register_name(*rnum))
+                                        } else {
+                                            format!("fpcr{}", *rnum)
                                         };
                                         ui.text_colored(CP0_REGISTERS_COLOR, reg_name.as_str());
                                     },

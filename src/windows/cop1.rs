@@ -3,6 +3,8 @@ use crossbeam::channel::{Receiver, Sender, self};
 use n64::{cpu::{Cpu, DisassembledInstruction}, debugger::{self}};
 use gui::game::{GameWindow, Utils};
 
+use super::registers::HIGHLIGHT_COLORS;
+
 pub struct Cop1State {
     comms: SystemCommunication,    
 
@@ -51,7 +53,6 @@ struct HighlightInfo {
     color   : [f32; 4],
     duration: Option<f32>,
 }
-
 
 impl Drop for Cop1State {
     fn drop(&mut self) {
@@ -170,25 +171,29 @@ impl Cop1State {
 
                     if let Some(memory) = cpu_state.instruction_memory {
                         let disassembly = Cpu::disassemble(cpu_state.next_instruction_pc, memory[0]);
-                    //     let mut hl = 0;
-                    //     for (_, ref operand) in disassembly.iter().enumerate().skip(1) {
-                    //         match operand {
-                    //             DisassembledInstruction::Register(rnum) => {
-                    //                 self.highlighted_registers[*rnum as usize].color = HIGHLIGHT_COLORS[hl];
-                    //                 hl += 1;
-                    //             },
+                        let mut hl = 0;
+                        for (_, ref operand) in disassembly.iter().enumerate().skip(1) {
+                            match operand {
+                                // count the non-fpu registers so we can match the right colors
+                                DisassembledInstruction::Register(_) => {
+                                    hl += 1;
+                                },
 
-                    //             DisassembledInstruction::OffsetRegister(_, rnum) => {
-                    //                 self.highlighted_registers[*rnum as usize].color = HIGHLIGHT_COLORS[hl];
-                    //                 hl += 1;
-                    //             },
+                                DisassembledInstruction::OffsetRegister(_, _) => {
+                                    hl += 1;
+                                },
 
-                    //             _ => {},
-                    //         }
+                                DisassembledInstruction::FpuRegister(fpr) => {
+                                    self.highlighted_registers[*fpr as usize].color = HIGHLIGHT_COLORS[hl];
+                                    hl += 1;
+                                }
 
-                    //         // give up if there's any more (there should never be)
-                    //         if hl == 3 { break; }
-                    //     }
+                                _ => {},
+                            }
+
+                            // give up if there's any more (there should never be)
+                            if hl == 3 { break; }
+                        }
                     }
 
                     self.requested_cpu_state = false;

@@ -35,7 +35,7 @@ pub struct Registers {
     requested_cpu_state: bool,
 }
 
-const HIGHLIGHT_COLORS: [[f32; 4]; 3] = [
+pub const HIGHLIGHT_COLORS: [[f32; 4]; 3] = [
     [0.4, 0.1, 0.1, 1.0],
     [0.1, 0.4, 0.1, 1.0],
     [0.1, 0.1, 0.4, 1.0],
@@ -153,6 +153,11 @@ impl Registers {
                                     self.highlighted_registers[*rnum as usize].color = HIGHLIGHT_COLORS[hl];
                                     hl += 1;
                                 },
+
+                                // count the fpu register but don't highlight anything
+                                DisassembledInstruction::FpuRegister(_) => {
+                                    hl += 1;
+                                }
 
                                 _ => {},
                             }
