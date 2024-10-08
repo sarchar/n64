@@ -67,6 +67,8 @@ pub enum DebuggerCommandRequest {
     SetFgrInt64(usize, u64),
     /// Set a Cop1 fgr value
     SetFgrInt32(usize, u32),
+    /// Request a copy of the Cop0 TLB
+    GetTlb,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +93,9 @@ pub enum DebuggerCommandResponse {
     
     /// Fpu registers
     Cop1State { fgr: [cop1::Fgr; 32], fcr: u32, fr_bit: bool },
+
+    /// TLB
+    Tlb([cpu::TlbEntry; 32]),
 }
 
 #[derive(Clone, Debug)]
@@ -672,6 +677,12 @@ impl Debugger {
                 DebuggerCommandRequest::SetFgrInt32(fgrnum, value) => {
                     let mut cpu = self.system.cpu.borrow_mut();
                     cpu.cop1_mut().set_fgr_u32(fgrnum, value);
+                },
+
+                DebuggerCommandRequest::GetTlb => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    let tlb = self.system.cpu.borrow().tlb_clone();
+                    response_channel.send(DebuggerCommandResponse::Tlb(tlb)).unwrap();
                 },
             }
         }
