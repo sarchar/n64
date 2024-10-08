@@ -33,6 +33,8 @@ pub const Cop0_Status  : usize = 12;
 pub const Cop0_Cause   : usize = 13;
 pub const Cop0_EPC     : usize = 14; // Exception Program Counter
 pub const Cop0_PRId    : usize = 15; // Processor Revision Identifier
+pub const Cop0_Config  : usize = 16;
+pub const Cop0_LLAddr  : usize = 17;
 pub const _COP0_WATCHLO : usize = 18;
 pub const _COP0_WATCHHI : usize = 19;
 pub const Cop0_XContext: usize = 20;
@@ -40,8 +42,6 @@ pub const Cop0_PErr    : usize = 26; // Parity Error
 pub const Cop0_CacheErr: usize = 27;
 pub const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
 
-pub const Cop0_Config: usize = 16;
-pub const Cop0_LLAddr: usize = 17;
 
 const _STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
@@ -110,11 +110,11 @@ pub struct Address {
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-struct TlbEntry {
-    page_mask: u64,
-    entry_hi: u64,
-    entry_lo1: u64,
-    entry_lo0: u64
+pub struct TlbEntry {
+    pub page_mask: u64,
+    pub entry_hi: u64,
+    pub entry_lo1: u64,
+    pub entry_lo0: u64
 }
 
 #[derive(Clone)]
@@ -867,6 +867,10 @@ impl Cpu {
 
     pub fn cp0gpr_clone(&self) -> [u64; 32] {
         self.cp0gpr.clone()
+    }
+
+    pub fn tlb_clone(&self) -> [TlbEntry; 32] {
+        self.tlb.clone()
     }
 
     pub fn abi_name(i: usize) -> &'static str {
@@ -2789,8 +2793,10 @@ impl Cpu {
         // if the return value is non-zero, we have a valid jump destination and we can just jump to it and be done
         letscall!(assembler, Cpu::lookup_compiled_instruction_address);
         letsgo!(assembler
+            // return value of 0 - not found
             ;   test rax, rax
             ;   jz >notfound
+            // otherwise, a jump target was found, let's go!
             ;   jmp rax // weee
             ;notfound: // otherwise, put branch destination into self.pc, prefetch, and exit the block
             ;   mov v_arg1, QWORD [rsp+s_tmp0]
