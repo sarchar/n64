@@ -271,6 +271,16 @@ impl Cop1 {
         self.fgr[fgrnum].as_u32 = value;
     }
 
+    pub fn format_name(format_modifier: u8) -> &'static str {
+        const FORMATS: [&str; 32] = [
+            "?", "?", "?", "?", "?", "?", "?", "?",
+            "?", "?", "?", "?", "?", "?", "?", "?",
+            "s", "d", "?", "?", "w", "l", "?", "?",
+            "?", "?", "?", "?", "?", "?", "?", "?",
+        ];
+        FORMATS[format_modifier as usize]
+    }
+
     // move the condition signal value into al. clobbers v_tmp
     pub fn build_condition_signal_to_al(&self, assembler: &mut Assembler) {
         letsgo!(assembler

@@ -16,6 +16,7 @@ const OPCODE_COLOR       : [f32; 4] = [0.7, 0.4, 0.4, 1.0];
 const MNEMONIC_COLOR     : [f32; 4] = [0x30 as f32 / 255.0, 0xB5 as f32 / 255.0, 0xB8 as f32 / 255.0, 1.0];
 const R0_COLOR           : [f32; 4] = [0x8B as f32 / 255.0, 0x69 as f32 / 255.0, 0x9B as f32 / 255.0, 1.0]; // r0: #8b699b
 const REGISTERS_COLOR    : [f32; 4] = [0x98 as f32 / 255.0, 0x72 as f32 / 255.0, 0xE3 as f32 / 255.0, 1.0]; // registers: #9872ab
+const CP0_REGISTERS_COLOR: [f32; 4] = [0xF5 as f32 / 255.0, 0xE9 as f32 / 255.0, 0xC9 as f32 / 255.0, 1.0]; // cop0 registers: #f5e9c9
 const FPU_REGISTERS_COLOR: [f32; 4] = [0x80 as f32 / 255.0, 0x53 as f32 / 255.0, 0x2F as f32 / 255.0, 1.0]; // fpu registers: #80532f
 const CONSTANTS_COLOR    : [f32; 4] = TEXT_COLOR; // constants grey
 const SHIFT_AMOUNT_COLOR : [f32; 4] = TEXT_COLOR; // constants grey
@@ -242,6 +243,12 @@ impl Listing {
         while let Ok(response) = self.debugging_request_response_rx.try_recv() {
             match response {
                 debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
+                    // if we broke for whatever reason, refresh any listing memory jic it changed
+                    if self.cpu_state.running && !cpu_state.running {
+                        if self.listing_address.is_some() {
+                            self.request_listing_memory();
+                        }
+                    }
                     self.cpu_state = cpu_state;
                     self.requested_cpu_state = false;
                 },
@@ -587,13 +594,16 @@ impl GameWindow for Listing {
 
                             // display instruction mnemonic
                             ui.table_next_column();
-                            // 30b5b8
                             if let DisassembledInstruction::Mnemonic(ref mnemonic) = disassembly[0] {
                                 ui.text_colored(MNEMONIC_COLOR, mnemonic);
+
+                                if let Some(DisassembledInstruction::FormatModifier(format_modifier)) = disassembly.get(1) {
+                                    ui.same_line_with_spacing(0.0, 0.0);
+                                    ui.text_colored(R0_COLOR, format!(".{}", n64::cop1::Cop1::format_name(*format_modifier)));
+                                }
                             }
 
                             // display operands
-                            // constants: #abaa67
                             ui.table_next_column();
 
                             for (index, ref operand) in disassembly.iter().enumerate().skip(1) {
@@ -612,6 +622,20 @@ impl GameWindow for Listing {
                                         }
                                     },
 
+                                    DisassembledInstruction::Cop0Register(rnum) => {
+                                        let reg_name = if self.use_abi_names {
+                                            format!("{}", n64::cpu::Cpu::cop0_register_name(*rnum))
+                                        } else {
+                                            format!("c{}", *rnum)
+                                        };
+                                        ui.text_colored(CP0_REGISTERS_COLOR, reg_name.as_str());
+                                    },
+
+                                    DisassembledInstruction::FpuRegister(fnum) => {
+                                        ui.text_colored(FPU_REGISTERS_COLOR, format!("f{}", *fnum));
+                                    },
+
+
                                     DisassembledInstruction::ConstantS16(imm) => {
                                         ui.text_colored(CONSTANTS_COLOR, format!("0x{:04X}", *imm));
                                         comment.push_str(&format!("imm={}", *imm));
@@ -620,10 +644,6 @@ impl GameWindow for Listing {
                                     DisassembledInstruction::ShiftAmount(sa) => {
                                         ui.text_colored(SHIFT_AMOUNT_COLOR, format!("{}", *sa));
                                     }
-
-                                    DisassembledInstruction::FpuRegister(fnum) => {
-                                        ui.text_colored(FPU_REGISTERS_COLOR, format!("f{}", *fnum));
-                                    },
 
                                     DisassembledInstruction::Address(address) => {
                                         if (*address as i32) as u64 == *address {
@@ -655,6 +675,11 @@ impl GameWindow for Listing {
                                         ui.text_colored(TEXT_COLOR, format!(")"));
 
                                         comment.push_str(&format!("imm={}, address=?", *offset));
+                                    }
+
+                                    DisassembledInstruction::FormatModifier(_) => {
+                                        // skip the extra comma this field creates
+                                        continue;
                                     }
 
                                     _ => {},

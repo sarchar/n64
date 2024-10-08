@@ -121,11 +121,13 @@ struct TlbEntry {
 pub enum DisassembledInstruction {
     Mnemonic(String),
     Register(usize),
+    Cop0Register(usize),
     FpuRegister(usize),
     ConstantS16(i16),
     Address(u64),
     OffsetRegister(i16, usize),
     ShiftAmount(usize),
+    FormatModifier(u8),
 }
 
 const JIT_BLOCK_MAX_INSTRUCTION_COUNT: usize = 512; //2048; // max instruction count per block
@@ -880,6 +882,18 @@ impl Cpu {
         const NAMES: [&str; 32] = [
             "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
             "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
+        ];
+
+        NAMES[i]
+    }
+
+    pub fn cop0_register_name(i: usize) -> &'static str {
+        const NAMES: [&str; 32] = [
+            "Index", "Random", "EntryLo0", "EntryLo1", "Context", "PageMask",
+            "Wired", "c7?", "BadVaddr", "Count", "EntryHi", "Compare", "Status",
+            "Cause", "EPC", "PRid", "Config", "LLAddr", "WatchLo", "WatchHi",
+            "XContext", "c21?", "c22?", "c23?", "c24?", "c25?", "PErr",
+            "CacheErr", "c28?", "c29?", "ErrorEPC", "c31?"
         ];
 
         NAMES[i]
@@ -3283,6 +3297,14 @@ impl Cpu {
         }
 
         if (self.inst.v & (1 << 25)) != 0 {
+            // mul at $FFFFFFFF8000512C
+            // {
+            //     let special = self.inst.v & 0x3F;
+            //     if special == 0b000_010 {
+            //         // mul
+            //         panic!("mul at ${:08X}", self.current_instruction_pc);
+            //     }
+            // }
             cop.special(self.inst.v)
         } else {
             let func = (self.inst.v >> 21) & 0x0F;
@@ -8867,6 +8889,10 @@ impl Cpu {
         let func   = opcode & 0x3F;
         let imm    = (opcode & 0xFFFF) as i16;
         let target = opcode & 0x03FFFFFF;
+        // fpu regs
+        let ft     = ((opcode >> 16) & 0x1F) as usize;
+        let fs     = ((opcode >> 11) & 0x1F) as usize;
+        let fd     = ((opcode >>  6) & 0x1F) as usize;
 
         let mut result = Vec::new();
         
@@ -8951,6 +8977,14 @@ impl Cpu {
             result.push(DisassembledInstruction::Register(rs));
         };
 
+        // fd, fs
+        let r_type_fd_fs = |result: &mut Vec<_>, mn, fmt| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::FormatModifier(fmt));
+            result.push(DisassembledInstruction::FpuRegister(fd));
+            result.push(DisassembledInstruction::FpuRegister(fs));
+        };
+
         // rs, rt
         let r_type_rs_rt = |result: &mut Vec<_>, mn| {
             push_mnemonic(result, mn);
@@ -8958,11 +8992,23 @@ impl Cpu {
             result.push(DisassembledInstruction::Register(rt));
         };
 
-        // rt, rd
-        let r_type_rt_rd = |result: &mut Vec<_>, mn| {
+        // fs, ft
+        let r_type_fs_ft = |result: &mut Vec<_>, mn, fmt| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::FormatModifier(fmt));
+            result.push(DisassembledInstruction::FpuRegister(fs));
+            result.push(DisassembledInstruction::FpuRegister(ft));
+        };
+
+        // rt, rd as cgpr
+        let r_type_rt_rd_cgpr = |result: &mut Vec<_>, mn, copno| {
             push_mnemonic(result, mn);
             result.push(DisassembledInstruction::Register(rt));
-            result.push(DisassembledInstruction::Register(rd));
+            match copno {
+                0 => result.push(DisassembledInstruction::Cop0Register(rd)),
+                1 => result.push(DisassembledInstruction::FpuRegister(rd)),
+                _ => result.push(DisassembledInstruction::Register(rd)),
+            }
         };
 
         // rd, rt, rs
@@ -8979,6 +9025,15 @@ impl Cpu {
             result.push(DisassembledInstruction::Register(rd));
             result.push(DisassembledInstruction::Register(rs));
             result.push(DisassembledInstruction::Register(rt));
+        };
+
+        // fd, fs, ft
+        let r_type_fd_fs_ft = |result: &mut Vec<_>, mn, fmt| {
+            push_mnemonic(result, mn);
+            result.push(DisassembledInstruction::FormatModifier(fmt));
+            result.push(DisassembledInstruction::FpuRegister(fd));
+            result.push(DisassembledInstruction::FpuRegister(fs));
+            result.push(DisassembledInstruction::FpuRegister(ft));
         };
 
         // rd, rt, sa
@@ -8999,16 +9054,21 @@ impl Cpu {
                             r_type_rd_rt_sa(&mut result, "sll");
                         }
                     },
+                    0b000_001 => no_type(&mut result, "<reserved>"),
                     0b000_010 => r_type_rd_rt_sa(&mut result, "srl"),
                     0b000_011 => r_type_rd_rt_sa(&mut result, "sra"),
                     0b000_100 => r_type_rd_rt_rs(&mut result, "sllv"),
+                    0b000_101 => no_type(&mut result, "<reserved>"),
                     0b000_110 => r_type_rd_rt_rs(&mut result, "srlv"),
                     0b000_111 => r_type_rd_rt_rs(&mut result, "srav"),
 
                     0b001_000 => r_type_rs(&mut result, "jr"),
                     0b001_001 => r_type_rd_rs(&mut result, "jalr"),
+                    0b001_010 => no_type(&mut result, "<reserved>"),
+                    0b001_011 => no_type(&mut result, "<reserved>"),
                     0b001_100 => no_type(&mut result, "syscall"),
                     0b001_101 => no_type(&mut result, "break"),
+                    0b001_110 => no_type(&mut result, "<reserved>"),
                     0b001_111 => no_type(&mut result, "sync"),
 
                     0b010_000 => r_type_rd(&mut result, "mfhi"),
@@ -9016,6 +9076,7 @@ impl Cpu {
                     0b010_010 => r_type_rd(&mut result, "mflo"),
                     0b010_011 => r_type_rs(&mut result, "mtlo"),
                     0b010_100 => r_type_rd_rt_rs(&mut result, "dsllv"),
+                    0b010_101 => no_type(&mut result, "<reserved>"),
                     0b010_110 => r_type_rd_rt_rs(&mut result, "dsrlv"),
                     0b010_111 => r_type_rd_rt_rs(&mut result, "dsrav"),
 
@@ -9037,6 +9098,8 @@ impl Cpu {
                     0b100_110 => r_type_rd_rs_rt(&mut result, "xor"),
                     0b100_111 => r_type_rd_rs_rt(&mut result, "nor"),
 
+                    0b101_000 => no_type(&mut result, "<reserved>"),
+                    0b101_001 => no_type(&mut result, "<reserved>"),
                     0b101_010 => r_type_rd_rs_rt(&mut result, "slt"),
                     0b101_011 => r_type_rd_rs_rt(&mut result, "sltu"),
                     0b101_100 => r_type_rd_rs_rt(&mut result, "dadd"),
@@ -9049,12 +9112,16 @@ impl Cpu {
                     0b110_010 => r_type_rs_rt(&mut result, "tlt"),
                     0b110_011 => r_type_rs_rt(&mut result, "tltu"),
                     0b110_100 => r_type_rs_rt(&mut result, "teq"),
+                    0b110_101 => no_type(&mut result, "<reserved>"),
                     0b110_110 => r_type_rs_rt(&mut result, "tne"),
+                    0b110_111 => no_type(&mut result, "<reserved>"),
 
                     0b111_000 => r_type_rd_rt_sa(&mut result, "dsll"),
+                    0b111_001 => no_type(&mut result, "<reserved>"),
                     0b111_010 => r_type_rd_rt_sa(&mut result, "dsrl"),
                     0b111_011 => r_type_rd_rt_sa(&mut result, "dsra"),
                     0b111_100 => r_type_rd_rt_sa(&mut result, "dsll32"),
+                    0b111_101 => no_type(&mut result, "<reserved>"),
                     0b111_110 => r_type_rd_rt_sa(&mut result, "dsrl32"),
                     0b111_111 => r_type_rd_rt_sa(&mut result, "dsra32"),
 
@@ -9121,7 +9188,7 @@ impl Cpu {
                     if COP_FN[rs as usize].starts_with("?") {
                         push_mnemonic(&mut result, format!("unknown cop{} func=${:02b}_{:03b}", copno, rs >> 3, rs & 0x07).as_str());
                     } else {
-                        r_type_rt_rd(&mut result, format!("{}{}", COP_FN[rs as usize], copno).as_str());
+                        r_type_rt_rd_cgpr(&mut result, format!("{}{}", COP_FN[rs as usize], copno).as_str(), copno);
                     }
                 } else {
                     match copno {
@@ -9139,7 +9206,17 @@ impl Cpu {
                             if CP1_FN[func as usize].starts_with("?") {
                                 push_mnemonic(&mut result, format!("unknown cop{} func=${:03b}_{:03b}", copno, func >> 3, func & 0x07).as_str());
                             } else {
-                                r_type_rt_rd(&mut result, format!("{}", CP1_FN[func as usize]).as_str());
+                                // all special ops on cop1 have a format flag
+                                let fmt = ((opcode >> 21) & 0x1F) as u8;
+                                let mn = format!("{}", CP1_FN[func as usize]);
+                                // three operand instructions fd, fs, ft
+                                if func < 4 { // add, sub, mul, div
+                                    r_type_fd_fs_ft(&mut result, &mn, fmt);
+                                } else if func < 40 { // two operand instructions fd, fs: sqrt, abs, mov, neg, round, trunc, ceil, floor, cvt
+                                    r_type_fd_fs(&mut result, &mn, fmt);
+                                } else { // comparisons use fs, ft
+                                    r_type_fs_ft(&mut result, &mn, fmt);
+                                }
                             }
                         },
                         _ => {
@@ -9159,7 +9236,10 @@ impl Cpu {
             0b011_010 => i_type_rt_base(&mut result, "ldl"),
             0b011_011 => i_type_rt_base(&mut result, "ldr"),
 
-            0b011_111 => no_type(&mut result, "<invalid>"),
+            0b011_100 => no_type(&mut result, "<reserved>"),
+            0b011_101 => no_type(&mut result, "<reserved>"),
+            0b011_110 => no_type(&mut result, "<reserved>"),
+            0b011_111 => no_type(&mut result, "<reserved>"),
 
             0b100_000 => i_type_rt_base(&mut result, "lb"),
             0b100_001 => i_type_rt_base(&mut result, "lh"),
@@ -9180,11 +9260,15 @@ impl Cpu {
 
             0b110_000 => i_type_rt(&mut result, "ll"),
             0b110_001 => i_type_ft_base(&mut result, "lwc1"),
+            0b110_011 => no_type(&mut result, "<reserved>"),
+            0b110_100 => i_type_rt(&mut result, "lld"),
             0b110_101 => i_type_ft_base(&mut result, "ldc1"),
             0b110_111 => i_type_rt(&mut result, "ld"),
 
             0b111_000 => i_type_rt(&mut result, "sc"),
             0b111_001 => i_type_rt(&mut result, "swc1"),
+            0b111_011 => no_type(&mut result, "<reserved>"),
+            0b111_100 => i_type_rt(&mut result, "scd"),
             0b111_101 => i_type_ft_base(&mut result, "sdc1"),
             0b111_111 => i_type_rt(&mut result, "sd"),
 
