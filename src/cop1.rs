@@ -407,9 +407,10 @@ impl Cop1 {
                 // Remove the Cause bits from value
                 let cause = (value >> 12) & 0x3F;
                 self.fcr_control_status = value & !0x0003_F000;
-                self.update_cause(cause, false)?;
                 // Restore condition
                 self.condition_signal = ((value >> 23) & 0x01) != 0;
+                // Update cause and generate exception if enabled
+                self.update_cause(cause, false)?;
                 Ok(())
             },
 

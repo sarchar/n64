@@ -14,6 +14,8 @@ pub const IMask_VI: u32 = 3;
 pub const IMask_PI: u32 = 4;
 pub const IMask_DP: u32 = 5;
 
+pub const MI_INTERRUPT_NAMES: [&'static str; 6] = ["SP", "SI", "AI", "VI", "PI", "DP"];
+
 #[derive(Debug)]
 pub enum InterruptUpdateMode {
     EnableInterrupt,  // Set/clear the interrupt enable flag
@@ -44,7 +46,7 @@ impl MipsInterface {
         let (tx, rx) = mpsc::channel();
 
         MipsInterface { 
-            comms         : comms,
+            comms,
             interrupt_mask: 0,
             interrupt     : 0,
             trigger_int   : 0,

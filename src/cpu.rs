@@ -62,8 +62,8 @@ pub const ExceptionCode_Tr   : u64 = 13; // Trap instruction
 pub const ExceptionCode_FPE  : u64 = 15; // Floating-Point exception
 pub const _ExceptionCode_WATCH: u64 = 23; // Watch exception
 
-const InterruptCode_RCP: u64 = 0x04;
-const InterruptCode_Timer: u64 = 0x80;
+pub const InterruptCode_RCP: u64 = 0x04;
+pub const InterruptCode_Timer: u64 = 0x80;
 
 #[derive(Debug, Default)]
 pub struct InstructionDecode {
@@ -870,6 +870,10 @@ impl Cpu {
         self.cp0gpr.clone()
     }
 
+    pub fn cause(&self) -> u64 {
+        self.cp0gpr[Cop0_Cause]
+    }
+
     pub fn tlb_clone(&self) -> [TlbEntry; 32] {
         self.tlb.clone()
     }
@@ -1062,7 +1066,7 @@ impl Cpu {
     }
     
     #[inline(always)]
-    fn read_u32_phys_direct(&mut self, physical_address: u64) -> Result<u32, InstructionFault> {
+    pub fn read_u32_phys_direct(&mut self, physical_address: u64) -> Result<u32, InstructionFault> {
         Ok(self.bus.borrow_mut().read_u32(physical_address as usize)?)
     }
 
@@ -1362,7 +1366,9 @@ impl Cpu {
         if self.jit_executing {
             Cpu::prefetch_bridge(self);
         } else {
-            self.prefetch()?;
+            // since the exception handler is in unmapped address space, this prefetch should never cause
+            // a TLBL/miss or AdEL exception
+            let _ = self.prefetch().unwrap();
         }
 
         // break out of all processing
@@ -2904,7 +2910,7 @@ impl Cpu {
         //println!("Count=${:08X} Compare=${:08X}", self.cp0gpr[Cop0_Count], self.cp0gpr[Cop0_Compare]);
         if self.cp0gpr[Cop0_Compare] == self.cp0gpr[Cop0_Count] {
             debug!(target: "CPU", "COP0: timer interrupt");
-            let _ = self.timer_interrupt();
+            self.timer_interrupt()?;
         }
 
         // decrement Random every instruction, leaving bit 5 alone
@@ -3074,10 +3080,9 @@ impl Cpu {
             // Other (cpu) exceptions continue execution, but return the exception code to the debugger
             err @ Err(InstructionFault::OtherException(_)) => err,
 
-            // Raise FPE on InstructionFault::FloatingPointException
+            // Raise FPE exception on InstructionFault::FloatingPointException
             Err(InstructionFault::FloatingPointException) => { 
-                let _ = self.floating_point_exception();
-                Ok(())
+                self.floating_point_exception()
             },
 
             Err(InstructionFault::ReadWrite(fault)) => {
@@ -3292,15 +3297,13 @@ impl Cpu {
             0 => panic!("TODO"),
             1 => &mut self.cop1,
             _ => {
-                self.coprocessor_unusable_exception(copno)?;
-                return Ok(());
+                return self.coprocessor_unusable_exception(copno);
             },
         };
 
         // if the co-processor isn't enabled, generate an exception
         if (self.cp0gpr[Cop0_Status] & (0x1000_0000 << copno)) == 0 {
-            self.coprocessor_unusable_exception(copno)?;
-            return Ok(());
+            return self.coprocessor_unusable_exception(copno);
         }
 
         if (self.inst.v & (1 << 25)) != 0 {
@@ -9207,6 +9210,17 @@ impl Cpu {
                     }
                 } else {
                     match copno {
+                        0 => {
+                            let special = opcode & 0x3F;
+                            match special {
+                                0b000_001 => no_type(&mut result, "tlbr"),
+                                0b000_010 => no_type(&mut result, "tlbwi"),
+                                0b000_110 => no_type(&mut result, "tlbwr"),
+                                0b001_000 => no_type(&mut result, "tlbp"),
+                                0b011_000 => no_type(&mut result, "eret"),
+                                _ => push_mnemonic(&mut result, format!("unknown cop{} special=${:02b}_{:03b}", copno, special >> 3, special & 0x07).as_str()),
+                            }
+                        },
                         1 => {
                             const CP1_FN: [&str; 64] = [
                                 "add", "sub", "mul", "div", "sqrt", "abs", "mov", "neg",

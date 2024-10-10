@@ -1,7 +1,6 @@
 use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
-use imgui::{DrawList, sys::{ImGuiSeparatorFlags_SpanAllColumns, ImGuiSeparatorFlags_Horizontal}};
-use n64::debugger;
+use n64::{debugger, cpu, mips};
 use gui::game::{GameWindow, Utils};
 
 #[derive(Clone, Debug, Default)]
@@ -25,6 +24,12 @@ pub struct Breakpoints {
     /// list of current breakpoints
     breakpoints: Vec<debugger::BreakpointInfo>,
     
+    /// Enabled exception breakpoints
+    break_on_exception: u32,
+    break_on_interrupt: u8,
+    break_on_rcp: u8,
+    break_on_dirty: bool,
+
     /// show table resizers
     show_resizers: bool,
 
@@ -45,6 +50,10 @@ impl Breakpoints {
             comms,
             debugging_request_response_rx,
             debugging_request_response_tx,
+            break_on_exception: 0,
+            break_on_interrupt: 0,
+            break_on_rcp: 0,
+            break_on_dirty: true, // clear break_on immediately
             show_resizers: false,
             requested_breakpoints: false,
             breakpoints: Vec::new(),
@@ -60,6 +69,15 @@ impl Breakpoints {
             };
 
             self.requested_breakpoints = debugger::Debugger::send_command(&self.comms, command).is_ok();
+        }
+
+        if self.break_on_dirty {
+            let command = debugger::DebuggerCommand {
+                command_request: debugger::DebuggerCommandRequest::SetBreakOnException(self.break_on_exception, self.break_on_interrupt, self.break_on_rcp),
+                response_channel: None,
+            };
+
+            self.break_on_dirty = !debugger::Debugger::send_command(&self.comms, command).is_ok(); 
         }
 
         while let Ok(response) = self.debugging_request_response_rx.try_recv() {
@@ -290,58 +308,213 @@ impl GameWindow for Breakpoints {
 
             ui.next_column();
 
-            let mut interrupt = false;
-            ui.checkbox("Interrupt", &mut interrupt);            
-            if ui.is_item_hovered() { ui.tooltip_text("Interrupt (select which interrupts below)"); }
-            ui.same_line();
-            let mut tlb_mod = false;
-            ui.checkbox("TLB Mod", &mut tlb_mod);            
-            if ui.is_item_hovered() { ui.tooltip_text("TLB modification"); }
-            ui.same_line();
-            let mut tlb_load = false;
-            ui.checkbox("TLB Load", &mut tlb_load);            
+            ////////////////////////////////////////////////////////////////
+            let widget_width = ui.current_column_width() / 5.0;
+ 
+            ui.set_next_item_width(widget_width);
+            let mut tlb_load = (self.break_on_exception & (1 << cpu::ExceptionCode_TLBL)) != 0;
+            if ui.checkbox("TLB Load", &mut tlb_load) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_TLBL;
+                self.break_on_dirty = true;
+            }
             if ui.is_item_hovered() { ui.tooltip_text("TLB Miss exception (load or instruction fetch)"); }
 
-            let mut tlb_store = false;
-            ui.checkbox("TLB Store", &mut tlb_store);            
+            ui.same_line_with_pos(1.0*widget_width);
+            let mut tlb_store = (self.break_on_exception & (1 << cpu::ExceptionCode_TLBS)) != 0;
+            if ui.checkbox("TLB Store", &mut tlb_store) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_TLBS;
+                self.break_on_dirty = true;
+            }
             if ui.is_item_hovered() { ui.tooltip_text("TLB Miss exception (store)"); }
-            ui.same_line();
-            let mut adel = false;
-            ui.checkbox("Addr Load", &mut adel);            
+
+            ui.same_line_with_pos(2.0*widget_width);
+            let mut tlb_mod = (self.break_on_exception & (1 << cpu::ExceptionCode_Mod)) != 0;
+            if ui.checkbox("TLB Mod", &mut tlb_mod) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Mod;
+                self.break_on_dirty = true;
+            }
+            if ui.is_item_hovered() { ui.tooltip_text("TLB modification"); }
+
+            ui.same_line_with_pos(3.0*widget_width);
+            let mut adel = (self.break_on_exception & (1 << cpu::ExceptionCode_AdEL)) != 0;
+            if ui.checkbox("Addr Load", &mut adel) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_AdEL;
+                self.break_on_dirty = true;
+            }
             if ui.is_item_hovered() { ui.tooltip_text("Address Error exception (load or instruction fetch)"); }
-            ui.same_line();
-            let mut ades = false;
-            ui.checkbox("Addr Store", &mut ades);            
+
+            ui.same_line_with_pos(4.0*widget_width);
+            let mut ades = (self.break_on_exception & (1 << cpu::ExceptionCode_AdES)) != 0;
+            if ui.checkbox("Addr Store", &mut ades) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_AdES;
+                self.break_on_dirty = true;
+            }
             if ui.is_item_hovered() { ui.tooltip_text("Address Error exception (store)"); }
 
-            let mut syscall = false;
-            ui.checkbox("Syscall", &mut syscall);            
-            ui.same_line();
-            let mut breakpoint = false;
-            ui.checkbox("Breakpoint", &mut breakpoint);            
-            ui.same_line();
-            let mut reserved = false;
-            ui.checkbox("Reserved", &mut reserved);
+            ////////////////////////////////////////////////////////////////
+            let mut overflow = (self.break_on_exception & (1 << cpu::ExceptionCode_Ov)) != 0;
+            if ui.checkbox("Overflow", &mut overflow) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Ov;
+                self.break_on_dirty = true;
+            }
+            if ui.is_item_hovered() { ui.tooltip_text("Arithmetic Overflow exception"); }
+
+            ui.same_line_with_pos(1.0*widget_width);
+            let mut fpe = (self.break_on_exception & (1 << cpu::ExceptionCode_FPE)) != 0;
+            if ui.checkbox("FPE", &mut fpe) { 
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_FPE;
+                self.break_on_dirty = true;
+            }
+            if ui.is_item_hovered() { ui.tooltip_text("Floating-point exception"); }
+
+            ui.same_line_with_pos(2.0*widget_width);
+            let mut coprocessor = (self.break_on_exception & (1 << cpu::ExceptionCode_CpU)) != 0;
+            if ui.checkbox("Coprocessor", &mut coprocessor) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_CpU;
+                self.break_on_dirty = true;
+            }
+            if ui.is_item_hovered() { ui.tooltip_text("Coprocessor Unusable exception"); }
+
+            ui.same_line_with_pos(3.0*widget_width);
+            let mut reserved = (self.break_on_exception & (1 << cpu::ExceptionCode_RI)) != 0;
+            if ui.checkbox("Reserved", &mut reserved) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_RI;
+                self.break_on_dirty = true;
+            }
             if ui.is_item_hovered() { ui.tooltip_text("Reserved Instruction exception"); }
 
-            let mut coprocessor = false;
-            ui.checkbox("Coprocessor", &mut coprocessor);            
-            if ui.is_item_hovered() { ui.tooltip_text("Coprocessor Unusable exception"); }
-            ui.same_line();
-            let mut overflow = false;
-            ui.checkbox("Overflow", &mut overflow);            
-            if ui.is_item_hovered() { ui.tooltip_text("Arithmetic Overflow exception"); }
-            ui.same_line();
-            let mut trap = false;
-            ui.checkbox("Trap", &mut trap);            
+            ////////////////////////////////////////////////////////////////
+            let mut trap = (self.break_on_exception & (1 << cpu::ExceptionCode_Tr)) != 0;
+            if ui.checkbox("Trap", &mut trap) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Tr;
+                self.break_on_dirty = true;
+            } 
+            if ui.is_item_hovered() { ui.tooltip_text("Trap instruction exception"); }
 
-            let mut fpe = false;
-            ui.checkbox("FPE", &mut fpe);            
-            if ui.is_item_hovered() { ui.tooltip_text("Floating-point exception"); }
+            ui.same_line_with_pos(1.0*widget_width);
+            let mut syscall = (self.break_on_exception & (1 << cpu::ExceptionCode_Sys)) != 0;
+            if ui.checkbox("Syscall", &mut syscall) { 
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Sys;
+                self.break_on_dirty = true;
+            } 
+            if ui.is_item_hovered() { ui.tooltip_text("Syscall exception"); }
+
+            ui.same_line_with_pos(2.0*widget_width);
+            let mut breakpoint = (self.break_on_exception & (1 << cpu::ExceptionCode_Bp)) != 0;
+            if ui.checkbox("Breakpoint", &mut breakpoint) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Bp;
+                self.break_on_dirty = true;
+            } 
+            if ui.is_item_hovered() { ui.tooltip_text("Breakpoint exception"); }
+
+            ui.same_line_with_pos(3.0*widget_width);
+            let mut interrupt = (self.break_on_exception & (1 << cpu::ExceptionCode_Int)) != 0;
+            if ui.checkbox("Interrupt", &mut interrupt) {
+                self.break_on_exception ^= 1 << cpu::ExceptionCode_Int;
+                self.break_on_dirty = true;
+                // if we toggled on and no interrupts are enabled, enable them all
+                if interrupt && self.break_on_interrupt == 0 {
+                    self.break_on_interrupt = (cpu::InterruptCode_RCP | cpu::InterruptCode_Timer) as u8;
+                    if self.break_on_rcp == 0 {
+                        self.break_on_rcp = 0x3F;
+                    }
+                }
+            }
+            if ui.is_item_hovered() { ui.tooltip_text("Interrupt (select which interrupts below)"); }
 
             Utils::good_separator(ui);
 
-            ui.text("test");
+            ////////////////////////////////////////////////////////////////
+            ui.tree_node_config("Interrupts").default_open(true).build(|| {
+                let old_break_on_interrupt = self.break_on_interrupt;
+ 
+                let mut int_timer = (self.break_on_interrupt & (cpu::InterruptCode_Timer as u8)) != 0;
+                if ui.checkbox("Timer", &mut int_timer) {
+                    self.break_on_interrupt ^= cpu::InterruptCode_Timer as u8;
+                    self.break_on_dirty = true;
+                }
+                if ui.is_item_hovered() { ui.tooltip_text("Timer interrupt"); }
+
+                ui.same_line();
+                let mut int_rcp = (self.break_on_interrupt & (cpu::InterruptCode_RCP as u8)) != 0;
+                if ui.checkbox("RCP", &mut int_rcp) {
+                    self.break_on_interrupt ^= cpu::InterruptCode_RCP as u8;
+                    self.break_on_dirty = true;
+                    // if toggled ON and no RCP interrupts are enabled, enable them all
+                    if int_rcp && self.break_on_rcp == 0 {
+                        self.break_on_rcp = 0x3F;
+                    }
+                }
+                if ui.is_item_hovered() { ui.tooltip_text("External Interrupt caused by the RCP"); }
+
+                // if we enabled an Interrupt from nothing enabled, make sure ExceptionCode_Int is set
+                if old_break_on_interrupt == 0 && self.break_on_interrupt != 0 {
+                    self.break_on_exception |= 1 << cpu::ExceptionCode_Int;
+                    self.break_on_dirty = true;
+                }
+
+                ui.tree_node_config("RCP interrupts").default_open(true).build(|| {
+                    let old_break_on_rcp = self.break_on_rcp;
+
+                    let mut sp = (self.break_on_rcp & (1 << mips::IMask_SP)) != 0;
+                    if ui.checkbox("SP", &mut sp) {
+                        self.break_on_rcp ^= 1 << mips::IMask_SP;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("RSP break") }
+
+                    ui.same_line();
+                    let mut si = (self.break_on_rcp & (1 << mips::IMask_SI)) != 0;
+                    if ui.checkbox("SI", &mut si) {
+                        self.break_on_rcp ^= 1 << mips::IMask_SI;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("Serial Interface DMA to/from PIF RAM finished") }
+
+                    ui.same_line();
+                    let mut ai = (self.break_on_rcp & (1 << mips::IMask_AI)) != 0;
+                    if ui.checkbox("AI", &mut ai) {
+                        self.break_on_rcp ^= 1 << mips::IMask_AI;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("Audio Interface (audio DMA start)"); }
+
+                    ui.same_line();
+                    let mut vi = (self.break_on_rcp & (1 << mips::IMask_VI)) != 0;
+                    if ui.checkbox("VI", &mut vi) {
+                        self.break_on_rcp ^= 1 << mips::IMask_VI;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("Video Interface hit VI_V_INTR"); }
+
+                    ui.same_line();
+                    let mut pi = (self.break_on_rcp & (1 << mips::IMask_PI)) != 0;
+                    if ui.checkbox("PI", &mut pi) {
+                        self.break_on_rcp ^= 1 << mips::IMask_PI;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("Peripheral Inteface DMA transfer finished"); }
+
+                    ui.same_line();
+                    let mut dp = (self.break_on_rcp & (1 << mips::IMask_DP)) != 0;
+                    if ui.checkbox("DP", &mut dp) {
+                        self.break_on_rcp ^= 1 << mips::IMask_DP;
+                        self.break_on_dirty = true;
+                    }
+                    if ui.is_item_hovered() { ui.tooltip_text("RDP FULL_SYNC interrupt"); }
+
+                    // if all interrupts were disabled and we enable any one of them, make sure RCP interrupt is enabled
+                    if old_break_on_rcp == 0 && self.break_on_rcp != 0 {
+                        self.break_on_interrupt |= cpu::InterruptCode_RCP as u8;
+                        self.break_on_dirty = true;
+                        // if break_on_interrupt went from 0 to something, then make sure ExceptionCode_Int is enabled
+                        if (self.break_on_interrupt & !(cpu::InterruptCode_RCP as u8)) == 0 {
+                            self.break_on_exception |= 1 << cpu::ExceptionCode_Int;
+                        }
+                    }
+
+                });
+            });
         });
 
         opened

@@ -69,7 +69,9 @@ pub enum DebuggerCommandRequest {
     SetFgrInt32(usize, u32),
     /// Request a copy of the Cop0 TLB
     GetTlb,
-}
+    /// Set the break on exception flags
+    SetBreakOnException(u32, u8, u8), // (exceptions, interrupts, rcp)
+ }
 
 #[derive(Debug, Clone)]
 pub enum DebuggerCommandResponse {
@@ -308,6 +310,11 @@ pub struct Debugger {
     next_cpu_run_for: u64,
     run_to_address: Option<u64>,
 
+    // exception breakpoints
+    break_on_exception: u32,
+    break_on_interrupt: u8,
+    break_on_rcp: u8,
+
     ctrlc_count: u32,
 
     breakpoints: Rc<RefCell<Breakpoints>>,
@@ -342,11 +349,14 @@ impl Debugger {
         breakpoints.borrow_mut().set_debugger_bus(Some(debugger_bus.clone()));
 
         Debugger {
-            exit_requested   : false,
-            cpu_running      : true,
-            next_cpu_run_for : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
-            run_to_address   : None,
-            ctrlc_count      : 0,
+            exit_requested    : false,
+            cpu_running       : true,
+            next_cpu_run_for  : 0,     // first call to run_for() won't tick the CPU, it'll just calculate how many cycles to run for
+            run_to_address    : None,
+            break_on_exception: 0,
+            break_on_interrupt: 0,
+            break_on_rcp      : 0,
+            ctrlc_count       : 0,
             breakpoints,
             system,
             command_receiver,
@@ -461,8 +471,38 @@ impl Debugger {
             Ok(next_cycles) => next_cycles,
 
             // Ignore CPU faults for now -- TODO: breakpoint on certain exceptions?
-            _err @ Err(cpu::InstructionFault::OtherException(_)) => {
-                // println!("err: ${:?}", _err);
+            Err(cpu::InstructionFault::OtherException(exception_code)) => {
+                if (self.break_on_exception & (1 << exception_code)) != 0 {
+                    if exception_code == cpu::ExceptionCode_Int {
+                        let interrupt_cause = (self.system.cpu.borrow().cause() >> 8) as u8;
+                        if (self.break_on_interrupt & interrupt_cause & (cpu::InterruptCode_RCP as u8)) != 0 {
+                            // read the MIPS state
+                            let mi_interrupt = self.system.cpu.borrow_mut().read_u32_phys_direct(0x0430_0008).unwrap() as u8; // read MI_INTERRUPT (TODO *should* use PEEK?)
+
+                            // check if it overlaps with what we want to break on
+                            if (self.break_on_rcp & mi_interrupt) != 0 {
+                                // Create a string listing the interrupts that were trigged
+                                let mut names = String::new();
+                                for i in 0..6 {
+                                    if (self.break_on_rcp & mi_interrupt & (1 << i)) != 0 {
+                                        if names.len() > 0 {
+                                            names.push_str(",");
+                                        }
+                                        names.push_str(&mips::MI_INTERRUPT_NAMES[i]);
+                                    }
+                                }
+                                info!(target: "DEBUGGER", "CPU break on RCP interrupt(s) 0x{:02X} ({})", self.break_on_rcp & mi_interrupt, names);
+                                self.cpu_running = false;
+                            }
+                        } else if (self.break_on_interrupt & interrupt_cause) != 0 {
+                            info!(target: "DEBUGGER", "CPU break on Timer interrupt");
+                            self.cpu_running = false;
+                        }
+                    } else {
+                        info!(target: "DEBUGGER", "CPU break on exception {}", exception_code);
+                        self.cpu_running = false;
+                    }
+                }
                 self.system.rcp.borrow().calculate_free_cycles()
             },
             
@@ -683,6 +723,12 @@ impl Debugger {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
                     let tlb = self.system.cpu.borrow().tlb_clone();
                     response_channel.send(DebuggerCommandResponse::Tlb(tlb)).unwrap();
+                },
+
+                DebuggerCommandRequest::SetBreakOnException(break_on_exception, break_on_interrupt, break_on_rcp) => {
+                    self.break_on_exception = break_on_exception;
+                    self.break_on_interrupt = break_on_interrupt;
+                    self.break_on_rcp       = break_on_rcp;
                 },
             }
         }
