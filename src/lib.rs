@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicBool, Ordering, AtomicU8};
 
 use atomic_counter::{AtomicCounter, RelaxedCounter};
 use directories_next::ProjectDirs;
@@ -187,6 +187,9 @@ pub struct SystemCommunication {
     pub total_cpu_steps: Arc<RelaxedCounter>,
     pub prefetch_counter: Arc<RelaxedCounter>,
 
+    // current MIPS active interrupts
+    pub interrupt_register: Arc<AtomicU8>,
+    
     // current render framebuffer
     pub vi_origin: Arc<AtomicU32>,
     // framebuffer width
@@ -235,6 +238,7 @@ impl SystemCommunication {
             reset_signal      : Arc::new(AtomicU32::new(0)),
             total_cpu_steps   : Arc::new(RelaxedCounter::new(0)),
             prefetch_counter  : Arc::new(RelaxedCounter::new(0)),
+            interrupt_register: Arc::new(AtomicU8::new(0)),
             vi_origin         : Arc::new(AtomicU32::new(0)),
             vi_width          : Arc::new(AtomicU32::new(0)),
             vi_format         : Arc::new(AtomicU32::new(0)),
@@ -338,6 +342,7 @@ impl System {
     pub fn run_for(&mut self, cpu_cycles: u64, execution_breakpoints: &HashSet<u64>) -> Result<u64, cpu::InstructionFault> {
         let mut cycles_ran = 0;
 
+        // println!("DUMP: Run for {} cycles", cpu_cycles);
         let mut run_result = if self.comms.settings.read().unwrap().cpu_interpreter_only {
             let mut cpu = self.cpu.borrow_mut();
             let mut result = Ok(());
@@ -364,17 +369,43 @@ impl System {
                     }
                 }
             } else {
-                while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
+                while (cycles_ran < cpu_cycles || cpu.next_is_delay_slot()) && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
                     match cpu.step_interpreter() {
                         Ok(_) => {},
                         err @ Err(_) => {
                             result = err;
+                            // let mut sum = 0xABCD_EFAB_CDEF_ABCDu64;
+                            // for i in 0..32 {
+                            //     sum ^= cpu.regs()[i];
+                            //     sum = (sum >> 7) | (sum << 57);
+                            // }
+                            // if !cpu.next_is_delay_slot() {
+                            //     println!("DUMP: PC=${:016X} CHECK=${:016X} ND={:?} S=${:016X}", cpu.next_instruction_pc(), sum, cpu.next_is_delay_slot(), cpu.cp0gpr()[cpu::Cop0_Status]);
+                            // }
                             break;
                         },
                     }
 
                     cycles_ran += 1;
                     self.comms.total_cpu_steps.inc();
+
+                    // let mut sum = 0xABCD_EFAB_CDEF_ABCDu64;
+                    // for i in 0..32 {
+                    //     sum ^= cpu.regs()[i];
+                    //     sum = (sum >> 7) | (sum << 57);
+                    // }
+                    // if !cpu.next_is_delay_slot() {
+                    //     println!("DUMP: PC=${:016X} CHECK=${:016X} ND={:?} S=${:016X}", cpu.next_instruction_pc(), sum, cpu.next_is_delay_slot(), cpu.cp0gpr()[cpu::Cop0_Status]);
+                    // }
+                    // if (cpu.next_instruction_pc() as u32) == 0x80004AE0 || (cpu.next_instruction_pc() as u32) == 0x80004AE4 {
+                    //     for row in 0..4 {
+                    //         for col in 0..8 {
+                    //             let reg = row * 8 + col;
+                    //             print!("R{:02}:${:016X} ", reg, cpu.regs()[reg as usize]);
+                    //         }
+                    //         println!();
+                    //     }
+                    // }
                 }
             }
 
@@ -409,9 +440,34 @@ impl System {
                 cycles_ran = cpu.num_steps() - start_steps;
                 self.comms.total_cpu_steps.add(cycles_ran as usize);
             }
+            // let mut cpu = self.cpu.borrow_mut();
+            // while cycles_ran < cpu_cycles && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) && result.is_ok() {
+            //     let start_steps = cpu.num_steps();
+            //     result = cpu.run_for(1, execution_breakpoints);
+            //     cycles_ran += cpu.num_steps() - start_steps;
+
+            //     let mut sum = 0xABCD_EFAB_CDEF_ABCDu64;
+            //     for i in 0..32 {
+            //         sum ^= cpu.regs()[i];
+            //         sum = (sum >> 7) | (sum << 57);
+            //     }
+            //     println!("DUMP: PC=${:016X} CHECK=${:016X} ND={:?} S=${:016X}", cpu.next_instruction_pc(), sum, cpu.next_is_delay_slot(), cpu.cp0gpr()[cpu::Cop0_Status]);
+            //     if (cpu.next_instruction_pc() as u32) == 0x80004AE0 || (cpu.next_instruction_pc() as u32) == 0x80004AE4 {
+            //         for row in 0..4 {
+            //             for col in 0..8 {
+            //                 let reg = row * 8 + col;
+            //                 print!("R{:02}:${:016X} ", reg, cpu.regs()[reg as usize]);
+            //             }
+            //             println!();
+            //         }
+            //     }
+            // }
+            // self.comms.total_cpu_steps.add(cycles_ran as usize);
 
             result
         }.map(|_| 0); // convert Result<(), InstructionFault> to Result<u64, InstructionFault>
+
+        // println!("DUMP: Total={} Result={:?}", self.comms.total_cpu_steps.get(), run_result);
 
         // set here, since rcp.step() could re-set it, e.g., another dma needs to happen
         self.comms.break_cpu_cycles.store(false, Ordering::Relaxed);
@@ -437,9 +493,9 @@ impl System {
             (rcp.should_interrupt(), rcp.calculate_free_cycles())
         };
 
-        if trigger_int != 0 {
+        if run_result.is_ok() {
             //assert!(run_result.is_ok(), "if this happens it means some RCP interrupt occurred in the same cycle as a CPU exception");
-            run_result = self.cpu.borrow_mut().rcp_interrupt().map(|_| 0);
+            run_result = self.cpu.borrow_mut().rcp_interrupt(trigger_int != 0).map(|_| 0);
         }
 
         if run_result.is_err() {

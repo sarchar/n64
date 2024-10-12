@@ -403,9 +403,16 @@ macro_rules! letscheck {
         // check if there was an exception in the previous letscall
         // ;   jne >exit_for_exception
         letsgo!($ops
+            ;   mov v_tmp, rax // rax contains the result of a previous bridge call, save it
+        );
+        letscall!($ops, Cpu::is_jit_other_exception_none); // eax will be 1 if no exception is set
+        
+        letsgo!($ops
             // check jit_other_exception for indication that we need to break out
-            ;   cmp BYTE [r_cpu + offset_of!(Cpu, jit_other_exception) as i32], BYTE 0u8 as _
-            ;   je >no_error
+            // ;   cmp WORD [r_cpu + offset_of!(Cpu, jit_other_exception) as i32], WORD 0u32 as _
+            // ;   je >no_error
+            ;   test eax, eax
+            ;   jnz >no_error
             // usually prefetch is called in Cpu::exception() so we don't need to set up an exception handler,
             // however with InstructionFault::Break, we need to return to the same address that caused the breakpoint
             // so we will set PC and prefetch here
@@ -415,6 +422,7 @@ macro_rules! letscheck {
             ;   mov v_arg1, QWORD $self.current_instruction_pc as _
             ;   jmp >restore_pc_and_break_out
             ;no_error:
+            ;   mov rax, v_tmp // restore rax
         );
 
         // TODO: we could save and return an error code
@@ -499,6 +507,7 @@ pub struct Cpu {
 
     pub bus: Rc<RefCell<dyn Addressable>>,
     pc: u64,                       // lookahead PC
+    last_instruction_pc: u64,      // TEMP
     current_instruction_pc: u64,   // actual PC of the currently executing instruction
                                    // only valid inside step_interpreter()
     next_instruction: Option<u32>, // emulates delay slot (prefetch, next instruction), but can be None during JIT runs
@@ -553,7 +562,7 @@ pub struct Cpu {
     jit_conditional_branch: Option<(i64, bool, bool)>, // branch_offset, is_branch_likely, is_unconditional
     jit_current_assembler_offset: usize,
     jit_executing: bool, // true when inside run_block()
-    jit_other_exception: bool, // true when an InstructionFault::OtherException occurs inside a bridged function call
+    jit_other_exception: Option<u64>, // Some when an InstructionFault::OtherException occurs inside a bridged function call
     jit_run_limit: u64, // starting run limit for each block that's run
     jit_idle_loop_detected: bool, // true if we exited a block due to an idle loop
     jit_breakpoint: bool, // true if we executed a block due to an external Breakpoint
@@ -596,6 +605,7 @@ impl Cpu {
 
             bus,
             pc: 0,
+            last_instruction_pc: 0,
             current_instruction_pc: 0,
             next_instruction: None,
             next_instruction_pc: 0xFFFF_FFFF_FFFF_FFFF,
@@ -701,7 +711,7 @@ impl Cpu {
             jit_conditional_branch: None,
             jit_current_assembler_offset: 0,
             jit_executing: false,
-            jit_other_exception: false,
+            jit_other_exception: None,
             jit_run_limit: 0,
             jit_idle_loop_detected: false,
             jit_breakpoint: false,
@@ -805,8 +815,12 @@ impl Cpu {
         self.current_instruction_pc = self.next_instruction_pc;
         self.is_delay_slot = false;
 
+        // wipe the TLB
+        self.tlb = [TlbEntry::default(); 32];
+        
         // reset some JIT flags
-        self.jit_other_exception = false;
+        self.jit_other_exception = None;
+        self.jit_breakpoint = false;
 
         // invalidate the exception handlers
         // TODO should actually invalidate everything?
@@ -864,6 +878,10 @@ impl Cpu {
 
     pub fn regs_copy(&self) -> [u64; 32] {
         self.gpr.clone()
+    }
+
+    pub fn cp0gpr(&self) -> &[u64] {
+        &self.cp0gpr
     }
 
     pub fn cp0gpr_clone(&self) -> [u64; 32] {
@@ -941,6 +959,11 @@ impl Cpu {
         (self.cp0gpr[Cop0_Status] & check) == (check & !0x06)
     }
 
+    // wrapper to check if jit_other_exception is None
+    extern "sysv64" fn is_jit_other_exception_none(cpu: *mut Cpu) -> u32 {
+        (unsafe { (*cpu).jit_other_exception.is_none() }) as u32
+    }
+
     #[inline(always)]
     fn read_u8(&mut self, virtual_address: usize) -> Result<u8, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
@@ -961,7 +984,7 @@ impl Cpu {
 
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_TLBL); // only valid exceptions here
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             }
 
@@ -1016,7 +1039,7 @@ impl Cpu {
 
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_AdEL || exception_code == ExceptionCode_TLBL); // only valid exceptions here
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             },
 
@@ -1165,7 +1188,7 @@ impl Cpu {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in write_u16_bridge: {:?}", e);
+                panic!("error in write_u16_bridge: {:?} at pc=${:016X}", e, cpu.current_instruction_pc);
             }
         }
     }
@@ -1205,7 +1228,7 @@ impl Cpu {
 
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_AdES || exception_code == ExceptionCode_TLBS || exception_code == ExceptionCode_Mod);
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             },
 
@@ -1403,7 +1426,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1469,7 +1492,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1493,7 +1516,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1517,7 +1540,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1541,7 +1564,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1565,7 +1588,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1595,7 +1618,7 @@ impl Cpu {
             Ok(_) => 0,
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -1617,7 +1640,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as i64
                     },
 
@@ -1642,7 +1665,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as u32
                     },
 
@@ -1667,7 +1690,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as i64
                     },
 
@@ -1692,7 +1715,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as u32
                     },
 
@@ -1717,7 +1740,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as i64
                     },
 
@@ -1742,7 +1765,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as u64
                     },
 
@@ -1767,7 +1790,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as i64
                     },
 
@@ -1792,7 +1815,7 @@ impl Cpu {
             Err(InstructionFault::FloatingPointException) => {
                 match cpu.floating_point_exception() {
                     Err(InstructionFault::OtherException(exception_code)) => {
-                        cpu.jit_other_exception = true;
+                        cpu.jit_other_exception = Some(exception_code);
                         exception_code as i64
                     },
 
@@ -1809,9 +1832,9 @@ impl Cpu {
 
     pub fn interrupt(&mut self, interrupt_signal: u64) -> Result<(), InstructionFault> {
         // update Cause even if an interrupt exception doesn't occur
-        self.cp0gpr[Cop0_Cause] = (self.cp0gpr[Cop0_Cause] & !0xFF0) | (interrupt_signal << 8);
+        self.cp0gpr[Cop0_Cause] |= interrupt_signal << 8;
 
-        // check if the interrupts are enabled
+        // check if the interrupt is masked (enabled)
         if (interrupt_signal & (self.cp0gpr[Cop0_Status] >> 8)) != 0 {
             if (self.cp0gpr[Cop0_Status] & 0x07) == 0x01 { // IE must be set, and EXL and ERL both clear
                 // interrupts are executed outside of step_interpreter()/run_block(), which means self.current_instruction_pc 
@@ -1825,8 +1848,13 @@ impl Cpu {
 
     // int_pins is a 5 bit mask representing bits IP2-IP6 of the Cause register, with 1 being "request pending"
     #[inline(always)]
-    pub fn rcp_interrupt(&mut self) -> Result<(), InstructionFault> {
-        self.interrupt(InterruptCode_RCP)
+    pub fn rcp_interrupt(&mut self, set_rcp_interrupt: bool) -> Result<(), InstructionFault> {
+        if set_rcp_interrupt {
+            self.interrupt(InterruptCode_RCP)
+        } else {
+            self.cp0gpr[Cop0_Cause] &= !(InterruptCode_RCP << 8);
+            Ok(())
+        }
     }
 
     #[inline(always)]
@@ -2091,7 +2119,7 @@ impl Cpu {
             Ok(None) => todo!(),
 
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u64
             },
 
@@ -2203,7 +2231,7 @@ impl Cpu {
                 }
             };
 
-            match self.lookup_cached_block(physical_address) {
+            let run_result = match self.lookup_cached_block(physical_address) {
                 CachedBlockStatus::NotCached => {
                     debug!(target: "JIT-BUILD", "[pc=${:08X} not found in block cache, compiling]", self.next_instruction_pc as u32);
 
@@ -2214,16 +2242,20 @@ impl Cpu {
                     // execute the block
                     trace!(target: "JIT-RUN", "[finished compiling. executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
-                    self.num_steps += self.run_block(&*compiled_block, compiled_block.start_address); // start_address => run from the first instruction
+                    let (steps, run_result) = self.run_block(&*compiled_block, compiled_block.start_address); // start_address => run from the first instruction
+                    self.num_steps += steps;
                     trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
+                    run_result
                 },
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     let compiled_block = compiled_block.borrow();
                     trace!(target: "JIT-RUN", "[block found in cache, executing block id={} block_start=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.start_address, physical_address-compiled_block.start_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
-                    self.num_steps += self.run_block(&*compiled_block, physical_address); // start execution at an offset into the block
+                    let (steps, run_result) = self.run_block(&*compiled_block, physical_address); // start execution at an offset into the block
+                    self.num_steps += steps;
                     trace!(target: "JIT-RUN", "[block executed {} cycles]", self.num_steps - starting_steps);
+                    run_result
                 }
 
                 CachedBlockStatus::Uncompilable => { // interpret some instructions and try again
@@ -2238,10 +2270,12 @@ impl Cpu {
 
                     continue;
                 },
-            }
+            };
 
             // if we broke out due to an idle loop, fast-forward time
             if self.jit_idle_loop_detected {
+                assert!(run_result.is_ok()); // curious if this ever happens
+
                 // we could only have incremented by as many as jit_run_limit steps would allow, but we need to know how many steps were taken
                 let steps_taken = self.num_steps - num_steps_before; 
                 let steps_remaining = self.jit_run_limit.saturating_sub(steps_taken);
@@ -2267,6 +2301,8 @@ impl Cpu {
                 // Trigger timer interrupt if enough cycles occurred
                 if cp0_count_increment >= self.cp0_compare_distance as u64 {
                     debug!(target: "CPU", "CPU0: timer interrupt");
+                    // If some other exception occurred before this call, this just sets 
+                    // Cause without generating an exception
                     self.timer_interrupt()?;
                 }
             }
@@ -2276,6 +2312,13 @@ impl Cpu {
                 self.jit_breakpoint = false;
                 return Err(InstructionFault::Break);
             }
+
+            // return run result if it was some error (jit_breakpoint takes precedence)
+            if run_result.is_err() {
+                // println!("returning {:?} at PC=${:016X} causeIF=${:02X}", run_result, self.next_instruction_pc, (self.cp0gpr[Cop0_Cause] >> 8) as u8);
+                return run_result;
+            }
+            // let _ = run_result?;
         }
 
         Ok(())
@@ -2285,6 +2328,10 @@ impl Cpu {
     fn build_block(&mut self, execution_breakpoints: &HashSet<u64>) -> Result<Rc<RefCell<CompiledBlock>>, InstructionFault> {
         let mut assembler = dynasmrt::x64::Assembler::new().unwrap();
         let start_address = self.next_instruction_pc;
+
+        if (start_address & 0x03) != 0 {
+            todo!("unaligned jump!");
+        }
 
         let entry_point = assembler.offset();
 
@@ -2607,6 +2654,17 @@ impl Cpu {
                         ;   jmp >restore_pc_and_break_out                // we must exit the block, so no block linking
                         // this label is used above, before the instruction is compiled, to skip delay slots
                         ;no_branch:
+                        // in the no_branch target, we should also check if we need to get out
+                        ;   cmp DWORD [rsp+s_cycle_count], BYTE 0i8 as _ // check cycle count hitting <=0
+                        ;   jg >no_break_out                             // if gt, check break_cpu_cycles
+                        ;break_out2:   
+                        // break out due to cycles, without taking branch
+                        ;   mov v_arg1, QWORD self.next_instruction_pc as _
+                        ;   jmp >restore_pc_and_break_out
+                        ;no_break_out:
+                        ;   mov rax, QWORD self.comms.break_cpu_cycles.as_ptr() as _ // or when break_cpu_cycles is set
+                        ;   cmp BYTE [rax], BYTE 0u8 as _
+                        ;   jne <break_out2
                     );
                 } else {
                     trace!(target: "JIT-BUILD", "** checking normal branch condition:");
@@ -2834,8 +2892,8 @@ impl Cpu {
         Ok(self.cached_blocks.get(&block_id).unwrap().clone())
     }
 
-    // return number of instructions executed
-    fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> u64 {
+    // return number of instructions executed as well as how the block terminated
+    fn run_block(&mut self, compiled_block: &CompiledBlock, execution_address: u64) -> (u64, Result<(), InstructionFault>) {
         let trampoline: extern "sysv64" fn(cpu: *mut Cpu, compiled_instruction_address: u64, run_limit: u32) -> i32 = unsafe {
             std::mem::transmute(self.jit_trampoline.as_ref().unwrap().ptr(self.jit_trampoline_entry_point))
         };
@@ -2848,26 +2906,16 @@ impl Cpu {
         // blocks can run beyond their run limit so the return value of call_block could be negative
         let res = (self.jit_run_limit as i64) - (trampoline(self as *mut Cpu, compiled_instruction_address, self.jit_run_limit as u32) as i64);
 
-        // TODO maybe, return error codes here
-        //let res = match call_block(self.jit_run_limit as u32, instruction_index) {
-        //    // blocks can run beyond their cycle limit, so we give 4B cycles of leeway, and anything else negative is an error
-        //    // jit_run_limit can change during the course of the run (when we need to reduce the
-        //    // length of the run due to Compare value changes)
-        //    i if i >= -2147483648 => Ok((self.jit_run_limit as i64 - i) as u64), // 0xFFFF_FFFF_8000_0000
-
-        //    i => { // i < 0xFFFF_FFFF_8000_0000 indicates error
-        //        todo!("execution error code: {}", i as u32);
-        //    },
-        //};
-
         self.jit_executing = false;
 
-        // TODO: return instruction fault?
         // TODO: note that this is also used for exiting on InstructionFault::Break
-        // if self.jit_other_exception { ... // if an exception occurred that caused the block to exit... 
-        self.jit_other_exception = false;
+        // However, jit_breakpoint is checked first in Cpu::run_for(), throwing away run_result.
+        let run_result = match std::mem::replace(&mut self.jit_other_exception, None) {
+            None => Ok(()),
+            Some(exception_code) => Err(InstructionFault::OtherException(exception_code)),
+        };
 
-        res as u64
+        (res as u64, run_result)
     }
 
     // since this function is used by assembly, a return value of 0 indicates "not present", instead of using Option<>.
@@ -2879,6 +2927,8 @@ impl Cpu {
             CachedBlockStatus::Cached(compiled_block) => {
                 let borrow = compiled_block.borrow();
                 let instruction_index = (physical_address - borrow.start_address) >> 2;
+                trace!(target: "JIT-RUN", "[block found in cache, linking to block ${:08X} starting instruction_index={} address=${:08X}]", 
+                    borrow.start_address, instruction_index, borrow.jump_table[instruction_index as usize]);
                 borrow.jump_table[instruction_index as usize]
             },
             // any result other than Cached() => block is not compiled
@@ -2963,6 +3013,7 @@ impl Cpu {
             Ok(x) => x,
 
             Err(InstructionFault::OtherException(ExceptionCode_TLBL)) => {
+                println!("TLBL at ${:08X}, branch from ${:08X}", self.current_instruction_pc, self.last_instruction_pc);
                 // we need to know if the current self.next_instruction is a jump instruction and thus, if self.pc fetch is in a delay slot.
                 // link instructions also need to correctly update RA to be after the delay slot
                 let is_branch = match self.inst.op {
@@ -3073,6 +3124,7 @@ impl Cpu {
         self.next_is_delay_slot = false;
 
         // execute instruction and check result
+        self.last_instruction_pc = self.current_instruction_pc;
         let result = match self.instruction_table[self.inst.op as usize](self) {
             // Most common situation
             result @ Ok(_) => result,
@@ -3823,6 +3875,11 @@ impl Cpu {
                         self.cp0gpr_latch
                     },
 
+                    Cop0_Cause => {
+                        Cpu::update_cop0_cause(self);
+                        self.cp0gpr[self.inst.rd]
+                    },
+
                     //Cop0_Random => self.cp0gpr[Cop0_Random] | self.cp0gpr_random_bit5,
 
                     _ => self.cp0gpr[self.inst.rd],
@@ -3854,6 +3911,7 @@ impl Cpu {
                 // Setting IE, at this point if we're still executing an exception is pending
                 if (self.inst.rd == Cop0_Status) && (old_val & 0x01) == 0 && (val & 0x01) == 0x01 {
                     if (self.cp0gpr[Cop0_Status] & 0x02) == 0 { // EXL must be clear to run a new exception
+                        Cpu::update_cop0_cause(self);
                         let pending_interrupts = (self.cp0gpr[Cop0_Cause] >> 8) as u8;
                         if (((self.cp0gpr[Cop0_Status] >> 8) as u8) & pending_interrupts) != 0 { // any enabled pending interrupts?
                             self.exception(ExceptionCode_Int, false)?;
@@ -3970,7 +4028,7 @@ impl Cpu {
 
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_Int);
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as i64
             },
 
@@ -4033,6 +4091,10 @@ impl Cpu {
                         },
 
                         _ => {
+                            if self.inst.rd == Cop0_Cause { // update InterruptCode_RPC:
+                                letscall!(assembler, Cpu::update_cop0_cause);
+                            }
+                            
                             letsgo!(assembler
                                 ;   mov v_tmp_32, DWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
                                 ;   movsxd v_tmp2, v_tmp_32
@@ -4079,6 +4141,11 @@ impl Cpu {
                             letsgo!(assembler
                                 ;   mov rax, QWORD [r_cp0gpr + (self.inst.rd * 8) as i32]
                             );
+                        },
+
+                        Cop0_Cause => {
+                            // call update_cop0_cause()
+                            todo!();
                         },
 
                         _ => {
@@ -4402,6 +4469,27 @@ impl Cpu {
         }
     }
 
+    // Cause register has interrupt pending bits that are based on an external flag set by the RCP
+    // Those bits are ACK'd by writing to various registers (i.e., SI_STATUS).  However, they're not
+    // ever cleared unless another rcp_interrupt comes along and sets a new value. We actually need
+    // to respect those changes immediately, so the new system uses an atomic u8 shared between the mips
+    // interface and the cpu. This function actually reads from MI_INTERRUPT to update the interrupt register
+    // clears the RCP interrupt flag if the interrupt register is zero
+    #[inline] 
+    extern "sysv64" fn update_cop0_cause(cpu: *mut Cpu) {
+        let cpu = unsafe { &mut *cpu };
+        
+        // first the read from MI_INTERRUPT, updating interrupt_register
+        let _ = cpu.read_u32_phys_direct(0x0430_0008).unwrap(); // MI_INTERRUPT causes an update to interrupt register state and returns the value
+        // then the interrupt register has the actual interrupt pins
+        let interrupt_register = cpu.comms.interrupt_register.load(Ordering::Relaxed);
+        if interrupt_register != 0 {
+            cpu.cp0gpr[Cop0_Cause] |= InterruptCode_RCP << 8;
+        } else {
+            cpu.cp0gpr[Cop0_Cause] &= !(InterruptCode_RCP << 8);
+        }
+    }
+
     // Count has not been updated within the currently executing block yet, so we need to update that
     // However, self.num_steps has also not been updated with the new cycles already ran in the block
     // So to figure that out first, we need the run limit and how many cycles have executed so far.
@@ -4549,7 +4637,7 @@ impl Cpu {
 
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_CpU || exception_code == ExceptionCode_RI);
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             },
 
@@ -5613,13 +5701,13 @@ impl Cpu {
             
             Err(InstructionFault::OtherException(exception_code)) => {
                 assert!(exception_code == ExceptionCode_CpU || exception_code == ExceptionCode_AdEL || exception_code == ExceptionCode_TLBL);
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             },
 
             Err(InstructionFault::ReadWrite(ReadWriteFault::Break)) => {
                 cpu.jit_breakpoint = true;
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(0); // The value here doesn't matter, since jit_breakpoint takes precedence
                 0 as u32
             },
 
@@ -5677,7 +5765,7 @@ impl Cpu {
 
             // return exceptions as negative values
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             }
 
@@ -5789,6 +5877,9 @@ impl Cpu {
         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: sh r{}, ${:04X}(r{})", self.current_instruction_pc as u32, self.jit_current_assembler_offset, 
                  self.inst.rt, self.inst.signed_imm as u16, self.inst.rs);
 
+        // setup values needed for exceptions in write_u16
+        letssetupexcept!(self, assembler, false);
+        
         // value to write in 2nd argument (v_arg1_32)
         if self.inst.rt == 0 {
             letsgo!(assembler
@@ -5805,6 +5896,9 @@ impl Cpu {
 
         // v_arg1_32 has 32-bit value to write, v_arg2 contains address
         letscall!(assembler, Cpu::write_u16_bridge);
+
+        // check for exceptions
+        letscheck!(self, assembler);
 
         // TODO check return value for error/exception
         CompileInstructionResult::Continue
@@ -6054,13 +6148,13 @@ impl Cpu {
 
             // return exceptions as negative values
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             }
 
             Err(InstructionFault::ReadWrite(ReadWriteFault::Break)) => {
                 cpu.jit_breakpoint = true;
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(0); // the exception doesn't matter since jit_breakpoint takes precedence
                 0 as u32
             },
 
@@ -6118,7 +6212,7 @@ impl Cpu {
 
             // return exceptions as negative values
             Err(InstructionFault::OtherException(exception_code)) => {
-                cpu.jit_other_exception = true;
+                cpu.jit_other_exception = Some(exception_code);
                 exception_code as u32
             }
 
@@ -9176,7 +9270,16 @@ impl Cpu {
                 }
             },
 
-            0b000_101 => i_type_rs_rt(&mut result, "bne"),
+            0b000_101 => {
+                if rt == 0 {
+                    push_mnemonic(&mut result, "bnez");
+                    result.push(DisassembledInstruction::Register(rs));
+                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    result.push(DisassembledInstruction::Address(branch_target));
+                } else {
+                    i_type_rs_rt(&mut result, "bne");
+                }
+            },
             0b000_110 => i_type_rs_rt(&mut result, "blez"),
             0b000_111 => i_type_rs_rt(&mut result, "bgtz"),
 

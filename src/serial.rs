@@ -128,6 +128,7 @@ impl SerialInterface {
 
             // SI_STATUS
             0x0_0018 => {
+                trace!(target: "SI", "write32 SI_STATUS");
                 self.interrupt_flag = false;
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_SI, InterruptUpdateMode::ClearInterrupt)).unwrap();
             },

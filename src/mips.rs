@@ -77,47 +77,44 @@ impl MipsInterface {
     }
 
     pub fn should_interrupt(&mut self) -> u32 {
-        mem::replace(&mut self.trigger_int, 0)
+        // mem::replace(&mut self.trigger_int, 0)
+        self.comms.interrupt_register.load(Ordering::Relaxed) as u32
     }
 
     fn update_interrupts(&mut self) {
-        loop {
-            if let Ok(update) = self.interrupt_update_rx.try_recv() {
-                let bit = 1 << update.0;
-                match update.1 {
-                    InterruptUpdateMode::EnableInterrupt => {
-                        self.interrupt_mask |= bit;
-                    },
+        while let Ok(update) = self.interrupt_update_rx.try_recv() {
+            let bit = 1 << update.0;
+            match update.1 {
+                InterruptUpdateMode::EnableInterrupt => {
+                    // println!("Enabling interrupt mask bit 0x{:02X}", bit);
+                    self.interrupt_mask |= bit;
+                },
 
-                    InterruptUpdateMode::DisableInterrupt => {
-                        self.interrupt_mask &= !bit;
-                    },
+                InterruptUpdateMode::DisableInterrupt => {
+                    // println!("Disabling interrupt mask bit 0x{:02X}", bit);
+                    self.interrupt_mask &= !bit;
+                },
 
-                    InterruptUpdateMode::SetInterrupt => {
-                        // if interrupt is enabled and not currently set, cause interrupt to trigger
-                        if (self.interrupt_mask & bit) != 0 {
-                            if (self.interrupt & bit) != 0 {
-                                debug!(target: "MI", "triggering interrupt ${:02X} while interrupt bit hasn't been cleared", bit);
-                            }
-                            self.trigger_int |= bit;
-                        }
-                        self.interrupt |= bit;
-                    },
+                InterruptUpdateMode::SetInterrupt => {
+                    // println!("Setting interrupt bit 0x{:02X}", bit);
+                    self.interrupt |= bit;
+                },
 
-                    InterruptUpdateMode::ClearInterrupt => {
-                        // ack the interrupt
-                        self.interrupt &= !bit;
-                    },
+                InterruptUpdateMode::ClearInterrupt => {
+                    // println!("Clearing interrupt bit 0x{:02X}", bit);
+                    self.interrupt &= !bit;
+                },
 
-                    InterruptUpdateMode::TriggerOnce => {
-                        // force trigger interrupt (used for debugging)
-                        self.trigger_int |= bit;
-                    },
-                }
-                continue;
+                InterruptUpdateMode::TriggerOnce => {
+                    todo!("need a new implementation");
+                    // println!("Force triggering bit 0x{:02X}", bit);
+                    // force trigger interrupt (used for debugging)
+                    // self.trigger_int |= bit;
+                },
             }
-            break;
         }
+
+        self.comms.interrupt_register.store((self.interrupt & self.interrupt_mask) as u8, Ordering::Relaxed);
     }
 
     pub fn get_repeat_count(&mut self) -> Option<u32> {
@@ -139,6 +136,7 @@ impl Addressable for MipsInterface {
 
             // MI_INTERRUPT
             0x0_0008 => {
+                // trace!(target: "MI", "read32 MI_INTERRUPT value=${:02X}", self.interrupt);
                 self.update_interrupts();
                 self.interrupt
             },

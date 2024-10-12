@@ -455,8 +455,8 @@ impl GameWindow for Cop0State {
                         ui.tree_node_config(format!("Pending Interrupts: 0x{:02X}###cop0_cause_ip", ip))
                             .default_open(true)
                             .build(|| {
-                                let mut timer = ((ip >> 7) & 0x01) != 0;
-                                let mut rcp   = ((ip >> 3) & 0x01) != 0;
+                                let mut timer = (ip & cpu::InterruptCode_Timer) != 0;
+                                let mut rcp   = (ip & cpu::InterruptCode_RCP) != 0;
                                 ui.checkbox("Timer", &mut timer);
                                 if ui.is_item_hovered() {
                                     ui.tooltip_text("(bit 15) 1 when a Timer interrupt is pending");
@@ -464,7 +464,7 @@ impl GameWindow for Cop0State {
                                 ui.same_line();
                                 ui.checkbox("RCP", &mut rcp);
                                 if ui.is_item_hovered() {
-                                    ui.tooltip_text("(bit 12) 1 when an external RCP/MIPS Interface interrupt is pending");
+                                    ui.tooltip_text("(bit 10) 1 when an external RCP/MIPS Interface interrupt is pending");
                                 }
                             });
 
