@@ -1036,11 +1036,21 @@ impl Addressable for PeripheralInterface {
             } else { // 32-bit aligned can do memcpy
                 assert!((length & 0x03) == 0); // length needs to be 32-bit (and really 64-bit, since this is going to DRAM)
                 let start = (offset & !0x1000_0000) >> 2;
-                let end = start + (length as usize >> 2);
-                if end >= self.cartridge_rom.len() {
-                    println!("about to fail reading from start=${:08X}", start);
+                if start < self.cartridge_rom.len() {
+                    // read some memory, padded to the full length
+                    let remaining_size = self.cartridge_rom.len() - start;
+                    let read_size = std::cmp::min(remaining_size, (length as usize) >> 2);
+                    let end = start + read_size;
+                    let mut res = self.cartridge_rom[start..end].to_owned();
+                    let padding_size = ((length as usize) >> 2) - read_size;
+                    if padding_size > 0 {
+                        res.extend(vec![0; padding_size]);
+                    }
+                    Ok(res)
+                } else {
+                    // println!("about to fail reading from start=${:08X}", start);
+                    Err(ReadWriteFault::Invalid)
                 }
-                Ok((&self.cartridge_rom[start..end]).to_vec())
             }
         } else {
             todo!("probably not used ever");

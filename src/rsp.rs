@@ -959,7 +959,7 @@ impl RspCpuCore {
         info!(target: "RSP", "RSQ table generation took {:.2?}", alg_time);
 
         let mut core = RspCpuCore {
-            comms: comms,
+            comms,
 
             num_steps: 0,
             pc: 0,
@@ -974,8 +974,8 @@ impl RspCpuCore {
 
             rcp_high: false,
             rcp_input: 0,
-            rcp_table: rcp_table,
-            rsq_table: rsq_table,
+            rcp_table,
+            rsq_table,
             div_result: 0u32,
 
             v: [unsafe { _mm_setzero_si128() }; 32],
@@ -1648,7 +1648,7 @@ impl RspCpuCore {
                         };
 
                         if dma_info.source_address as usize >= 0x80_0000 {
-                            println!("dma about to fail: {:?}", dma_info);
+                            println!("dma about to fail: {:?}, self.pc=${:08X}", dma_info, self.current_instruction_pc);
                             panic!(); //return Ok(());
                         }
 

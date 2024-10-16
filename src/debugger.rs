@@ -15,11 +15,19 @@ pub const BP_WRITE: u8 = 0x02;
 pub const BP_EXEC : u8 = 0x04;
 pub const BP_RW   : u8 = BP_READ | BP_WRITE;
 
+#[derive(Clone, Debug)]
+pub enum MemoryChunk {
+    /// (start address, memory)
+    Valid(u64, Vec<u32>), 
+    /// (start address, invalid size)
+    Invalid(u64, usize),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CpuStateInfo {
     pub next_instruction_pc: u64,
     pub running: bool,
-    pub instruction_memory: Option<Vec<u32>>,
+    pub instruction_memory: Vec<MemoryChunk>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -82,7 +90,7 @@ pub enum DebuggerCommandResponse {
     CpuRegisters([u64; 32]),
 
     /// Equivelent of a DMA read
-    ReadBlock(u64, Option<Vec<u32>>), // id, data
+    ReadBlock(u64, Vec<MemoryChunk>), // id, data
 
     /// Response to [DebuggerCommandReqeust::GetBreakpoints] containing a list of [BreakpointInfo]s
     Breakpoints(HashMap<u64, BreakpointInfo>),
@@ -184,7 +192,7 @@ impl Breakpoints {
 
                 // the JIT will need to invalidate the block where this breakpoint is
                 if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
-                    cpu.invalidate_block_cache(address.physical_address, 4);
+                    cpu.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
                 }
             }
 
@@ -206,7 +214,7 @@ impl Breakpoints {
 
             // invalidate the block in the JIT for whatever reason
             if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
-                cpu.invalidate_block_cache(address.physical_address, 4);
+                cpu.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
             }
 
             if breakpoint_info.enable && (breakpoint_info.mode & BP_RW) != 0 {
@@ -237,7 +245,7 @@ impl Breakpoints {
 
                 // invalidate the block in the JIT since the state changed
                 if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
-                    cpu.invalidate_block_cache(address.physical_address, 4);
+                    cpu.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
                 }
             }
 
@@ -277,7 +285,7 @@ impl Breakpoints {
 
                     // invalidate the block in the JIT since the state changed may have changed
                     if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
-                        cpu.invalidate_block_cache(address.physical_address, 4);
+                        cpu.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
                     }
                 }
 
@@ -503,6 +511,15 @@ impl Debugger {
                         self.cpu_running = false;
                     }
                 }
+
+                // exceptions move the PC into exception handlers, so if a breakpoint exists at that address,
+                // we should also stop
+                let pc = self.system.cpu.borrow().next_instruction_pc();
+                if self.breakpoints.borrow().execution_breakpoints.contains(&pc) {
+                    info!(target: "DEBUGGER", "CPU break (and exception) at virtual address ${:016X}", pc);
+                    self.cpu_running = false;
+                }
+
                 self.system.rcp.borrow().calculate_free_cycles()
             },
             
@@ -519,7 +536,7 @@ impl Debugger {
                     if self.breakpoints.borrow_mut().execution_breakpoints.remove(&run_to_address) {
                         let mut cpu = self.system.cpu.borrow_mut();
                         if let Ok(Some(address)) = cpu.translate_address(run_to_address, false, false) {
-                            cpu.invalidate_block_cache(address.physical_address, 4);
+                            cpu.invalidate_physical_block_cache_reference(address.physical_address, 1);
                         }
                     }
                 }
@@ -532,6 +549,41 @@ impl Debugger {
         }
     }
 
+    // read system memory in pages
+    // count in 32-bit words
+    fn read_memory_pages(&mut self, mut virtual_address: u64, mut count: usize) -> Vec<MemoryChunk> {
+        let mut cpu = self.system.cpu.borrow_mut();
+        let mut result = Vec::new();
+        while count > 0 {
+            let words_left_in_page = ((0x1000 - (virtual_address & 0xFFC)) >> 2) as usize;
+            let read_size = std::cmp::min(words_left_in_page, count);
+
+            match cpu.translate_address(virtual_address, false, false).unwrap() {
+                Some(address) => {
+                    // println!("requesting {} bytes from virtual=${:016X} physical=${:08X}", read_size << 2, virtual_address, address.physical_address);
+                    match self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (read_size << 2) as u32) {
+                        Ok(memory) => {
+                            result.push(MemoryChunk::Valid(virtual_address, memory));
+                        },
+
+                        _ => {
+                            result.push(MemoryChunk::Invalid(virtual_address, read_size));
+                        }
+                    }
+                },
+
+                _ => {
+                    result.push(MemoryChunk::Invalid(virtual_address, read_size));
+                }
+            }
+
+            virtual_address += (read_size << 2) as u64;
+            count -= read_size;
+        }
+
+        result
+    }
+
     fn update(&mut self) {
         // active when at least 1 debugging window is open
         if self.system.comms.debugger_windows.load(Ordering::Relaxed) == 0 { return; }
@@ -541,29 +593,12 @@ impl Debugger {
                 DebuggerCommandRequest::GetCpuState(read_instruction_memory) => {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
 
-                    let mut cpu = self.system.cpu.borrow_mut();
-                    let next_instruction_pc = cpu.next_instruction_pc();
+                    let next_instruction_pc = self.system.cpu.borrow().next_instruction_pc();
                     let instruction_memory = if let Some((instruction_offset, instruction_count)) = read_instruction_memory {
                         let virtual_address = (next_instruction_pc as i64).wrapping_add(instruction_offset * 4);
-                        if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
-                            // HACK for now -- upon reset the listing tries to read before PIF rom, which gets interpreted as an out of bounds cartridge rom read
-                            if address.physical_address > 0x1FB0_0000 && address.physical_address < 0x1FC0_0000 {
-                                // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}, instruction_count={}", next_instruction_pc, address.physical_address, instruction_offset,instruction_count);
-                                // we need instruction_offset zero words
-                                let mut new_memory = Vec::new();
-                                new_memory.resize((0x1FC0_0000 - address.physical_address as usize) / 4, 0);
-                                let memory = self.system.rcp.borrow_mut().read_block(0x1FC0_0000, ((instruction_count - new_memory.len()) * 4) as u32).unwrap();
-                                new_memory.extend_from_slice(&memory);
-                                Some(new_memory)
-                            } else {
-                                let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (instruction_count * 4) as u32).unwrap();
-                                Some(memory)
-                            }
-                        } else {
-                            None
-                        }
+                        self.read_memory_pages(virtual_address as u64, instruction_count)
                     } else { 
-                        None
+                        Vec::new()
                     };
 
                     let running = self.cpu_running;
@@ -628,27 +663,7 @@ impl Debugger {
                 DebuggerCommandRequest::ReadBlock(id, virtual_address, size_in_words) => {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
 
-                    let memory = {
-                        let mut cpu = self.system.cpu.borrow_mut();
-                        if let Some(address) = cpu.translate_address(virtual_address as u64, false, false).unwrap() {
-                            // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}", next_instruction_pc, address.physical_address, instruction_offset);
-                            // HACK for now -- upon reset the listing tries to read before PIF rom, which gets interpreted as an out of bounds cartridge rom read
-                            if address.physical_address > 0x1FB0_0000 && address.physical_address < 0x1FC0_0000 {
-                                // println!("next instruction pc = ${:08X}, physical_address=${:08X}, instruction_offset={}, instruction_count={}", next_instruction_pc, address.physical_address, instruction_offset,instruction_count);
-                                // we need instruction_offset zero words
-                                let mut new_memory = Vec::new();
-                                new_memory.resize((0x1FC0_0000 - address.physical_address as usize) / 4, 0);
-                                let memory = self.system.rcp.borrow_mut().read_block(0x1FC0_0000, ((size_in_words - new_memory.len()) * 4) as u32).unwrap();
-                                new_memory.extend_from_slice(&memory);
-                                Some(new_memory)
-                            } else {
-                                let memory = self.system.rcp.borrow_mut().read_block(address.physical_address as usize, (size_in_words * 4) as u32).unwrap();
-                                Some(memory)
-                            }
-                        } else {
-                            None
-                        }
-                    };
+                    let memory = self.read_memory_pages(virtual_address, size_in_words);
 
                     let _ = response_channel.send(DebuggerCommandResponse::ReadBlock(id, memory));
                 },
@@ -751,7 +766,7 @@ impl Debugger {
             // invalidate the JIT at the address for the stepover
             let mut cpu = self.system.cpu.borrow_mut();
             if let Ok(Some(address)) = cpu.translate_address(virtual_address, false, false) {
-                cpu.invalidate_block_cache(address.physical_address, 4);
+                cpu.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
             }
 
             // and set runto address

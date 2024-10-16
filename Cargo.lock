@@ -1472,7 +1472,6 @@ dependencies = [
  "pollster",
  "samplerate",
  "sdl2",
- "smallvec",
  "tracing",
  "tracing-core",
  "tracing-subscriber",

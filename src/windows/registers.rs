@@ -1,7 +1,7 @@
 
 use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
-use n64::{cpu::{Cpu, DisassembledInstruction}, debugger::{self}};
+use n64::{cpu::{Cpu, DisassembledInstruction}, debugger::{self, MemoryChunk}};
 use gui::game::{GameWindow, Utils};
 
 pub struct Registers {
@@ -139,7 +139,7 @@ impl Registers {
                         self.highlighted_registers[i].color = frame_bg;
                     }
 
-                    if let Some(memory) = cpu_state.instruction_memory {
+                    if let Some(MemoryChunk::Valid(_, memory)) = cpu_state.instruction_memory.get(0) {
                         let disassembly = Cpu::disassemble(cpu_state.next_instruction_pc, memory[0]);
                         let mut hl = 0;
                         for (_, ref operand) in disassembly.iter().enumerate().skip(1) {

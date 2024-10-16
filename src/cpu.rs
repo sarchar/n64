@@ -14,7 +14,6 @@ use tracing::{debug, error, warn, info, trace};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 
 use memoffset::offset_of;
-use smallvec::SmallVec;
 
 use crate::*;
 
@@ -42,9 +41,6 @@ pub const Cop0_XContext: usize = 20;
 pub const Cop0_PErr    : usize = 26; // Parity Error
 pub const Cop0_CacheErr: usize = 27;
 pub const _COP0_ERROREPC: usize = 30; // Error Exception Program Counter
-
-
-const _STATUS_IM_TIMER_INTERRUPT_ENABLE_FLAG: u64 = 7;
 
 pub const ExceptionCode_Int  : u64 = 0;  // interrupt
 pub const ExceptionCode_Mod  : u64 = 1;  // TLB modification exception
@@ -156,14 +152,14 @@ enum VirtualCachedBlockReference {
 enum PhysicalCachedBlockReference {
     /// If we're trying to lookup a cached block add vaddr X, then X must be present in these virtual addresses
     CachedBlockState {
-        virtual_addresses: SmallVec<[u64; 1]>, // can refer to multiple virtual addresses; this optimization keeps 2 on the stack
-        physical_block_id: u64,
+        virtual_address: u64,
+        block_id       : u64,
     },
 
     /// If something writes directly to memory, then we must invalidatge CachedBlockState -- this reference allows us to look up
     /// the location of CachedBlockState
     CachedBlockStateReference {
-        parent_reference: usize,
+        parent_reference_index: usize, // Index into physical_cached_block_references
         parent_block_id: u64,
     }
 }
@@ -575,8 +571,7 @@ pub struct Cpu {
     num_steps: u64,
 
     // JIT
-    next_virtual_block_id: u64,
-    next_physical_block_id: u64,
+    next_block_id: u64,
 
     // Addresses are 32 bits (in 32 bit mode) with the low 2 bits not being important. Let's use
     // a nested array with the first layer 4096 in size (most will go unused), which gives us
@@ -711,8 +706,7 @@ impl Cpu {
             },
 
             // JIT
-            next_physical_block_id: 0,
-            next_virtual_block_id: 0,
+            next_block_id: 0,
             virtual_cached_block_references,
             physical_cached_block_references: vec![None; PHYSICAL_CACHED_BLOCK_REFERENCE_SIZE],
 
@@ -975,30 +969,33 @@ impl Cpu {
         NAMES[i]
     }
 
-    // clear all references to compiled blocks for a given address range
-    // just invalidate the cached_block_map without clearing self.cached_blocks
-    // 1) if something else uses this address, then the old cached_blocks address will be freed.
-    // 2) it doesn't really matter if that memory hangs around anyway.
-    pub fn invalidate_block_cache(&mut self, _physical_address: u64, _length: usize) {
-        todo!();
-        // if let Some(cached_block_map_index) = self.get_cached_block_map_index(physical_address) {
-        //     //println!("invalidating ${:08X}..${:08X}", physical_address, physical_address + (length as u64));
-        //     //self.cached_block_map[cached_block_map_index..][..aligned_length >> 2].fill(None);
-        //     let aligned_length = (length + 7) & !7;
-        //     for i in 0..(aligned_length >> 2) {
-        //         match self.cached_block_map[cached_block_map_index + i] {
-        //             // invalidate all blocks contained in this region
-        //             Some(CachedBlockReference::CachedBlock(_)) => {
-        //                 self.cached_block_map[cached_block_map_index + i] = None;
-        //             }
-        //             // any address that has an address reference to a parent block means the whole block is invaldated
-        //             Some(CachedBlockReference::AddressReference(index_reference, _)) => {
-        //                 self.cached_block_map[index_reference] = None;
-        //             }
-        //             None => {},
-        //         }
-        //     }
-        // }
+    // clear out physical reference map, which invalidates the virtual maps when they're used later
+    // length is given in words
+    #[inline]
+    pub fn invalidate_physical_block_cache_reference(&mut self, physical_address: u64, length: usize) {
+        if let Some(physical_cached_block_reference_index) = self.get_physical_cached_block_reference_index(physical_address) {
+            // We need to invalidate all references between physical_address and physical_address+length
+            // But, if the first index is a CachedBlockStateReference, we need to clear all memory between
+            // that index and physical_address+length
+            match self.physical_cached_block_references[physical_cached_block_reference_index] {
+                Some(PhysicalCachedBlockReference::CachedBlockStateReference { parent_reference_index, parent_block_id }) => {
+                    match self.physical_cached_block_references[parent_reference_index] {
+                        Some(PhysicalCachedBlockReference::CachedBlockState { virtual_address: _, block_id }) => {
+                            if parent_block_id == block_id {
+                                self.physical_cached_block_references[parent_reference_index..physical_cached_block_reference_index].fill(None);
+                            }
+                        },
+
+                        _ => {},
+                    }
+                },
+
+                _ => {},
+            }
+
+            // Clear the rest of the memory
+            self.physical_cached_block_references[physical_cached_block_reference_index..][..length].fill(None);
+        }
     }
 
     #[allow(dead_code)]
@@ -1181,22 +1178,10 @@ impl Cpu {
 
     #[inline(always)]
     fn write_u8(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
-        //print!("DBG WR8 A:${:08X} V:${:08X} ", virtual_address as u32, value);
-        //for i in 0..32 {
-        //    print!("R{}:${:08X} ", i, self.gpr[i]);
-        //}
-        //println!();
-
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
-            // if (address.physical_address & 0xFF800000) == 0 {
-            //     let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-            //     if self.cached_block_map[offs].is_some() {
-            //         self.invalidate_block_cache(address.physical_address, 1);
-            //     }
-            // }
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
             self.write_u8_phys(value, address)
         } else {
-            // invalid TLB translation, no physical address present to read
             Ok(WriteReturnSignal::None)
         }
     }
@@ -1209,7 +1194,7 @@ impl Cpu {
             Ok(_) => 0, // TODO pass WriteReturnSignal along
             Err(e) => {
                 // TODO handle errors better
-                panic!("error in write_u8_bridge: {:?}", e);
+                panic!("error in write_u8_bridge: {:?}, virtual_address=${:016X}", e, virtual_address);
             }
         }
     }
@@ -1217,15 +1202,9 @@ impl Cpu {
     #[inline(always)]
     fn write_u16(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
-            // if (address.physical_address & 0xFF800000) == 0 {
-            //     let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-            //     if self.cached_block_map[offs].is_some() {
-            //         self.invalidate_block_cache(address.physical_address, 2);
-            //     }
-            // }
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
             self.write_u16_phys(value, address)
         } else {
-            // invalid TLB translation, no physical address present to read
             Ok(WriteReturnSignal::None)
         }
     }
@@ -1245,26 +1224,10 @@ impl Cpu {
 
     #[inline(always)]
     fn write_u32(&mut self, value: u32, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
-        //if (virtual_address as u32) == 0xA4001F9C && value == 0x0E468AD3 {
-        //    println!("DBG current_instruction_pc=${:08X}", self.current_instruction_pc);
-        //}
-        //print!("DBG WR32 A:${:08X} V:${:08X} ", virtual_address as u32, value);
-        //for i in 0..32 {
-        //    print!("R{}:${:08X} ", i, self.gpr[i]);
-        //}
-        //println!();
-
         if let Some(address) = self.translate_address(virtual_address as u64, true, true)? {
-            // invalidate RDRAM blocks
-            // if (address.physical_address & 0xFF800000) == 0 {
-            //     let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-            //     if self.cached_block_map[offs].is_some() {
-            //         self.invalidate_block_cache(address.physical_address, 4);
-            //     }
-            // }
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 1);
             self.write_u32_phys(value, address)
         } else {
-            // invalid TLB translation, no physical address present to read
             Ok(WriteReturnSignal::None)
         }
     }
@@ -1294,12 +1257,7 @@ impl Cpu {
     #[inline(always)]
     fn write_u64(&mut self, value: u64, virtual_address: usize) -> Result<WriteReturnSignal, InstructionFault> {
         if let Some(address) = self.translate_address(virtual_address as u64, true, false)? {
-            // if (address.physical_address & 0xFF800000) == 0 {
-            //     let offs = CACHED_BLOCK_MAP_RDRAM_OFFSET + (address.physical_address >> 2) as usize;
-            //     if self.cached_block_map[offs].is_some() || self.cached_block_map[offs+1].is_some() {
-            //         self.invalidate_block_cache(address.physical_address, 8);
-            //     }
-            // }
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 2);
             self.write_u64_phys(value, address)
         } else {
             Ok(WriteReturnSignal::None)
@@ -1341,8 +1299,11 @@ impl Cpu {
 
     extern "sysv64" fn write_u32_phys_bridge(cpu: *mut Cpu, value: u32, physical_address: u64) -> u32 {
         //trace!(target: "JIT", "write_u32_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
-
         let cpu = unsafe { &mut *cpu };
+
+        // invalidate JIT blocks
+        cpu.invalidate_physical_block_cache_reference(physical_address & !3, 1);
+
         match cpu.write_u32_phys_direct(value, physical_address) {
             Ok(_) => 0,
 
@@ -1365,6 +1326,10 @@ impl Cpu {
     extern "sysv64" fn write_u64_phys_bridge(cpu: *mut Cpu, value: u64, physical_address: u64) -> u32 {
         //trace!(target: "JIT", "write_u64_phys_bridge value=${:08X} to ${:08X}", value, virtual_address as u32);
         let cpu = unsafe { &mut *cpu };
+
+        // invalidate JIT blocks
+        cpu.invalidate_physical_block_cache_reference(physical_address & !3, 2);
+
         match cpu.write_u64_phys_direct(value, physical_address) {
             Ok(_) => 0,
 
@@ -2133,8 +2098,10 @@ impl Cpu {
             if (entry_lo & 0x02) == 0 { break; }
 
             // if D (dirty) is not set and this is a write, a Mod exception occurs
-            if generate_exceptions && (entry_lo & 0x04) == 0 && is_write {
-                self.tlb_mod(virtual_address)?;
+            if (entry_lo & 0x04) == 0 && is_write {
+                if generate_exceptions {
+                    self.tlb_mod(virtual_address)?;
+                }
                 return Ok(None);
             }
 
@@ -2180,6 +2147,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn get_physical_cached_block_reference_index(&mut self, physical_address: u64) -> Option<usize> {
         // Using the physical_address, determine where the memory came from
         if physical_address < 0x0080_0000 { // RDRAM
@@ -2203,97 +2171,85 @@ impl Cpu {
         // from now on, virtual address is 32 bits with low two bits set to 0
         let virtual_address = address.virtual_address & 0xFFFF_FFFC;
         
-        // The get_physical_cached_block_reference_index will let us know if the target virtual address is
-        // compilable. so we need to do this early
-        match self.get_physical_cached_block_reference_index(address.physical_address) {
-            Some(phys_index) => {
-                // page index is the upper 12 bits of the address
-                let page_index = (virtual_address >> 20) as usize;
+        // The get_physical_cached_block_reference_index will let us know if the target virtual address is compilable
+        if let Some(phys_index) = self.get_physical_cached_block_reference_index(address.physical_address) {
+            // page index is the upper 12 bits of the address
+            let page_index = (virtual_address >> 20) as usize;
 
-                // page offset is the next 18 bits (the low 2 bits are discarded)
-                let page_offset = ((virtual_address >> 2) & 0x3FFFF) as usize;
+            // page offset is the next 18 bits (the low 2 bits are discarded)
+            let page_offset = ((virtual_address >> 2) & 0x3FFFF) as usize;
 
-                // Since the address is compilable, look up whether it's been compiled or not
-                let compiled_block_option = self.virtual_cached_block_references.get_mut(page_index)
-                        .unwrap().as_mut().and_then(|virtual_block_references_page: &mut Vec<Option<VirtualCachedBlockReference>>| -> Option<Rc<RefCell<CompiledBlock>>> {
+            // Since the address is compilable, look up whether it's been compiled or not
+            let compiled_block = self.virtual_cached_block_references.get_mut(page_index)
+                    .unwrap().as_mut().and_then(|virtual_block_references_page: &mut Vec<Option<VirtualCachedBlockReference>>| -> Option<Rc<RefCell<CompiledBlock>>> {
 
-                    // check what value is in the page at that offset
-                    match virtual_block_references_page.get(page_offset) {
-                        // If the value at this address is a cached block, validate it and return
-                        Some(Some(VirtualCachedBlockReference::CachedBlock { compiled_block, block_id: _ })) => {
+                // check what value is in the page at that offset, if the page hasn't been extended long enough, and_then() returns None
+                virtual_block_references_page.get(page_offset).and_then(|entry: &Option<VirtualCachedBlockReference>| -> Option<Rc<RefCell<CompiledBlock>>> {
+                    match entry {
+                        // If the value at this address is a cached block, we can just clone and return it
+                        Some(VirtualCachedBlockReference::CachedBlock { compiled_block, block_id: _ }) => {
                             // If we get a CachedBlock{}, then the block is valid -- has not been invalidated anywhere. We still need to make sure
                             // taht the underlying physical address hasn't been modified, though.
                             Some(compiled_block.clone()) 
                         },
 
-                        // If the entry here refers to the start of a block...
-                        Some(Some(VirtualCachedBlockReference::CachedBlockReference { reference_address, reference_block_id })) => {
-                            // Look up the parent reference
-                            match virtual_block_references_page.get(((reference_address >> 2) & 0x3FFFF) as usize).unwrap() {
-                                // A CachedBlockReference can only be valid if it points to a CachedBlock that contains a matching block id
-                                Some(VirtualCachedBlockReference::CachedBlock { compiled_block, block_id }) if *reference_block_id == *block_id => {
-                                    Some(compiled_block.clone())
-                                },
+                        // If the entry here is a reference, look up the block, verify block id matches, then clone
+                        Some(VirtualCachedBlockReference::CachedBlockReference { reference_address, reference_block_id }) => {
+                            // look up the parent reference
+                            virtual_block_references_page.get(((*reference_address >> 2) & 0x3FFFF) as usize)
+                                    .and_then(|parent_entry: &Option<VirtualCachedBlockReference>| -> Option<Rc<RefCell<CompiledBlock>>> {
+                                // and if it's a CachedBlock and the block id matches, then it's at least valid here
+                                match parent_entry {
+                                    Some(VirtualCachedBlockReference::CachedBlock { compiled_block, block_id }) if *reference_block_id == *block_id => {
+                                        Some(compiled_block.clone())
+                                    },
 
-                                // Any other entry (CachedBlockReference or None) means our block has been invalidated
-                                _ => None,
-                            }
+                                    _ => None,
+                                }
+                            })
                         },
 
                         // The page is extended long enough, but this address is not compiled yet
-                        Some(None) => None,
-                        
-                        // If the virtual block references page isn't extended long enough, then this
-                        // address hasn't been compiled yet
                         None => None,
                     }
-                });
+                })
+            });
 
-                // If we have a compiled block, we need to make sure it's valid on the physical memory side
-                match compiled_block_option {
-                    Some(compiled_block) => {
-                        let borrowed_block = compiled_block.borrow();
-                        if self.validate_compiled_block(phys_index, &address, &borrowed_block) {
-                            CachedBlockStatus::Cached(compiled_block.clone())
-                        } else {
-                            trace!(target: "JIT-RUN", "[virtual block that was found is invalid in physical memory ${:08X}]", address.physical_address);
-                            let virtual_cached_block_page = self.virtual_cached_block_references.get_mut(page_index).unwrap().as_mut().unwrap();
-                            if virtual_cached_block_page.len() >= page_index {
-                                virtual_cached_block_page[page_index] = None;
-                            }
-                            CachedBlockStatus::NotCached
-                        }
-                    },
-
-                    None => {
-                        trace!(target: "JIT-RUN", "[no virtual block cache found at virtual memory ${:016X}]", address.virtual_address);
-                        if let Some(virtual_cached_block_page) = self.virtual_cached_block_references.get_mut(page_index).unwrap().as_mut() {
-                            if virtual_cached_block_page.len() >= page_index {
-                                virtual_cached_block_page[page_index] = None;
-                            }
-                        }
-                        CachedBlockStatus::NotCached
+            // If we have a compiled block, we need to make sure it's valid on the physical memory side
+            if let Some(compiled_block) = compiled_block {
+                let borrowed_block = compiled_block.borrow();
+                if self.validate_physical_cached_block_reference(phys_index, &borrowed_block) {
+                    CachedBlockStatus::Cached(compiled_block.clone())
+                } else {
+                    trace!(target: "JIT-RUN", "[virtual block that was found is invalid in physical memory ${:08X}]", address.physical_address);
+                    let virtual_cached_block_page = self.virtual_cached_block_references.get_mut(page_index).unwrap().as_mut().unwrap();
+                    if virtual_cached_block_page.len() > page_offset {
+                        virtual_cached_block_page[page_offset] = None;
+                    }
+                    CachedBlockStatus::NotCached
+                }
+            } else {
+                trace!(target: "JIT-RUN", "[no virtual block cache found at virtual memory ${:016X}]", address.virtual_address);
+                if let Some(virtual_cached_block_page) = self.virtual_cached_block_references.get_mut(page_index).unwrap().as_mut() {
+                    if virtual_cached_block_page.len() > page_offset {
+                        virtual_cached_block_page[page_offset] = None;
                     }
                 }
-            },
-
+                CachedBlockStatus::NotCached
+            }
+        } else {
             // No possible index into the physical_cached_block_references means it's not compilable
-            None => CachedBlockStatus::Uncompilable,
+            CachedBlockStatus::Uncompilable
         }
     }
 
-    #[inline]
-    fn validate_compiled_block(&mut self, phys_index: usize, address: &Address, borrowed_block: &std::cell::Ref<'_, CompiledBlock>) -> bool {
-        // Now verify that we're referring to the correct compiled block
-        self.validate_physical_cached_block_reference(phys_index, &address, &borrowed_block)
-    }
-
-    fn validate_physical_cached_block_reference(&mut self, phys_index: usize, _address: &Address, compiled_block: &std::cell::Ref<'_, CompiledBlock>) -> bool {
-        // We need to validate that address.physical_address refers to the compiled_block without any errors
+    // Validate that the address 
+    fn validate_physical_cached_block_reference(&mut self, phys_index: usize, compiled_block: &std::cell::Ref<'_, CompiledBlock>) -> bool {
+        // We need to validate that the physical memory refers to the compiled block's virtual address
         match self.physical_cached_block_references.get(phys_index).unwrap() {
-            Some(PhysicalCachedBlockReference::CachedBlockState { virtual_addresses, physical_block_id: _ }) => {
+            Some(PhysicalCachedBlockReference::CachedBlockState { virtual_address, block_id }) => {
                 // result is true when the virtual address is correct, and the index into the physical map matches
-                if !self.match_virtual_address(&virtual_addresses, compiled_block.virtual_address & 0xFFFF_FFFC) || compiled_block.physical_map_index != phys_index {
+                if *virtual_address != compiled_block.virtual_address || phys_index != compiled_block.physical_map_index || *block_id != compiled_block.id {
                     // invalid
                     self.physical_cached_block_references[phys_index] = None;
                     false
@@ -2302,15 +2258,14 @@ impl Cpu {
                 }
             },
 
-            Some(PhysicalCachedBlockReference::CachedBlockStateReference { parent_reference, parent_block_id }) => {
-                println!("got CachedBlockStateReference: parent_reference={} parent_block_id={}", parent_reference, parent_block_id);
-                match self.physical_cached_block_references.get(*parent_reference).unwrap() {
-                    Some(PhysicalCachedBlockReference::CachedBlockState { virtual_addresses, physical_block_id }) => {
-                        println!("got CachedBlockState: virtual_addresses=${:016X} physical_block_id={}", virtual_addresses[0], physical_block_id);
-                        // result is true when the virtual address is correct, and the index into the physical map matches
-                        if parent_block_id != physical_block_id
-                                || !self.match_virtual_address(&virtual_addresses, compiled_block.virtual_address & 0xFFFF_FFFC) 
-                                || compiled_block.physical_map_index != *parent_reference {
+            Some(PhysicalCachedBlockReference::CachedBlockStateReference { parent_reference_index, parent_block_id }) => {
+                match self.physical_cached_block_references.get(*parent_reference_index).unwrap() {
+                    Some(PhysicalCachedBlockReference::CachedBlockState { virtual_address, block_id }) => {
+                        // return true when the virtual address is correct, and the index into the physical map matches
+                        if parent_block_id != block_id
+                                || *virtual_address != compiled_block.virtual_address
+                                || compiled_block.physical_map_index != *parent_reference_index
+                                || *block_id !=compiled_block.id {
                             self.physical_cached_block_references[phys_index] = None;
                             false
                         } else {
@@ -2329,28 +2284,6 @@ impl Cpu {
             // The physical index into the array doesn't have any data, so the block can't be valid
             None => false,
         }
-    }
-
-    // virtual addresses can hold up to 2 30 bit addresses per u64
-    #[inline]
-    fn match_virtual_address(&self, virtual_addresses: &SmallVec<[u64; 1]>, match_address: u64) -> bool {
-        for i in 0..virtual_addresses.len() {
-            let a = virtual_addresses[i];
-            match a & 0x03 {
-                0b01 => {
-                    if (a & 0xFFFFFFFC) == match_address {
-                        return true;
-                    } 
-                },
-                0b10 => {
-                    if ((a & 0xFFFF_FFFC) == match_address) || ((a >> 32) & 0xFFFF_FFFC) == match_address {
-                        return true;
-                    }
-                },
-                _ => {},
-            }
-        }
-        false
     }
 
     // run the JIT core, return the number of cycles actually ran
@@ -2382,6 +2315,12 @@ impl Cpu {
                 continue;
             }
 
+            // whenever we exit a block, to jump into a new one, self.jit_run_limit resets and if the address we're jumping to is a breakpoint
+            // we need to break, *except* when starting at an instruction with a breakpoint
+            if execution_breakpoints.len() > 0 && execution_breakpoints.contains(&self.next_instruction_pc) && steps_start != self.num_steps {
+                return Err(InstructionFault::Break);
+            }
+
             // Cop0_Count and Cop0_Random tracker start value
             self.cp0_count_tracker = self.num_steps & !1;
             self.cp0_random_tracker = self.num_steps;
@@ -2397,13 +2336,26 @@ impl Cpu {
             self.jit_run_limit = std::cmp::min(2 * self.cp0_compare_distance as u64, (steps_start + max_cycles) - self.num_steps);
 
             let address = match self.translate_address(self.next_instruction_pc, true, false) {
+                // Most common case - address is translated
                 Ok(Some(address)) => address,
-                Ok(None) => panic!("can't translate next_instruction_pc=${:08X}, self.pc=${:08X}", self.next_instruction_pc, self.pc),
-                Err(_) => {
-                    todo!();
+
+                // PC has changed due to TLBL in translate_address. exit (break) to the system main loop so that TLBL breakpoints can be caught
+                Err(err @ InstructionFault::OtherException(ExceptionCode_TLBL)) => {
+                    // todo!("TLBL when translating next pc=${:016X}, new pc=${:016X}", self.current_instruction_pc, self.next_instruction_pc);
+                    self.num_steps += 1;
+                    // break;
+                    // continue;
+                    return Err(err);
+                }
+
+                err @ Err(_) => {
+                    todo!("Unhandled exception when translating next pc=${:016X}, {:?}", self.current_instruction_pc, err);
                     // PC has changed due to an exception in translate_address. restart processing
                     // break;
                 }
+
+                // Rare case, should never happen with the PC
+                Ok(None) => panic!("can't translate next_instruction_pc=${:08X}, self.pc=${:08X}", self.next_instruction_pc, self.pc),
             };
 
             let run_result = match self.lookup_virtual_cached_block_reference(&address) {
@@ -2520,81 +2472,49 @@ impl Cpu {
         // the physical address and index must be valid since we're in build_block()
         let physical_cached_block_reference_index = self.get_physical_cached_block_reference_index(physical_address).unwrap();
 
-        // TODO !! we can check if the physical block at at physical_address exists and is valid, and if so
-        // we can create a new block that just uses the one that's already been built!
-        // // must first invalidate any block that might be referenced by an AddressReference at this location
-        if let Some(PhysicalCachedBlockReference::CachedBlockStateReference { parent_reference, parent_block_id }) 
+        // if we're creating a block at a physical address that refers to another block, we need to invalidate that block
+        // we could use invalidate_physical_block_cache_reference(), but whatever
+        if let Some(PhysicalCachedBlockReference::CachedBlockStateReference { parent_reference_index, parent_block_id }) 
                 = self.physical_cached_block_references[physical_cached_block_reference_index] {
-            if let Some(PhysicalCachedBlockReference::CachedBlockState { virtual_addresses: _, physical_block_id })
-                    = self.physical_cached_block_references[parent_reference] {
-                if parent_block_id == physical_block_id {
-                    // This physical block indicates a virtual block exists.  Grab any of the virtual addresses from it,
-                    // and make a new virtual block at our new address, and add the new physical address to the list
-                    todo!();
-                    // debug!(target: "JIT-BUILD", "[invalidating physical block at ${:08X} because reference to it at ${:08X} is being overwritten]", 
-                    //     parent_reference << 2, physical_cached_block_reference_index << 2); 
+            if let Some(PhysicalCachedBlockReference::CachedBlockState { virtual_address: _, block_id })
+                    = self.physical_cached_block_references[parent_reference_index] {
+                if parent_block_id == block_id { // if this reference is referring to the correct block..
+                    debug!(target: "JIT-BUILD", "[invalidating physical block at ${:08X} because reference to it at ${:08X} is being overwritten]", 
+                        parent_reference_index << 2, physical_cached_block_reference_index << 2); 
                     // invalidate only the CachedBlockState, since the reference gets overwritten while building this block
-                    // self.physical_cached_block_references[parent_reference] = None;
+                    self.physical_cached_block_references[parent_reference_index] = None;
                 }
             }                    
         }
 
-        // starting to build a new block at virtual_address, which means we could be in the middle of some other block
-        // so we need to invalidate /that/ block.  we only need to find one Reference back to the Original block
+        // we don't need to invalidate anything in the virtual map, because when lookup_virtual_cached_block_reference will check
+        // the underlying physical memory and it will have been invalidated. But, we do need to extend storage if necessary
         let virtual_page_index = ((address.virtual_address & 0xFFFF_FFFC) >> 20) as usize;
-        if let Some(virtual_cached_block_page) = self.virtual_cached_block_references.get_mut(virtual_page_index).unwrap().as_mut() {
-            let virtual_page_offset = ((address.virtual_address >> 2) & 0x3FFFF) as usize;
-            if let Some(entry) = virtual_cached_block_page.get(virtual_page_offset) {
-                match entry {
-                    Some(VirtualCachedBlockReference::CachedBlockReference { reference_address, reference_block_id }) => {
-                        assert!((address.virtual_address >> 20) == (reference_address >> 20));
-
-                        let reference_address_offset = ((reference_address >> 2) & 0x3FFFF) as usize;
-                        // if the reference is valid, we need to invalidate the target block
-                        let is_reference_valid = virtual_cached_block_page.get(reference_address_offset).is_some_and(|block_ref| {
-                            if let Some(VirtualCachedBlockReference::CachedBlock { compiled_block: _, block_id }) = block_ref {
-                                *block_id == *reference_block_id 
-                            } else {
-                                false
-                            }
-                        });
-
-                        if is_reference_valid {
-                            *virtual_cached_block_page.get_mut(reference_address_offset).unwrap() = None;
-                        }
-                    },
-
-                    _ => {},
-                }
+        {
+            let entry = self.virtual_cached_block_references.get_mut(virtual_page_index).unwrap();
+            if entry.is_none() {
+                *entry = Some(Vec::new());
             }
-        } else {
-            // start a new vector for this page
-            self.virtual_cached_block_references[virtual_page_index] = Some(Vec::new());
         }
 
-        // read a block of memory instead of read_u32() on each instruction
-        let source_buffer = if physical_address < 0x80_0000 {
-            // don't run beyind the size of a virtual bank (18 bits)
-            let bank_end = (physical_address & !0x3FFFF) + 0x40000;
-            
-            let access = self.comms.rdram.read().unwrap();
-            let rdram: &[u32] = access.as_ref().unwrap();
-            let start = (physical_address >> 2) as usize;
-            let end   = std::cmp::min(std::cmp::min(start + JIT_BLOCK_MAX_INSTRUCTION_COUNT, 0x80_0000 >> 2), bank_end as usize);
-            Some(rdram[start..end].to_owned())
+        // limit blocks to the length of the remaining page in mapped memory
+        let max_instruction_count = if address.mapped {
+            let remaining_bytes = 0x1000 - (address.virtual_address & 0xFFF);
+            std::cmp::min(JIT_BLOCK_MAX_INSTRUCTION_COUNT, (remaining_bytes >> 2) as usize)
         } else {
-            None
+            JIT_BLOCK_MAX_INSTRUCTION_COUNT
         };
 
-        // make sure next_instruction is valid
-        if self.next_instruction.is_none() {
-            self.next_instruction = Some(if source_buffer.is_some() {
-                source_buffer.as_ref().unwrap()[0]
-            } else { 
-                self.comms.increment_prefetch_counter();
-                self.read_u32((self.next_instruction_pc) as usize).unwrap()
-            });
-        }
+        // read a block of memory instead of read_u32() on each instruction
+        let source_buffer = Some(self.bus.borrow_mut().read_block(address.physical_address as usize, (max_instruction_count << 2) as u32).unwrap());
+
+        // reset next instruction to the first instruction in this block
+        self.next_instruction = Some(if source_buffer.is_some() {
+            source_buffer.as_ref().unwrap()[0]
+        } else {
+            self.comms.increment_prefetch_counter();
+            self.read_u32((self.next_instruction_pc) as usize).unwrap()
+        });
 
         // set global block start address to the correct pc
         self.jit_block_start_pc = self.next_instruction_pc;
@@ -2604,15 +2524,13 @@ impl Cpu {
         self.jit_jump_no_delay = false;
         self.jit_conditional_branch = None;
 
-        // increment the keys
-        let physical_block_id = self.next_physical_block_id;
-        self.next_physical_block_id += 1;
-        let virtual_block_id = self.next_virtual_block_id;
-        self.next_virtual_block_id += 1;
+        // get the next block id
+        let block_id = self.next_block_id;
+        self.next_block_id += 1;
 
         // allocate space for the jump table and pin it in place
         // we can already use the pointer in the prologue
-        let mut jump_table = Box::pin(Vec::<u64>::with_capacity(JIT_BLOCK_MAX_INSTRUCTION_COUNT + 8));
+        let mut jump_table = Box::pin(Vec::<u64>::with_capacity(max_instruction_count + 8));
 
         // for the virtual_cached_block_references, append them all to a new vector and copy them 
         let mut virtual_cached_block_references: Vec<Option<VirtualCachedBlockReference>> = Vec::new();
@@ -2629,9 +2547,42 @@ impl Cpu {
         let mut instruction_index = 0usize;
 
         let mut done_compiling = false;
-        'build_loop: while self.next_is_delay_slot || (!done_compiling && instruction_index < JIT_BLOCK_MAX_INSTRUCTION_COUNT) {
-            // tally up non-delay slot NOPs and break if we get too many (most of the time this
-            // would be a non-code region)
+        'build_loop: while (instruction_index < max_instruction_count && !done_compiling) || self.next_is_delay_slot {
+            // TODO if the current instruction address is unaligned, we can't decode or run anything and
+            // just need to make an address exception block
+
+            // get the next instruction
+            self.next_instruction = if source_buffer.as_ref().is_some_and(|buf| instruction_index < buf.len()) {
+                Some(source_buffer.as_ref().unwrap()[instruction_index])
+            } else { 
+                assert!(instruction_index >= source_buffer.as_ref().unwrap().len() && self.next_is_delay_slot);
+
+                // let's just make the assumption that the programmer knows what he's doing and won't have delay slots branching across
+                // TLB entries (unless they REALLY know what they're doing)...
+                // debug!("fetching delay slot beyond page boundary, from ${:016X}, source_buffer.len={} start_address=${:016X} instruction_index={} next_is_delay_slot={}", 
+                        // self.next_instruction_pc, source_buffer.as_ref().map(|v| v.len()).or(Some(0)).unwrap(), start_address, instruction_index, self.next_is_delay_slot);
+
+                match self.translate_address(self.next_instruction_pc, false, false) {
+                    Ok(Some(address)) => {
+                        // address was valid, we should be able to read some memory
+                        Some(self.read_u32_phys(address).unwrap())
+                    },
+
+                    Ok(None) => {
+                        // the address isn't translatable, so we just have to assume this code will never run...let's generate a trap and return nop
+                        // the most likely situation is that this code will never execute (we compiled too long of a block)
+                        letsgo!(assembler
+                            ;   mov rax, QWORD 0xFEFE_BEBE_CECE_AEAEu64 as _
+                            ;   int3
+                        );
+                        Some(0)
+                    },
+
+                    Err(_) => panic!("shouldn't happen"),
+                }
+            };
+
+            // tally up non-delay slot NOPs and break if we get too many
             num_nops = if !self.next_is_delay_slot && self.next_instruction.unwrap() == 0 { num_nops + 1 } else { 0 };
             if num_nops == MAX_NOPS {
                 // if there were other nops, next_is_delay_slot can't be set
@@ -2639,18 +2590,9 @@ impl Cpu {
                 break;
             }
 
-            // if the current instruction address is unaligned, we can't decode or run anything and
-            // just need to make an address exception block
-
             // setup self.inst
-            self.decode_instruction(self.next_instruction.unwrap());
-
-            // next instruction prefetch
-            self.next_instruction = Some(if source_buffer.is_some() && (instruction_index + 1) < source_buffer.as_ref().unwrap().len() {
-                source_buffer.as_ref().unwrap()[instruction_index + 1]
-            } else { 
-                self.read_u32((self.pc) as usize).unwrap()
-            });
+            let inst = std::mem::replace(&mut self.next_instruction, None).unwrap();
+            self.decode_instruction(inst);
 
             // update and increment PC
             self.current_instruction_pc = self.next_instruction_pc;
@@ -2666,14 +2608,14 @@ impl Cpu {
             // the way will also get invalidated
             self.physical_cached_block_references[physical_cached_block_reference_index + instruction_index] = 
                 Some(PhysicalCachedBlockReference::CachedBlockStateReference { 
-                    parent_reference: physical_cached_block_reference_index, 
-                    parent_block_id: physical_block_id 
+                    parent_reference_index: physical_cached_block_reference_index,
+                    parent_block_id: block_id
                 });
 
             virtual_cached_block_references.push(
                 Some(VirtualCachedBlockReference::CachedBlockReference { 
-                    reference_address: address.virtual_address & 0xFFFF_FFFC, 
-                    reference_block_id: virtual_block_id,
+                    reference_address: address.virtual_address & 0xFFFF_FFFC,
+                    reference_block_id: block_id,
                 }));
 
             // save whether there's a jump that exits the block after this instruction (w/ delay slot)
@@ -2699,6 +2641,7 @@ impl Cpu {
             // if we need to break out before executing this instruction, do so
             // NOTE: breakpoints in delay slots are not allowed
             if !self.is_delay_slot && execution_breakpoints.contains(&self.current_instruction_pc) {
+                // if there's a breakpoint at the beginning of the block, we have to do something special
                 letsgo!(assembler
                     // check if s_cycle_count is still equal to the run limit (i.e., this is the first instruction,
                     // so we want to execute it normally)
@@ -2947,7 +2890,7 @@ impl Cpu {
             }
         }
 
-        if !done_compiling && instruction_index >= JIT_BLOCK_MAX_INSTRUCTION_COUNT {
+        if !done_compiling && instruction_index >= max_instruction_count {
             debug!(target: "JIT-BUILD", "[terminating block compilation after {} instructions]", instruction_index);
         } else if num_nops == MAX_NOPS {
             debug!(target: "JIT-BUILD", "[terminating block compilation after {} nops]", num_nops);
@@ -3105,7 +3048,7 @@ impl Cpu {
         }
 
         let compiled_block = Rc::new(RefCell::new(CompiledBlock {
-            id                : virtual_block_id,
+            id                : block_id,
             virtual_address   : address.virtual_address,
             physical_map_index: physical_cached_block_reference_index,
             _entry_point      : entry_point,
@@ -3116,15 +3059,15 @@ impl Cpu {
         // insert into block cache
         self.physical_cached_block_references[physical_cached_block_reference_index] = 
             Some(PhysicalCachedBlockReference::CachedBlockState { 
-                virtual_addresses: SmallVec::from_buf([(address.virtual_address & 0xFFFFFFFC) | 0x01]), 
-                physical_block_id,
+                virtual_address: address.virtual_address,
+                block_id,
             });
 
         // set the first entry in the virtual cache
         virtual_cached_block_references[0] = 
             Some(VirtualCachedBlockReference::CachedBlock { 
                 compiled_block: compiled_block.clone(),
-                block_id: virtual_block_id,
+                block_id,
             });
 
         // and finally, we need to copy virtual_cached_block_references into self.virtual_cached_block_references
@@ -3151,7 +3094,7 @@ impl Cpu {
         // find the nth instruction in the block, which is the offset divided by sizeof(u32)
         let instruction_index = (execution_address - compiled_block.virtual_address) >> 2;
         let compiled_instruction_address = compiled_block.jump_table[instruction_index as usize];
-        println!("compiled_block.virtual_address=${:016X} execution_address=${:016X}, instruction_index={}", compiled_block.virtual_address, execution_address, instruction_index);
+        // println!("compiled_block.virtual_address=${:016X} execution_address=${:016X}, instruction_index={}", compiled_block.virtual_address, execution_address, instruction_index);
 
         self.jit_executing = true;
         // blocks can run beyond their run limit so the return value of call_block could be negative
@@ -3172,7 +3115,9 @@ impl Cpu {
     // since this function is used by assembly, a return value of 0 indicates "not present", instead of using Option<>.
     #[inline(always)]
     extern "sysv64" fn lookup_compiled_instruction_address(_cpu: *mut Cpu, _virtual_address: u64) -> u64 {
-        todo!();
+        // println!("TODO lookup_compimled_instruction_address");
+        return 0;
+        // todo!();
         // let cpu = unsafe { &mut *cpu };
         // let physical_address = cpu.translate_address(virtual_address, false, false).unwrap().unwrap().physical_address;
         // match cpu.lookup_cached_block(physical_address) {
@@ -3754,7 +3699,7 @@ impl Cpu {
                 if (value & 0x0000_0080) != 0x00 {
                     warn!(target: "CPU", "64-bit kernel addressing enabled ${value:08X}");
                     self.kernel_64bit_addressing = true;
-                    panic!("things are going to break with 64-bit addressing, it's largely untested for now");
+                    // panic!("things are going to break with 64-bit addressing, it's largely untested for now");
                 } else {
                     self.kernel_64bit_addressing = false;
                     //debug!(target: "CPU", "32-bit kernel addressing enabled ${value:08X}");
@@ -4628,6 +4573,14 @@ impl Cpu {
 
                     0b000_110 => { // tlbwr
                         trace!(target: "JIT-BUILD", "${:08X}[{:5}]: tlbwr", self.current_instruction_pc as u32, self.jit_current_assembler_offset);
+
+                        // we need to update Cop0_Random
+                        letsgo!(assembler
+                            ;   mov v_arg1_32, DWORD [rsp+s_cycle_count]  // cycles_remaining
+                            ;   mov v_arg2_32, BYTE 1 as _                // compute_num_steps
+                        );
+
+                        letscall!(assembler, Cpu::update_cop0_random);
 
                         extern "sysv64" fn set_tlb_entry_bridge(cpu: *mut Cpu) {
                             let cpu = unsafe { &mut *cpu };
@@ -6174,6 +6127,7 @@ impl Cpu {
         };
 
         if self.llbit {
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 1); // write_*_phys doesn't invalidate JIT blocks, so do it here
             self.write_u32_phys(self.gpr[self.inst.rt] as u32, address)?;
             self.gpr[self.inst.rt] = 1;
         } else {
@@ -6260,6 +6214,7 @@ impl Cpu {
         };
 
         if self.llbit && ((address.physical_address >> 4) == self.cp0gpr[Cop0_LLAddr]) {
+            self.invalidate_physical_block_cache_reference(address.physical_address & !3, 2); // write_*_phys doesn't invalidate JIT blocks, so do it here
             self.write_u64_phys(self.gpr[self.inst.rt], address)?;
             self.gpr[self.inst.rt] = 1;
         } else {
@@ -9511,12 +9466,12 @@ impl Cpu {
             0b000_100 => {
                 if rs == 0 && rt == 0 { // branch always psuedomnemonic
                     push_mnemonic(&mut result, "b");
-                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    let branch_target = 4 + base_address.wrapping_add((imm as u64) << 2);
                     result.push(DisassembledInstruction::Address(branch_target));
                 } else if rt == 0 { // test against r0 psuedomnemonic
                     push_mnemonic(&mut result, "beqz");
                     result.push(DisassembledInstruction::Register(rs));
-                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    let branch_target = 4 + base_address.wrapping_add((imm as u64) << 2);
                     result.push(DisassembledInstruction::Address(branch_target));
                 } else {
                     i_type_rs_rt(&mut result, "beq");
@@ -9527,7 +9482,7 @@ impl Cpu {
                 if rt == 0 {
                     push_mnemonic(&mut result, "bnez");
                     result.push(DisassembledInstruction::Register(rs));
-                    let branch_target = base_address + 4 + ((imm as u64) << 2);
+                    let branch_target = 4 + base_address.wrapping_add((imm as u64) << 2);
                     result.push(DisassembledInstruction::Address(branch_target));
                 } else {
                     i_type_rs_rt(&mut result, "bne");

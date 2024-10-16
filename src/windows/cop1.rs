@@ -169,7 +169,7 @@ impl Cop1State {
                         self.highlighted_registers[i].color = if (i % 2) == 0 || self.fr_bit { frame_bg } else { disabled_bg };
                     }
 
-                    if let Some(memory) = cpu_state.instruction_memory {
+                    if let Some(debugger::MemoryChunk::Valid(_, memory)) = cpu_state.instruction_memory.get(0) {
                         let disassembly = Cpu::disassemble(cpu_state.next_instruction_pc, memory[0]);
                         let mut hl = 0;
                         for (_, ref operand) in disassembly.iter().enumerate().skip(1) {

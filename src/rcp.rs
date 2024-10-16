@@ -302,7 +302,7 @@ impl Rcp {
             // catch InvalidateBlockCache for the JIT core
             match self.write_block(dest_address as usize, &block, dma_info.length) {
                 Ok(WriteReturnSignal::InvalidateBlockCache { physical_address, length }) => {
-                    cpu.invalidate_block_cache(physical_address, length);
+                    cpu.invalidate_physical_block_cache_reference(physical_address & !3, (length + 3) >> 2);
                 },
 
                 Ok(_) => {},

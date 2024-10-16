@@ -43,7 +43,7 @@ pub struct Listing {
     // when listing_address is Some(), we're looking at a specific address
     // when None, following PC
     listing_address: Option<u64>,
-    listing_memory: Vec<u32>,
+    listing_memory: Vec<debugger::MemoryChunk>,
 
     // cursor address and length of selection
     cursor_address: Option<u64>,
@@ -255,11 +255,7 @@ impl Listing {
 
                 debugger::DebuggerCommandResponse::ReadBlock(id, memory) => {
                     if id == 0 {
-                        if let Some(memory) = memory {
-                            self.listing_memory = memory;
-                        } else {
-                            self.listing_memory.clear();
-                        }
+                        self.listing_memory = memory;
                     }
                 },
 
@@ -480,14 +476,38 @@ impl GameWindow for Listing {
                     let mut virtual_address = self.listing_start_address();
 
                     // now display the instructions if the memory is valid
-                    let instruction_memory: Option<&Vec<u32>> = if self.listing_address.is_none() {
-                        self.cpu_state.instruction_memory.as_ref()
+                    let instruction_memory: Option<&Vec<debugger::MemoryChunk>> = if self.listing_address.is_none() {
+                        Some(self.cpu_state.instruction_memory.as_ref())
                     } else {
                         Some(&self.listing_memory)
                     };
                     
                     if let Some(memory) = instruction_memory {
-                        for inst in memory.iter() {
+                        let mut page_index = 0;
+                        let mut page_offset = 0;
+
+                        while page_index < memory.len() {
+                            let inst = match &memory[page_index] {
+                                debugger::MemoryChunk::Valid(_, page_memory) => {
+                                    let inst = page_memory[page_offset];
+                                    page_offset += 1;
+                                    if page_offset >= page_memory.len() {
+                                        page_index += 1;
+                                        page_offset = 0;
+                                    }
+                                    inst
+                                },
+
+                                debugger::MemoryChunk::Invalid(_, missing_size) => {
+                                    page_offset += 1;
+                                    if page_offset >= *missing_size {
+                                        page_index += 1;
+                                        page_offset = 0;
+                                    }
+                                    0xEEEEEEEE
+                                }
+                            };
+
                             // start the first column so that cursor is in the right place
                             ui.table_next_column();
                             let mut cursor_pos = ui.cursor_screen_pos();
@@ -587,10 +607,10 @@ impl GameWindow for Listing {
 
                             // display opcode
                             ui.table_next_column();
-                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", *inst));
+                            ui.text_colored(OPCODE_COLOR, format!("{:08X}", inst));
 
                             // disassembly instruction
-                            let disassembly = cpu::Cpu::disassemble(virtual_address, *inst);
+                            let disassembly = cpu::Cpu::disassemble(virtual_address, inst);
 
                             // display instruction mnemonic
                             ui.table_next_column();
