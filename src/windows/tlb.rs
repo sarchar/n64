@@ -1,4 +1,4 @@
-use crate::{*, gui::game::Utils};
+use crate::*;
 use crossbeam::channel::{Receiver, Sender, self};
 use n64::{cpu, debugger::{self}};
 use gui::game::GameWindow;

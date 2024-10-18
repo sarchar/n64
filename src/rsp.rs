@@ -60,6 +60,9 @@ pub struct Rsp {
     // these are copies of state in RspCpuCore so we don't need a lock
     halted: bool,
     broke: bool,
+
+    // hacky fix for M_AUDTASK in commercial games
+    current_task: Arc<AtomicU32>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +149,10 @@ struct RspCpuCore {
 
     // HLE
     process_task: bool,
+
+    audio_task_start: Option<std::time::Instant>,
+
+    current_task: Arc<AtomicU32>,
 }
 
 type CpuInstruction = fn(&mut RspCpuCore) -> Result<(), InstructionFault>;
@@ -159,25 +166,27 @@ impl Rsp {
         // dma_completed channel is created here and sent with every DmaInfo message
         let (dma_completed_tx, dma_completed_rx) = mpsc::channel();
 
-        let core = Arc::new(Mutex::new(RspCpuCore::new(comms.clone(), mem.clone(), shared_state.clone(), rdp, dma_completed_tx.clone())));
+        let current_task = Arc::new(AtomicU32::new(0));
+
+        let core = Arc::new(Mutex::new(RspCpuCore::new(comms.clone(), mem.clone(), shared_state.clone(), rdp, dma_completed_tx.clone(), current_task.clone())));
 
         Rsp {
-            comms: comms,
-
-            core: core,
-
-            mem: mem,
+            comms,
+            core,
+            mem,
 
             wakeup_tx: None,
             broke_rx: None,
 
-            dma_completed_rx: dma_completed_rx,
-            dma_completed_tx: dma_completed_tx,
+            dma_completed_rx,
+            dma_completed_tx,
 
-            shared_state: shared_state,
+            shared_state,
 
             halted: true,
             broke: false,
+
+            current_task,
         }
     }
 
@@ -250,6 +259,7 @@ impl Rsp {
                         // Task type is the first element of the OSTask structure, which is at 0xFC0 
                         let task_type = c.read_u32(0x0FC0).unwrap();
                         debug!(target: "RSP", "processing task type {}", task_type);
+                        c.current_task.store(task_type, Ordering::Relaxed);
 
                         // restart task time
                         //task_time = std::time::Instant::now();
@@ -291,21 +301,8 @@ impl Rsp {
                                 }
                             },
 
-                            2 => { // M_AUDTASK
-                                // run on RSP for now
-                                //debug!(target: "RSP", "stubbed audio tasks for now, as they crash");
-                                //    // set SIG2 (SP_STATUS_TASKDONE)
-                                //    {
-                                //        let mut shared_state = c.shared_state.write().unwrap();
-                                //        shared_state.signals |= 1 << 2;
-                                //    }
-
-                                //    // and break, which usually triggers SP interrupt
-                                //    let _ = c.special_break().unwrap();
-
-                                //    // RSP isn't running
-                                //    c.halted = true;
-                                //audio_task = true;
+                            2 => { // M_AUDTASK -- run via LLE
+                                c.audio_task_start = Some(std::time::Instant::now());
                             },
 
                             // All other tasks types are LLE'd
@@ -322,6 +319,10 @@ impl Rsp {
                         let _ = c.step(); // TODO handle errors
 
                         if c.broke || c.halted_self { 
+                            c.current_task.store(0, Ordering::Relaxed);
+                            if let Some(audio_start_time) = std::mem::replace(&mut c.audio_task_start, None) {
+                                trace!(target: "RSP", "Audio task took {:.6}", audio_start_time.elapsed().as_secs_f64());
+                            }
                             c.halted = true; // signal the core is halted before dropping the lock
                             break; 
                         }
@@ -380,6 +381,15 @@ impl Rsp {
 
         // reset rsp core
         let _ = self.core.lock().unwrap().reset();
+    }
+
+    pub fn wait_audio_task_idle(&mut self) {
+        if !self.is_broke() {
+            if self.current_task.load(Ordering::Relaxed) == 2 { // M_AUDTASK
+                warn!(target: "RSP", "waiting for audio task to complete (RSP core running too slow)");
+                while !self.is_broke() {}
+            }
+        }
     }
 
     pub fn step(&mut self) {
@@ -916,7 +926,8 @@ impl Addressable for Rsp {
 
 use RspCpuCore as Cpu; // shorthand so I can copy code from cpu.rs :)
 impl RspCpuCore {
-    fn new(comms: SystemCommunication, mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, rdp: Arc<Mutex<Rdp>>, dma_completed_tx: mpsc::Sender<DmaInfo>) -> Self {
+    fn new(comms: SystemCommunication, mem: Arc<RwLock<Vec<u32>>>, shared_state: Arc<RwLock<RspSharedState>>, 
+           rdp: Arc<Mutex<Rdp>>, dma_completed_tx: mpsc::Sender<DmaInfo>, current_task: Arc<AtomicU32>) -> Self {
         // initialize the reciprocal table.. the algorithm is widely available but I'll include the Ares license here as well, since it's used in n64-systemtest
         // The generation of the RCP and RSP tables was ported from Ares: https://github.com/ares-emulator/ares/blob/acd2130a4d4c9e7208f61e0ff762895f7c9b8dc6/ares/n64/rsp/rsp.cpp#L102
         // which uses the following license:
@@ -990,17 +1001,21 @@ impl RspCpuCore {
             inst_vs: 0,
             inst_vd: 0,
 
-            mem: mem,
-            shared_state: shared_state,
+            mem,
+            shared_state,
             broke_tx: None,
-            dma_completed_tx: dma_completed_tx,
+            dma_completed_tx,
 
             halted: true,
             halted_self: false,
             broke: false,
 
-            rdp: rdp,
+            rdp,
             process_task: false,
+
+            audio_task_start: None,
+
+            current_task,
 
             instruction_table: [
                 //  _000                _001                _010                _011                _100                _101                _110                _111
@@ -1625,9 +1640,9 @@ impl RspCpuCore {
                     },
 
                     Cop0_DmaReadLength => { // RDRAM -> I/DRAM
-                        //debug!(target: "RSP", "DMA read length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_read_length = val;
+                        // trace!(target: "RSP", "DMA read length set to ${:04X}, read to ${:04X} from ${:08X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_cache, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
 
                         let length = ((val & 0x0FFF) | 0x07) + 1;
                         let count  = ((val >> 12) & 0xFF) + 1;
@@ -1636,10 +1651,10 @@ impl RspCpuCore {
 
                         let dma_info = DmaInfo {
                             initiator     : "RSP-READ",
-                            source_address: (shared_state.dma_dram) & !0x07,
+                            source_address: shared_state.dma_dram & !0x07,
                             dest_address  : (shared_state.dma_cache | 0x0400_0000) & !0x07,
-                            count         : count,
-                            length        : length,
+                            count,
+                            length,
                             source_stride : skip,
                             dest_mask     : 0x0000_0FFF,
                             dest_bits     : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
@@ -1647,8 +1662,17 @@ impl RspCpuCore {
                             ..Default::default()
                         };
 
+                        // this bug supposedly fixed 18-Oct-2024 and it was a royal pain in the rear
+                        // the basic premise being two bugs actually: 
+                        // 1) Audio tasks were not completing within a single VI retrace. That's "fixed" by improving the
+                        // formulate for VI calculation, improving the DMA and performance the audio task, and as a fail safe,
+                        // directly waiting for M_AUDTASK to complete before generating VI interrupts.
+                        // 2) The JIT cpu core was not breaking out of loops when comms.break_cpu_cycles was set (see Cpu::run_for())
+                        //    NOTE: there might still be a bug not easily found. The problem was that some register was getting an incorrect
+                        //    value after a division somehow, due somehow to the execution of blocks only running 3-4 cycles each many times.
+                        //    might be able to re-expose the bug by /not/ breaking out of Cpu::run_for based on break_cpu_cycles
                         if dma_info.source_address as usize >= 0x80_0000 {
-                            println!("dma about to fail: {:?}, self.pc=${:08X}", dma_info, self.current_instruction_pc);
+                            println!("dma about to fail: {:?}, self.pc=${:08X}, rt={}, [ra]=${:08X}", dma_info, self.current_instruction_pc, self.inst.rt, self.gpr[31]);
                             panic!(); //return Ok(());
                         }
 
@@ -1660,6 +1684,7 @@ impl RspCpuCore {
                             // see if we can direct copy this without the DMA system
                             if ((dma_info.dest_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
                                 && (dma_info.source_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                assert!(dma_info.count == 1); // if this ever fails, need to calculate the real length -- see the DmaWriteLength version
                                 let access = self.comms.rdram.read();
                                 let rdram: &[u32] = access.as_deref().unwrap().as_ref().unwrap();
                                 let slice = &rdram[(dma_info.source_address >> 2) as usize..][..(dma_info.length >> 2) as usize];
@@ -1683,9 +1708,9 @@ impl RspCpuCore {
                     },
 
                     Cop0_DmaWriteLength => {
-                        //debug!(target: "RSP", "DMA write length set to ${:04X}", val);
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_write_length = val;
+                        // trace!(target: "RSP", "DMA write length set to ${:04X}, write to ${:04X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
 
                         let length = ((val & 0x0FFF) | 0x07) + 1;
                         let count  = ((val >> 12) & 0xFF) + 1;
@@ -1718,13 +1743,14 @@ impl RspCpuCore {
                             // see if we can direct copy this without the DMA system
                             if ((dma_info.source_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
                                 && (dma_info.dest_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                let write_length_in_words = (dma_info.length * dma_info.count) >> 2;
                                 let mem_offset = (dma_info.source_address & 0x1FFF) >> 2; // 8KiB, repeated
                                 let mem = self.mem.read().unwrap();
-                                let slice = &mem[mem_offset as usize..][..(dma_info.length >> 2) as usize];
+                                let slice = &mem[mem_offset as usize..][..write_length_in_words as usize];
 
                                 let mut access = self.comms.rdram.write();
                                 let rdram: &mut [u32] = access.as_mut().unwrap().as_mut().unwrap();
-                                rdram[(dma_info.dest_address >> 2) as usize..][..(dma_info.length >> 2) as usize].copy_from_slice(slice);
+                                rdram[(dma_info.dest_address >> 2) as usize..][..write_length_in_words as usize].copy_from_slice(slice);
 
                                 // TODO: inform the CPU that it needs to invalidate_block_cache for the above RDRAM write
                             } else {

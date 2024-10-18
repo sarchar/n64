@@ -1195,7 +1195,7 @@ impl App for Game {
             match self.view_mode {
                 ViewMode::Game | ViewMode::ViOrigin => {
                     // we need the VI_ORIGIN value to know what to render..
-                    let mut video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
+                    let mut video_buffer = self.comms.vi_origin.load(Ordering::Relaxed);
                     if video_buffer == 0 { 
                         // Throw away the render pass and encoder, no biggie
                         return; 
@@ -1215,13 +1215,13 @@ impl App for Game {
                         self.game_color_texture_bind_groups.get(&(video_buffer - 1280)).unwrap()
                     } else {
                         // restore video_buffer address for render
-                        let video_buffer = self.comms.vi_origin.load(Ordering::SeqCst);
+                        let video_buffer = self.comms.vi_origin.load(Ordering::Relaxed);
 
                         // no game render texture found, if video_buffer is valid, render directly from RDRAM if possible
-                        let width = self.comms.vi_width.load(Ordering::SeqCst) as usize;
+                        let width = self.comms.vi_width.load(Ordering::Relaxed) as usize;
                         let height = if width == 320 { 240 } else if width == 640 { 480 } else if width == 400 { 240 } else { /*warn!(target: "RENDER", "unknown render size {}", width);*/ return; } as usize;
-                        let format = self.comms.vi_format.load(Ordering::SeqCst);
-                        //println!("width={} height={} format={}", width, height, format);
+                        let format = self.comms.vi_format.load(Ordering::Relaxed);
+                        // println!("buffer=${:08X} width={} height={} format={}", video_buffer, width, height, format);
 
                         if self.rdram_framebuffer_texture.is_none() || self.rdram_framebuffer_format != (width, height, format) {
                             //println!("(re-)creating framebuffer texture with height {}", height);
@@ -1248,7 +1248,7 @@ impl App for Game {
                                         let iy = (y * width) + x;
 
                                         match format {
-                                            2 => { // RGB555
+                                            2 => { // RGBX5551 (thanks, Rasky!)
                                                 let shift = 16 - ((i & 1) << 4);
                                                 let pix = (rdram[start + (i >> 1)] >> shift) as u16;
                                                 let mut r = ((pix >> 11) & 0x1F) as u8;
@@ -1260,8 +1260,7 @@ impl App for Game {
                                                 let mut b = ((pix >>  1) & 0x1F) as u8;
                                                 let bb = b & 0x01;
                                                 b = (b << 3) | (bb << 2) | (bb << 1) | bb;
-                                                let a = if (pix & 0x01) == 1 { 0xFF } else { 0 };
-                                                image_data[iy] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                                                image_data[iy] = (0xFFu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                                             },
                                             3 => {  // RGBA32
                                                 let pix = rdram[start+i];

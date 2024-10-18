@@ -23,7 +23,7 @@ pub struct Rdp {
 impl Rdp {
     pub fn new(comms: SystemCommunication) -> Rdp {
         Rdp {
-            comms: comms,
+            comms,
 
             start: 0,
             start_latch: 0,
@@ -108,9 +108,10 @@ impl Addressable for Rdp {
             0x0010_0010 => {
                 self.update_clock();
                 info!(target: "DP_CLOCK", "clock=${:08X}", self.clock);
-                panic!();
-                // TODO this doesn't seem to be the cause of OoT crashes...panic!();
+                // panic!();
+                // TODO this doesn't seem to be the cause of OoT crashes...
                 // Ok(self.clock)
+                Ok(0)
             },
 
             _ => {

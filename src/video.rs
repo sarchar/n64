@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering, time::Instant};
 
 #[allow(unused_imports)]
 use tracing::{debug,error,trace,warn,info};
@@ -72,6 +72,9 @@ pub struct VideoInterface {
     // VI_Y_SCALE
     y_offset: u16,
     y_scale: u16,
+
+    // System time of the last VI
+    last_vi_time: Instant,
 }
 
 impl VideoInterface {
@@ -88,7 +91,7 @@ impl VideoInterface {
 
     pub fn new(comms: SystemCommunication) -> VideoInterface {
         VideoInterface {
-            comms: comms,
+            comms,
 
             resolution_changed: 0,
             cycle_count: 0,
@@ -150,6 +153,8 @@ impl VideoInterface {
             // VI_Y_SCALE
             y_offset: 0,
             y_scale: 0,
+
+            last_vi_time: Instant::now(),
         }
     }
 
@@ -219,6 +224,9 @@ impl VideoInterface {
         // VI_Y_SCALE
         self.y_offset = 0;
         self.y_scale = 0;
+
+        // last VI time
+        self.last_vi_time = Instant::now();
     }
 
     fn _is_ntsc(&self) -> bool {
@@ -237,7 +245,10 @@ impl VideoInterface {
         Self::CYC_PER_SCANLINE - self.cycle_count
     }
 
-    pub fn step(&mut self, cpu_cycles_elapsed: u64) {
+    pub fn step(&mut self, cpu_cycles_elapsed: u64) -> bool {
+        let mut triggered_vi = false;
+        
+        // info!(target: "VI", "step({})", cpu_cycles_elapsed);
         if self.resolution_changed > 0 {
             self.resolution_changed = 0;
 
@@ -254,9 +265,14 @@ impl VideoInterface {
             self.current_line = (self.current_line + 1) % (Self::NUM_LINES as u32);
 
             if self.current_line == self.interrupt_line {
+                trace!(target: "RSP", "Generating VI now, after {:.5} sec", self.last_vi_time.elapsed().as_secs_f64());
                 self.comms.mi_interrupts_tx.as_ref().unwrap().send(InterruptUpdate(IMask_VI, InterruptUpdateMode::SetInterrupt)).unwrap();
+                self.last_vi_time = Instant::now();
+                triggered_vi = true;
             }
         }
+
+        triggered_vi
     }
 }
 

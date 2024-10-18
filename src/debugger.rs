@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use crate::*;
 
 use crossbeam::channel::{self, Receiver, Sender};
-use mips::{InterruptUpdate, InterruptUpdateMode};
 use tracing::{warn, info};
 
 pub const BP_READ : u8 = 0x01;
@@ -323,7 +322,7 @@ pub struct Debugger {
     break_on_interrupt: u8,
     break_on_rcp: u8,
 
-    ctrlc_count: u32,
+    // ctrlc_count: u32,
 
     breakpoints: Rc<RefCell<Breakpoints>>,
 
@@ -364,7 +363,7 @@ impl Debugger {
             break_on_exception: 0,
             break_on_interrupt: 0,
             break_on_rcp      : 0,
-            ctrlc_count       : 0,
+            // ctrlc_count       : 0,
             breakpoints,
             system,
             command_receiver,
@@ -930,26 +929,26 @@ impl Debugger {
     //     Ok(())
     // }
 
-    fn interrupt(&mut self, parts: &Vec<&str>) -> Result<(), String> {
-        if parts.len() != 2 {
-            return Err(format!("usage: int [sp|si|vi|dp|ai|pi]"));
-        }
+    // fn interrupt(&mut self, parts: &Vec<&str>) -> Result<(), String> {
+    //     if parts.len() != 2 {
+    //         return Err(format!("usage: int [sp|si|vi|dp|ai|pi]"));
+    //     }
 
-        let signal = match parts[1].to_lowercase().as_str() {
-            "sp" => mips::IMask_SP,
-            "si" => mips::IMask_SI,
-            "ai" => mips::IMask_AI,
-            "vi" => mips::IMask_VI,
-            "dp" => mips::IMask_DP,
-            "pi" => mips::IMask_PI,
-            _ => { return Err(format!("invalid mips interrupt \"{}\"", parts[1])); }
-        };
+    //     let signal = match parts[1].to_lowercase().as_str() {
+    //         "sp" => mips::IMask_SP,
+    //         "si" => mips::IMask_SI,
+    //         "ai" => mips::IMask_AI,
+    //         "vi" => mips::IMask_VI,
+    //         "dp" => mips::IMask_DP,
+    //         "pi" => mips::IMask_PI,
+    //         _ => { return Err(format!("invalid mips interrupt \"{}\"", parts[1])); }
+    //     };
 
-        let mut rcp = self.system.rcp.borrow_mut();
-        let chan = rcp.mi.get_update_channel();
-        chan.send(InterruptUpdate(signal, InterruptUpdateMode::SetInterrupt)).unwrap();
-        Ok(())
-    }
+    //     let mut rcp = self.system.rcp.borrow_mut();
+    //     let chan = rcp.mi.get_update_channel();
+    //     chan.send(InterruptUpdate(signal, InterruptUpdateMode::SetInterrupt)).unwrap();
+    //     Ok(())
+    // }
 }
 
 impl Drop for Debugger {

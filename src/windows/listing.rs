@@ -511,7 +511,7 @@ impl GameWindow for Listing {
                             // start the first column so that cursor is in the right place
                             ui.table_next_column();
                             let mut cursor_pos = ui.cursor_screen_pos();
-                            let mut width = available_area[0];
+                            // let mut width = available_area[0];
 
                             // let window_alpha = ui.style_color(StyleColor::WindowBg)[3];
                             let mut line_fill_color = None;
@@ -596,7 +596,7 @@ impl GameWindow for Listing {
 
                             // shift X over
                             cursor_pos[0] += line_height;
-                            width -= line_height;
+                            // width -= line_height;
                             ui.set_cursor_screen_pos(cursor_pos);
 
                             // let height = ui.calc_text_size("X")[1] + ui.style().frame_padding[1];

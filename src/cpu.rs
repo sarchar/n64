@@ -2166,8 +2166,6 @@ impl Cpu {
     // Then physical address reverse reference must match virtual address
     // N.B. this all breaks down if we use 64-bit memory addressing
     fn lookup_virtual_cached_block_reference(&mut self, address: &Address) -> CachedBlockStatus {
-        trace!(target: "JIT-RUN", "[looking up cached block @ virtual_address=${:016X}]", address.virtual_address);
-
         // from now on, virtual address is 32 bits with low two bits set to 0
         let virtual_address = address.virtual_address & 0xFFFF_FFFC;
         
@@ -2294,7 +2292,7 @@ impl Cpu {
         // unsafe { asm!("int3"); }
 
         let steps_start = self.num_steps;
-        while self.num_steps < (steps_start + max_cycles) {
+        while self.num_steps < (steps_start + max_cycles) && !self.comms.break_cpu_cycles.load(Ordering::Relaxed) {
             // if the next step() instruction was a jump as well we should continue executing until it's not 
             // this happens if there's a jump within a jump, where we have exited the block and left next_is_delay_slot true
             if self.next_is_delay_slot {
@@ -2370,7 +2368,8 @@ impl Cpu {
                     let compiled_block = compiled_block_ref.borrow();
 
                     // execute the block
-                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} virtual_address=${:08X} physical_address=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.virtual_address, address.physical_address, self.num_steps, self.jit_run_limit);
+                    trace!(target: "JIT-RUN", "[finished compiling. executing block id={} virtual_address=${:08X} physical_address=${:08X} cycles_ran={} limit={}]", 
+                            compiled_block.id, compiled_block.virtual_address, address.physical_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
                     let (steps, run_result) = self.run_block(&*compiled_block, execution_pc);
                     self.num_steps += steps;
@@ -2380,7 +2379,8 @@ impl Cpu {
 
                 CachedBlockStatus::Cached(compiled_block) => {
                     let compiled_block = compiled_block.borrow();
-                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} virtual_address=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", compiled_block.id, compiled_block.virtual_address, self.next_instruction_pc-compiled_block.virtual_address, self.num_steps, self.jit_run_limit);
+                    trace!(target: "JIT-RUN", "[block found in cache, executing block id={} virtual_address=${:08X} start_offset=${:08X} cycles_ran={} limit={}]", 
+                            compiled_block.id, compiled_block.virtual_address, self.next_instruction_pc-compiled_block.virtual_address, self.num_steps, self.jit_run_limit);
                     let starting_steps = self.num_steps;
                     let (steps, run_result) = self.run_block(&*compiled_block, self.next_instruction_pc); // start execution at an offset into the block
                     self.num_steps += steps;
@@ -2498,23 +2498,23 @@ impl Cpu {
         }
 
         // limit blocks to the length of the remaining page in mapped memory
-        let max_instruction_count = if address.mapped {
+        let mut max_instruction_count = if address.mapped {
             let remaining_bytes = 0x1000 - (address.virtual_address & 0xFFF);
             std::cmp::min(JIT_BLOCK_MAX_INSTRUCTION_COUNT, (remaining_bytes >> 2) as usize)
         } else {
             JIT_BLOCK_MAX_INSTRUCTION_COUNT
         };
 
-        // read a block of memory instead of read_u32() on each instruction
-        let source_buffer = Some(self.bus.borrow_mut().read_block(address.physical_address as usize, (max_instruction_count << 2) as u32).unwrap());
+        // suppose I should also limit all regions, but for now truncate RDRAM
+        if (address.physical_address & 0xFF80_0000) == 0 {
+            let remaining_bytes = 0x80_0000 - address.physical_address;
+            max_instruction_count = std::cmp::min((remaining_bytes >> 2) as usize, max_instruction_count);
+        }
 
-        // reset next instruction to the first instruction in this block
-        self.next_instruction = Some(if source_buffer.is_some() {
-            source_buffer.as_ref().unwrap()[0]
-        } else {
-            self.comms.increment_prefetch_counter();
-            self.read_u32((self.next_instruction_pc) as usize).unwrap()
-        });
+        // read a block of memory instead of read_u32() on each instruction
+        // this counts as a single prefetch, tehe
+        self.comms.increment_prefetch_counter();
+        let source_buffer = self.bus.borrow_mut().read_block(address.physical_address as usize, (max_instruction_count << 2) as u32).unwrap();
 
         // set global block start address to the correct pc
         self.jit_block_start_pc = self.next_instruction_pc;
@@ -2552,33 +2552,35 @@ impl Cpu {
             // just need to make an address exception block
 
             // get the next instruction
-            self.next_instruction = if source_buffer.as_ref().is_some_and(|buf| instruction_index < buf.len()) {
-                Some(source_buffer.as_ref().unwrap()[instruction_index])
-            } else { 
-                assert!(instruction_index >= source_buffer.as_ref().unwrap().len() && self.next_is_delay_slot);
+            self.next_instruction = match source_buffer.get(instruction_index) {
+                Some(value) => Some(*value),
+                None => {
+                    assert!(instruction_index >= source_buffer.len() && self.next_is_delay_slot);
 
-                // let's just make the assumption that the programmer knows what he's doing and won't have delay slots branching across
-                // TLB entries (unless they REALLY know what they're doing)...
-                // debug!("fetching delay slot beyond page boundary, from ${:016X}, source_buffer.len={} start_address=${:016X} instruction_index={} next_is_delay_slot={}", 
-                        // self.next_instruction_pc, source_buffer.as_ref().map(|v| v.len()).or(Some(0)).unwrap(), start_address, instruction_index, self.next_is_delay_slot);
+                    // let's just make the assumption that the programmer knows what he's doing and won't have delay slots branching across
+                    // TLB entries (unless they REALLY know what they're doing)...
+                    // debug!("fetching delay slot beyond page boundary, from ${:016X}, source_buffer.len={} start_address=${:016X} instruction_index={} next_is_delay_slot={}", 
+                            // self.next_instruction_pc, source_buffer.as_ref().map(|v| v.len()).or(Some(0)).unwrap(), start_address, instruction_index, self.next_is_delay_slot);
 
-                match self.translate_address(self.next_instruction_pc, false, false) {
-                    Ok(Some(address)) => {
-                        // address was valid, we should be able to read some memory
-                        Some(self.read_u32_phys(address).unwrap())
-                    },
+                    match self.translate_address(self.next_instruction_pc, false, false) {
+                        Ok(Some(address)) => {
+                            // address was valid, we should be able to read some memory
+                            self.comms.increment_prefetch_counter();
+                            Some(self.read_u32_phys(address).unwrap())
+                        },
 
-                    Ok(None) => {
-                        // the address isn't translatable, so we just have to assume this code will never run...let's generate a trap and return nop
-                        // the most likely situation is that this code will never execute (we compiled too long of a block)
-                        letsgo!(assembler
-                            ;   mov rax, QWORD 0xFEFE_BEBE_CECE_AEAEu64 as _
-                            ;   int3
-                        );
-                        Some(0)
-                    },
+                        Ok(None) => {
+                            // the address isn't translatable, so we just have to assume this code will never run...let's generate a trap and return nop
+                            // the most likely situation is that this code will never execute (we compiled too long of a block)
+                            letsgo!(assembler
+                                ;   mov rax, QWORD 0xFEFE_BEBE_CECE_AEAEu64 as _
+                                ;   int3
+                            );
+                            Some(0)
+                        },
 
-                    Err(_) => panic!("shouldn't happen"),
+                        Err(_) => panic!("shouldn't happen"),
+                    }
                 }
             };
 
@@ -2637,6 +2639,15 @@ impl Cpu {
             //letsgo!(assembler
             //    ;    mov DWORD [rsp + s_inst], self.inst.v as _ // save current instruction opcode
             //);
+            cfg_if! {
+                if #[cfg(feature="jit-accuracy")] {
+                    // self.next_instruction can't be null with jit-accuracy
+                    self.next_instruction = match source_buffer.get(instruction_index) {
+                        Some(value) => Some(*value),
+                        None => Some(0),
+                    }
+                }
+            }
 
             // if we need to break out before executing this instruction, do so
             // NOTE: breakpoints in delay slots are not allowed
@@ -3697,12 +3708,16 @@ impl Cpu {
                 }
 
                 if (value & 0x0000_0080) != 0x00 {
-                    warn!(target: "CPU", "64-bit kernel addressing enabled ${value:08X}");
+                    if !self.kernel_64bit_addressing {
+                        debug!(target: "CPU", "64-bit kernel addressing enabled ${value:08X}, pc=${:016X}", self.current_instruction_pc);
+                    }
                     self.kernel_64bit_addressing = true;
                     // panic!("things are going to break with 64-bit addressing, it's largely untested for now");
                 } else {
+                    if self.kernel_64bit_addressing {
+                        debug!(target: "CPU", "32-bit kernel addressing enabled ${value:08X}, pc=${:016X}", self.current_instruction_pc);
+                    }
                     self.kernel_64bit_addressing = false;
-                    //debug!(target: "CPU", "32-bit kernel addressing enabled ${value:08X}");
                 }
 
                 if (value & 0x18) != 0 {

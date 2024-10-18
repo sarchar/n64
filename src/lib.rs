@@ -413,6 +413,8 @@ impl System {
         } else {
             // delay...
             match self.comms.cpu_throttle.load(Ordering::Relaxed) {
+                // when set to 0, there's no throttling at all
+                // when set to 2, reset throttling state so that there are no hiccups, then switch into normal throttling
                 i @ 0 | i @ 2 => {
                     self.last_cpu_steps = self.comms.total_cpu_steps.get();
                     self.start_time = std::time::Instant::now();
@@ -422,9 +424,16 @@ impl System {
                 },
 
                 1 => {
-                    let mut cur_ips = f64::MAX;
-                    while cur_ips > 93_750_000.0 {
-                        cur_ips = ((self.comms.total_cpu_steps.get() - self.last_cpu_steps) as f64) / self.start_time.elapsed().as_secs_f64();
+                    // way too much volatility trying to make 1s = 93.75MHz, so instead aiming to throttle at a much finer scale
+                    let total_steps = self.comms.total_cpu_steps.get();
+                    if (total_steps - self.last_cpu_steps) >= 46875*2 {
+                        // (total time it should have taken) - (time it actually took)
+                        let sleep_time = (((total_steps - self.last_cpu_steps) as f64) / 98_750_000.0f64) - self.start_time.elapsed().as_secs_f64();
+                        let now = std::time::Instant::now();
+                        if sleep_time > 0.0 { /*println!("JIT sleeping {:.05}", sleep_time);*/ }
+                        while now.elapsed().as_secs_f64() < sleep_time {}
+                        self.last_cpu_steps = total_steps;
+                        self.start_time = std::time::Instant::now();
                     }
                 },
 
