@@ -2572,9 +2572,13 @@ impl Cpu {
                         Ok(None) => {
                             // the address isn't translatable, so we just have to assume this code will never run...let's generate a trap and return nop
                             // the most likely situation is that this code will never execute (we compiled too long of a block)
+                            // TODO Golden Eye is depending on something happening here -- if I just return NOP, I can get into gameplay
+                            // but none of the collision detection works.  We need to generate a TLBL exception but only if the code
+                            // is actually executed
                             letsgo!(assembler
                                 ;   mov rax, QWORD 0xFEFE_BEBE_CECE_AEAEu64 as _
-                                ;   int3
+                                // ;   int3
+                                ;   mov rax, QWORD self.next_instruction_pc as _
                             );
                             Some(0)
                         },

@@ -428,7 +428,7 @@ impl System {
                     let total_steps = self.comms.total_cpu_steps.get();
                     if (total_steps - self.last_cpu_steps) >= 46875*2 {
                         // (total time it should have taken) - (time it actually took)
-                        let sleep_time = (((total_steps - self.last_cpu_steps) as f64) / 98_750_000.0f64) - self.start_time.elapsed().as_secs_f64();
+                        let sleep_time = (((total_steps - self.last_cpu_steps) as f64) / 93_750_000.0f64) - self.start_time.elapsed().as_secs_f64();
                         let now = std::time::Instant::now();
                         if sleep_time > 0.0 { /*println!("JIT sleeping {:.05}", sleep_time);*/ }
                         while now.elapsed().as_secs_f64() < sleep_time {}

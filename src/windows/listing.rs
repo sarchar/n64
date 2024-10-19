@@ -64,6 +64,14 @@ pub struct Listing {
     
     // show table resizers
     show_resizers: bool,
+
+    // symbols we want resolved
+    desired_symbols: Vec<u64>,
+    requested_symbols: bool,
+    symbols: HashMap<u64, String>,
+
+    // pressing G will goto an address at the selected instruction
+    try_follow_address: bool,
 }
 
 impl Listing {
@@ -90,6 +98,10 @@ impl Listing {
             breakpoints: HashMap::new(),
             use_abi_names: true,
             show_resizers: false,
+            desired_symbols: Vec::new(),
+            requested_symbols: false,
+            symbols: HashMap::new(),
+            try_follow_address: false,
         }
     }
 
@@ -109,6 +121,11 @@ impl Listing {
             response_channel: Some(self.debugging_request_response_tx.clone()),
         };
         let _ = debugger::Debugger::send_command(&self.comms, command);
+    }
+
+    fn reset_symbols(&mut self) {
+        self.symbols = HashMap::new();
+        self.desired_symbols.clear();
     }
 
     // Certain keys work no matter what, as long as the Listing window is open.  Others only work when the Listing window is in focus.
@@ -144,6 +161,11 @@ impl Listing {
                 response_channel: Some(self.debugging_request_response_tx.clone()),
             };
             let _ = debugger::Debugger::send_command(&self.comms, command);
+        }
+
+        // During the next redraw, try_follow_address will be checked against the current cursor
+        if ui.is_key_pressed_no_repeat(imgui::Key::G) && ui.io().key_shift {
+            self.try_follow_address = true;
         }
 
         // Any following keys require window focus
@@ -211,6 +233,8 @@ impl Listing {
 
     // must be called from within a window()
     fn update(&mut self, ui: &imgui::Ui) {
+        self.try_follow_address = false;  // reset, if it wasn't found on the last redraw
+        
         self.update_inputs(ui);
         
         self.instruction_offset = -(self.num_instructions_displayed as i64) / 2 + 1;
@@ -240,6 +264,15 @@ impl Listing {
             self.requested_breakpoints = debugger::Debugger::send_command(&self.comms, request).is_ok();
         }
 
+        if !self.requested_symbols && self.desired_symbols.len() > 0 {
+            let request = debugger::DebuggerCommand {
+                command_request:  debugger::DebuggerCommandRequest::LookupSymbols(self.desired_symbols.clone()),
+                response_channel: Some(self.debugging_request_response_tx.clone()),
+            };
+
+            self.requested_symbols = debugger::Debugger::send_command(&self.comms, request).is_ok();
+        }
+
         while let Ok(response) = self.debugging_request_response_rx.try_recv() {
             match response {
                 debugger::DebuggerCommandResponse::CpuState(cpu_state) => {
@@ -249,13 +282,29 @@ impl Listing {
                             self.request_listing_memory();
                         }
                     }
+
+                    if cpu_state.running {  // no symbols while Running
+                        // only when Track PC is enabled, prevent requesting symbols
+                        if self.listing_address.is_none() {
+                            self.requested_symbols = true;
+                        }
+                    } else if self.cpu_state.running { // cpu is no longer running, but was (we jus stopped)
+                        self.reset_symbols();
+                        self.requested_symbols = false;
+                    }
+
                     self.cpu_state = cpu_state;
                     self.requested_cpu_state = false;
+
                 },
 
                 debugger::DebuggerCommandResponse::ReadBlock(id, memory) => {
                     if id == 0 {
                         self.listing_memory = memory;
+
+                        // new memory, we should lookup symbols
+                        self.reset_symbols();
+                        self.requested_symbols = false;
                     }
                 },
 
@@ -266,6 +315,15 @@ impl Listing {
 
                 debugger::DebuggerCommandResponse::StepCpuDone(num_cycles) => {
                     self.last_step_cycles = num_cycles as i32;
+                    // if tracking PC, update symbols at the new location
+                    if self.listing_address.is_none() {
+                        self.requested_symbols = false;
+                        self.reset_symbols();
+                    }
+                },
+
+                debugger::DebuggerCommandResponse::SymbolMap(map) => {
+                    self.symbols = map;
                 },
 
                 _ => {},
@@ -380,9 +438,22 @@ impl GameWindow for Listing {
                 if follow_pc {
                     self.listing_address = None;
                     self.listing_memory.clear();
+
+                    // if we enabled Follow PC and the cpu isn't running, we zip on over to the PC location
+                    // and need to request symbols
+                    if !self.cpu_state.running {
+                        if self.listing_address.is_none() {
+                            self.requested_symbols = false;
+                            self.reset_symbols();
+                        }
+                    }
                 } else {
                     self.listing_address = Some(self.cpu_state.next_instruction_pc);
                     self.request_listing_memory();
+
+                    // if follow is disabled, always request symbols
+                    self.requested_symbols = false;
+                    self.reset_symbols();
                 }
             }
 
@@ -675,10 +746,29 @@ impl GameWindow for Listing {
                                     }
 
                                     DisassembledInstruction::Address(address) => {
-                                        if (*address as i32) as u64 == *address {
-                                            ui.text_colored(ADDRESSES_COLOR, format!("0x{:08X}", *address as u32));
+                                        if !self.requested_symbols {
+                                            self.desired_symbols.push(*address);
+                                        }
+
+                                        if let Some(s) = self.symbols.get(address) {
+                                            ui.text_colored(ADDRESSES_COLOR, format!("{}", s));
                                         } else {
-                                            ui.text_colored(ADDRESSES_COLOR, format!("0x{:016X}", *address));
+                                            if (*address as i32) as u64 == *address {
+                                                ui.text_colored(ADDRESSES_COLOR, format!("0x{:08X}", *address as u32));
+                                            } else {
+                                                ui.text_colored(ADDRESSES_COLOR, format!("0x{:016X}", *address));
+                                            }
+                                        }
+
+                                        if self.try_follow_address {
+                                            if let Some(cursor_address) = &self.cursor_address {
+                                                if cursor_address == cursor_address {
+                                                    self.listing_address = Some(*address);
+                                                    self.request_listing_memory();
+                                                    self.cursor_address = Some(*address);
+                                                    self.try_follow_address = false;
+                                                }
+                                            }
                                         }
                                     },
 

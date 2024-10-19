@@ -1,3 +1,4 @@
+#![allow(non_upper_case_globals)]
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 
@@ -8,6 +9,10 @@ use crate::*;
 
 use crossbeam::channel::{self, Receiver, Sender};
 use tracing::{warn, info};
+
+use gimli::constants::*;
+use gimli::AttributeValue;
+use object::{Object, ObjectSection};
 
 pub const BP_READ : u8 = 0x01;
 pub const BP_WRITE: u8 = 0x02;
@@ -29,7 +34,7 @@ pub struct CpuStateInfo {
     pub instruction_memory: Vec<MemoryChunk>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum DebuggerCommandRequest {
     /// get the PC and cpu state, along with some memory
     ///
@@ -78,6 +83,8 @@ pub enum DebuggerCommandRequest {
     GetTlb,
     /// Set the break on exception flags
     SetBreakOnException(u32, u8, u8), // (exceptions, interrupts, rcp)
+    /// Lookup symbols
+    LookupSymbols(Vec<u64>),
  }
 
 #[derive(Debug, Clone)]
@@ -105,6 +112,9 @@ pub enum DebuggerCommandResponse {
 
     /// TLB
     Tlb([cpu::TlbEntry; 32]),
+
+    /// Result of symbol lookup
+    SymbolMap(HashMap<u64, String>),
 }
 
 #[derive(Clone, Debug)]
@@ -311,6 +321,11 @@ impl Breakpoints {
     }
 }
 
+#[derive(Default)]
+struct Section<'data> {
+    data: std::borrow::Cow<'data, [u8]>,
+}
+
 pub struct Debugger {
     exit_requested: bool,
     cpu_running: bool,
@@ -330,10 +345,13 @@ pub struct Debugger {
 
     /// debugging commands
     command_receiver: Receiver<DebuggerCommand>,
+
+    /// function/symbol table
+    elf_symbols: bimap::BiMap<u64, String>,
 }
 
 impl Debugger {
-    pub fn new(system: System) -> Debugger {
+    pub fn new(system: System, elf_file: Option<&String>) -> Debugger {
         // let cpu_running = Arc::new(AtomicBool::new(false));
         // let r = cpu_running.clone();
 
@@ -345,6 +363,14 @@ impl Debugger {
         //     println!("Break!");
         //     r.store(false, Ordering::SeqCst);
         // }).expect("Error setting ctrl-c handler");
+
+        // TODO load symbols from Libdragon roms: 
+        // https://discord.com/channels/465585922579103744/600463718924681232/1297081337035100171
+        let elf_symbols = if let Some(elf_file) = elf_file {
+            Debugger::load_symbols(elf_file)
+        } else {
+            bimap::BiMap::new()
+        };
 
         // create the breakpoints struct first 
         let breakpoints = Rc::new(RefCell::new(Breakpoints::new()));
@@ -367,7 +393,77 @@ impl Debugger {
             breakpoints,
             system,
             command_receiver,
+            elf_symbols,
         }
+    }
+
+    pub fn load_symbols<T: AsRef<str>>(elf_file: T) -> bimap::BiMap<u64, String> {
+        let elf_file = elf_file.as_ref();
+        let file = std::fs::File::open(elf_file).expect(format!("Could not open {}", elf_file).as_str());
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        let object = object::File::parse(&*mmap).unwrap();
+        let endian = if object.is_little_endian() {
+            info!(target: "DEBUGGER", "ELF object file is little endian");
+            gimli::RunTimeEndian::Little
+        } else {
+            info!(target: "DEBUGGER", "ELF object file is big endian");
+            gimli::RunTimeEndian::Big
+        };
+
+        fn load_section<'data>(object: &object::File<'data>, name: &str) -> Result<Section<'data>, Box<dyn std::error::Error>> {
+            // println!("looking up section {}", name);
+            Ok(match object.section_by_name(name) {
+                Some(section) => {
+                    Section {
+                        data: section.uncompressed_data().unwrap(),
+                    }
+                },
+
+                None => Default::default(),
+            })
+        }
+
+        let dwarf_sections = gimli::DwarfSections::load(|id| load_section(&object, id.name())).unwrap();
+
+        fn borrow_section<'data>(section: &'data Section<'data>, endian: gimli::RunTimeEndian) -> gimli::EndianSlice<'data, gimli::RunTimeEndian> {
+            gimli::EndianSlice::new(std::borrow::Cow::as_ref(&section.data), endian)
+        }
+
+        let dwarf = dwarf_sections.borrow(|section| borrow_section(section, endian));
+
+        let mut iter = dwarf.units();
+        let mut result = bimap::BiMap::new();
+        while let Some(header) = iter.next().unwrap() {
+            // println!("Unit at <.debug_info+0x{:x}>", header.offset().as_debug_info_offset().unwrap().0);
+
+            let unit = dwarf.unit(header).unwrap();
+            let unit_ref = unit.unit_ref(&dwarf);
+
+            // let mut depth = 0;
+            let mut entries = unit_ref.entries();
+            while let Some((_delta_depth, entry)) = entries.next_dfs().unwrap() {
+                // depth += delta_depth;
+                // println!("<{}><{:x}> {}", depth, entry.offset().0, entry.tag());
+                match entry.tag() {
+                    DW_TAG_subprogram => {
+                        if let Ok(Some(AttributeValue::Addr(pc))) = entry.attr_value(DW_AT_low_pc) {
+                            if let Ok(Some(name_attr)) = entry.attr(DW_AT_name) {
+                                if let Ok(name) = unit_ref.attr_string(name_attr.value()) {
+                                    // println!("0x{:08x} -> {}", pc, name.to_string_lossy().to_string());
+                                    // sign extend for now -- I don't think many programs are using >32-bit addresses
+                                    result.insert((pc as i32) as u64, name.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    },
+
+                    _ => {},
+                }
+            }
+        }
+
+        info!(target: "DEBUGGER", "Loaded {} symbols from {}", result.len(), elf_file);
+        result
     }
 
     /// blocking call to transmit a command request on the provided communications channel
@@ -744,6 +840,19 @@ impl Debugger {
                     self.break_on_interrupt = break_on_interrupt;
                     self.break_on_rcp       = break_on_rcp;
                 },
+
+                DebuggerCommandRequest::LookupSymbols(symbols) => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+
+                    let mut result = HashMap::new();
+                    for address in &symbols {
+                        if let Some(s) = self.elf_symbols.get_by_left(address) {
+                            result.insert(*address, s.clone());
+                        }
+                    }
+
+                    response_channel.send(DebuggerCommandResponse::SymbolMap(result)).unwrap();
+                }
             }
         }
     }    

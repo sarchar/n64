@@ -52,6 +52,10 @@ struct Args {
     /// Use Docking features of imgui (useful for debugger). Places the game render into a imgui window
     #[arg(short('D'), long("docking"))]
     enable_docking: bool,
+
+    /// Specify ELF file for DWARF debugging information
+    #[arg(short('e'), long("elf"))]
+    elf_file: Option<String>,
 }
 
 fn main() {

@@ -381,10 +381,11 @@ pub async fn run<T: App + 'static>(args: crate::Args,
 
     // start the emulation
     let thread_comms = comms.clone();
+    let elf_file = args.elf_file.clone();
     std::thread::spawn(move || {
         let system = create_system(thread_comms);
         let mi_update_channel = system.rcp.borrow_mut().mi.get_update_channel();
-        let mut debugger = n64::debugger::Debugger::new(system);
+        let mut debugger = n64::debugger::Debugger::new(system, elf_file.as_ref());
         if args.enable_docking { // just assume docking means to not immediately start the cpu 
             debugger.stop_cpu();
         }
