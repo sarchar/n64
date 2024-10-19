@@ -107,11 +107,11 @@ impl Addressable for Rdp {
             // DP_CLOCK
             0x0010_0010 => {
                 self.update_clock();
-                info!(target: "DP_CLOCK", "clock=${:08X}", self.clock);
+                // info!(target: "DP_CLOCK", "clock=${:08X}", self.clock);
                 // panic!();
                 // TODO this doesn't seem to be the cause of OoT crashes...
-                // Ok(self.clock)
-                Ok(0)
+                Ok(self.clock)
+                // Ok(0)
             },
 
             _ => {

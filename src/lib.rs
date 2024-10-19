@@ -23,6 +23,7 @@ pub mod hle;
 pub mod mips;
 pub mod peripheral;
 pub mod pifrom;
+pub mod pubsub;
 pub mod rcp;
 pub mod rdp;
 pub mod rdram;
@@ -229,6 +230,9 @@ pub struct SystemCommunication {
 
     // tweakables -- fun for geeks
     pub tweakables: Arc<RwLock<Tweakables>>,
+
+    // pubsub channels..mutexes are internal to Pubsub, so this just gets cloned
+    pub pubsub: pubsub::Pubsub,
 }
 
 impl SystemCommunication {
@@ -253,6 +257,7 @@ impl SystemCommunication {
             debugger          : Arc::new(RwLock::new(None)),
             debugger_windows  : Arc::new(AtomicU32::new(0)),
             tweakables        : Arc::new(RwLock::new(Tweakables::default())),
+            pubsub            : pubsub::Pubsub::new(),
         }
     }
 

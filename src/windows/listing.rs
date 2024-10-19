@@ -7,6 +7,8 @@ use n64::cpu::{self, DisassembledInstruction};
 use n64::debugger;
 use gui::game::{GameWindow, Utils};
 
+use super::symbols;
+
 const BREAKPOINT_COLOR   : [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const CURSOR_COLOR       : [f32; 4] = [0x59 as f32 / 255.0, 0x57 as f32 / 255.0, 0x51 as f32 / 255.0, 1.0]; // #595751
 const PC_COLOR           : [f32; 4] = [0x2B as f32 / 255.0, 0x8F as f32 / 255.0, 0xAD as f32 / 255.0, 1.0]; // #2b8fad
@@ -72,6 +74,9 @@ pub struct Listing {
 
     // pressing G will goto an address at the selected instruction
     try_follow_address: bool,
+
+    // symbol messages
+    symbols_subscription: Receiver<symbols::SymbolsMessage>,
 }
 
 impl Listing {
@@ -79,6 +84,8 @@ impl Listing {
         let (debugging_request_response_tx, debugging_request_response_rx) = channel::unbounded();
         
         comms.increment_debugger_windows();
+        
+        let symbols_subscription = comms.pubsub.subscribe();
         
         Self {
             comms,
@@ -102,6 +109,7 @@ impl Listing {
             requested_symbols: false,
             symbols: HashMap::new(),
             try_follow_address: false,
+            symbols_subscription,
         }
     }
 
@@ -329,6 +337,22 @@ impl Listing {
                 _ => {},
             }
         } 
+
+        // Process Symbols messages
+        while let Ok(msg) = self.symbols_subscription.try_recv() {
+            match msg {
+                symbols::SymbolsMessage::GotoAddress(address) => {
+                    self.listing_address = Some(address);
+                    self.request_listing_memory();
+                    self.cursor_address = Some(address);
+                    self.cursor_length = 1;
+                    self.requested_symbols = false;
+                    self.reset_symbols();
+                },
+
+                // _ => {},
+            }
+        }
     }
 }
 

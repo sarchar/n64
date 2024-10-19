@@ -27,6 +27,7 @@ gimli = "0.31.1"
 object = "0.36.5"
 memmap2 = "0.9.5"
 bimap = "0.6.3"
+anymap = "0.12.1"
 
 [dependencies.cgmath]
 version = "0.18"

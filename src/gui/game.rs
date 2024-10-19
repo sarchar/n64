@@ -20,6 +20,7 @@ use crate::windows::registers::Registers;
 use crate::windows::breakpoints::Breakpoints;
 use crate::windows::cop0::Cop0State;
 use crate::windows::cop1::Cop1State;
+use crate::windows::symbols::Symbols;
 use crate::windows::tlb::Tlb;
 use gui::{App, AppWindow};
 
@@ -251,6 +252,7 @@ pub struct Game {
     breakpoints: Option<Box<Breakpoints>>,
     cop0state: Option<Box<Cop0State>>,
     cop1state: Option<Box<Cop1State>>,
+    symbols: Option<Symbols>,
     tlb: Option<Box<Tlb>>,
 
     // copy of tweakables so we don't need the lock every frame
@@ -898,6 +900,7 @@ impl App for Game {
             registers: None,
             cop0state: None,
             cop1state: None,
+            symbols: None,
             tlb: None,
 
             tweakables,
@@ -967,6 +970,7 @@ impl App for Game {
             ret.breakpoints = Some(Box::new(Breakpoints::new(comms.clone())));
             ret.cop0state   = Some(Box::new(Cop0State::new(comms.clone())));
             ret.cop1state   = Some(Box::new(Cop1State::new(comms.clone())));
+            ret.symbols     = Some(Symbols::new(comms.clone()));
             ret.tlb         = Some(Box::new(Tlb::new(comms.clone())));
         }
 
@@ -1405,6 +1409,15 @@ impl App for Game {
                         }
                     }
 
+                    let mut symbols_open = self.symbols.is_some();
+                    if ui.checkbox("Symbols", &mut symbols_open) {
+                        if self.symbols.is_some() {
+                            self.symbols = None;
+                        } else {
+                            self.symbols = Some(Symbols::new(self.comms.clone()));
+                        }
+                    }
+
                     let mut tlb_open = self.tlb.is_some();
                     if ui.checkbox("TLB Viewer", &mut tlb_open) {
                         if self.tlb.is_some() {
@@ -1509,6 +1522,12 @@ impl App for Game {
             }
         }
 
+        if let Some(w) = self.symbols.as_mut() {
+            if !w.render_ui(ui) {
+                self.symbols = None;
+            }
+        }
+
         if let Some(w) = self.tlb.as_mut() {
             if !w.render_ui(ui) {
                 self.tlb = None;
@@ -1518,6 +1537,9 @@ impl App for Game {
         self.windows.retain_mut(|window| {
             window.render_ui(ui)
         });
+
+        // process pubsub messages
+        self.comms.pubsub.update();
     }
 }
 

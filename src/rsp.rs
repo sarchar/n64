@@ -1642,7 +1642,7 @@ impl RspCpuCore {
                     Cop0_DmaReadLength => { // RDRAM -> I/DRAM
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_read_length = val;
-                        // trace!(target: "RSP", "DMA read length set to ${:04X}, read to ${:04X} from ${:08X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_cache, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
+                        // info!(target: "RSP", "DMA read length set to ${:04X}, read to ${:04X} from ${:08X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_cache, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
 
                         let length = ((val & 0x0FFF) | 0x07) + 1;
                         let count  = ((val >> 12) & 0xFF) + 1;
@@ -1684,6 +1684,7 @@ impl RspCpuCore {
                             // see if we can direct copy this without the DMA system
                             if ((dma_info.dest_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
                                 && (dma_info.source_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                if dma_info.source_stride != 0 && dma_info.count > 1 { warn!(target: "RSP", "internal DMA read with stride != 0"); }
                                 assert!(dma_info.count == 1); // if this ever fails, need to calculate the real length -- see the DmaWriteLength version
                                 let access = self.comms.rdram.read();
                                 let rdram: &[u32] = access.as_deref().unwrap().as_ref().unwrap();
@@ -1710,7 +1711,7 @@ impl RspCpuCore {
                     Cop0_DmaWriteLength => {
                         let mut shared_state = self.shared_state.write().unwrap();
                         shared_state.dma_write_length = val;
-                        // trace!(target: "RSP", "DMA write length set to ${:04X}, write to ${:04X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
+                        // info!(target: "RSP", "DMA write length set to ${:04X}, write to ${:04X} at pc=${:04X}, ra=${:04X}", val, shared_state.dma_dram, self.current_instruction_pc as u16, self.gpr[31]);
 
                         let length = ((val & 0x0FFF) | 0x07) + 1;
                         let count  = ((val >> 12) & 0xFF) + 1;
@@ -1721,8 +1722,8 @@ impl RspCpuCore {
                             initiator     : "RSP-WRITE",
                             source_address: (shared_state.dma_cache | 0x0400_0000) & !0x07,
                             dest_address  : (shared_state.dma_dram) & !0x07,
-                            count         : count,
-                            length        : length,
+                            count,
+                            length,
                             dest_stride   : skip,
                             source_mask   : 0x0000_0FFF,
                             source_bits   : 0x0400_0000 | (shared_state.dma_cache & 0x1000),
@@ -1742,7 +1743,8 @@ impl RspCpuCore {
                         } else {
                             // see if we can direct copy this without the DMA system
                             if ((dma_info.source_address & 0x0FFF) + (dma_info.length * dma_info.count) <= 0x1000) 
-                                && (dma_info.dest_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                    && (dma_info.dest_address & 0x03) == 0 && (dma_info.length & 0x03) == 0 {
+                                if dma_info.dest_stride != 0 && dma_info.count > 1 { warn!(target: "RSP", "internal DMA write with stride != 0"); }
                                 let write_length_in_words = (dma_info.length * dma_info.count) >> 2;
                                 let mem_offset = (dma_info.source_address & 0x1FFF) >> 2; // 8KiB, repeated
                                 let mem = self.mem.read().unwrap();

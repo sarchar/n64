@@ -83,6 +83,8 @@ pub enum DebuggerCommandRequest {
     GetTlb,
     /// Set the break on exception flags
     SetBreakOnException(u32, u8, u8), // (exceptions, interrupts, rcp)
+    /// Get a copy of all symbols (yikes)
+    GetAllSymbols,
     /// Lookup symbols
     LookupSymbols(Vec<u64>),
  }
@@ -112,6 +114,9 @@ pub enum DebuggerCommandResponse {
 
     /// TLB
     Tlb([cpu::TlbEntry; 32]),
+
+    /// All symbols...
+    AllSymbols(bimap::BiMap<u64, String>),
 
     /// Result of symbol lookup
     SymbolMap(HashMap<u64, String>),
@@ -841,6 +846,11 @@ impl Debugger {
                     self.break_on_rcp       = break_on_rcp;
                 },
 
+                DebuggerCommandRequest::GetAllSymbols => {
+                    let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
+                    response_channel.send(DebuggerCommandResponse::AllSymbols(self.elf_symbols.clone())).unwrap();
+                },
+
                 DebuggerCommandRequest::LookupSymbols(symbols) => {
                     let response_channel = if let Some(r) = req.response_channel { r } else { continue 'next_command; };
 
@@ -852,7 +862,7 @@ impl Debugger {
                     }
 
                     response_channel.send(DebuggerCommandResponse::SymbolMap(result)).unwrap();
-                }
+                },
             }
         }
     }    
