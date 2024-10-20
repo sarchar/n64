@@ -342,8 +342,6 @@ pub struct Debugger {
     break_on_interrupt: u8,
     break_on_rcp: u8,
 
-    // ctrlc_count: u32,
-
     breakpoints: Rc<RefCell<Breakpoints>>,
 
     system: System,
@@ -364,11 +362,6 @@ impl Debugger {
         let (sender, command_receiver) = channel::unbounded();
         *system.comms.debugger.write().unwrap() = Some(sender);
         
-        // ctrlc::set_handler(move || {
-        //     println!("Break!");
-        //     r.store(false, Ordering::SeqCst);
-        // }).expect("Error setting ctrl-c handler");
-
         // TODO load symbols from Libdragon roms: 
         // https://discord.com/channels/465585922579103744/600463718924681232/1297081337035100171
         let elf_symbols = if let Some(elf_file) = elf_file {
@@ -394,7 +387,6 @@ impl Debugger {
             break_on_exception: 0,
             break_on_interrupt: 0,
             break_on_rcp      : 0,
-            // ctrlc_count       : 0,
             breakpoints,
             system,
             command_receiver,
