@@ -1,5 +1,6 @@
 #![allow(non_upper_case_globals)]
 use std::cell::{RefCell, RefMut};
+use std::io::{Read, Seek};
 use std::rc::Rc;
 
 use std::collections::HashMap;
@@ -354,7 +355,7 @@ pub struct Debugger {
 }
 
 impl Debugger {
-    pub fn new(system: System, elf_file: Option<&String>) -> Debugger {
+    pub fn new<R: AsRef<str>>(system: System, rom_file: R, elf_file: Option<&String>) -> Debugger {
         // let cpu_running = Arc::new(AtomicBool::new(false));
         // let r = cpu_running.clone();
 
@@ -364,11 +365,7 @@ impl Debugger {
         
         // TODO load symbols from Libdragon roms: 
         // https://discord.com/channels/465585922579103744/600463718924681232/1297081337035100171
-        let elf_symbols = if let Some(elf_file) = elf_file {
-            Debugger::load_symbols(elf_file)
-        } else {
-            bimap::BiMap::new()
-        };
+        let elf_symbols = Debugger::load_symbols(rom_file, elf_file);
 
         // create the breakpoints struct first 
         let breakpoints = Rc::new(RefCell::new(Breakpoints::new()));
@@ -394,10 +391,50 @@ impl Debugger {
         }
     }
 
-    pub fn load_symbols<T: AsRef<str>>(elf_file: T) -> bimap::BiMap<u64, String> {
-        let elf_file = elf_file.as_ref();
-        let file = std::fs::File::open(elf_file).expect(format!("Could not open {}", elf_file).as_str());
-        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+    pub fn load_symbols<R: AsRef<str>>(rom_file: R, elf_file: Option<&String>) -> bimap::BiMap<u64, String> {
+        // Load symbols from the provided ELF file, or search the rom file for an elf header and try loading from that
+        let (_file, mmap, filename) = if let Some(elf_file) = elf_file {
+            let file = std::fs::File::open(elf_file).expect(format!("Could not open {}", elf_file).as_str());
+            let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+            (file, mmap, elf_file.as_str())
+        } else {
+            let rom_file = rom_file.as_ref();
+            let mut file = std::fs::File::open(rom_file).expect(format!("Could not open {}", rom_file).as_str());
+            // search for ELF\x46 at every 256 byte interval
+            let mut buf: [u8; 4] = [0, 0, 0, 0];
+            let mut file_position = 0;
+            let mut mmap = None;
+            loop {
+                match file.read(&mut buf) {
+                    Ok(4) => {
+                        if buf[0] == 0x7f && buf[1] == 0x45 && buf[2] == 0x4c && buf[3] == 0x46 {
+                            // found an ELF header, load the mmap here
+                            info!(target: "DEBUGGER", "Found ELF header at offset {}", file_position);
+                            mmap = Some(unsafe {
+                                memmap2::MmapOptions::new().offset(file_position).map(&file).unwrap()
+                            });
+                            break;
+                        } else {
+                            // seek 256-4 bytes forward
+                            file.seek(std::io::SeekFrom::Current(256 - 4)).unwrap();
+                            file_position += 256;
+                        }
+                    },
+
+                    // any other case means read error and we should stop
+                    _ => {
+                        break;
+                    }
+                }
+            }
+
+            if let Some(mmap) = mmap {
+                (file, mmap, rom_file)
+            } else {
+                return bimap::BiMap::new();
+            }
+        };
+
         let object = object::File::parse(&*mmap).unwrap();
         let endian = if object.is_little_endian() {
             info!(target: "DEBUGGER", "ELF object file is little endian");
@@ -459,7 +496,7 @@ impl Debugger {
             }
         }
 
-        info!(target: "DEBUGGER", "Loaded {} symbols from {}", result.len(), elf_file);
+        info!(target: "DEBUGGER", "Loaded {} symbols from {}", result.len(), filename);
         result
     }
 
