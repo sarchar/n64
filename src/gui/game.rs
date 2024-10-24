@@ -15,11 +15,12 @@ use atomic_counter::AtomicCounter;
 use image::GenericImageView;
 
 use crate::*;
-use crate::windows::listing::Listing;
-use crate::windows::registers::Registers;
 use crate::windows::breakpoints::Breakpoints;
 use crate::windows::cop0::Cop0State;
 use crate::windows::cop1::Cop1State;
+use crate::windows::listing::Listing;
+use crate::windows::memory::Memory;
+use crate::windows::registers::Registers;
 use crate::windows::symbols::Symbols;
 use crate::windows::tlb::Tlb;
 use gui::{App, AppWindow};
@@ -247,13 +248,14 @@ pub struct Game {
 
     // open windows
     windows: Vec<Box<dyn GameWindow>>,
-    listing: Option<Box<Listing>>,
-    registers: Option<Box<Registers>>,
-    breakpoints: Option<Box<Breakpoints>>,
-    cop0state: Option<Box<Cop0State>>,
-    cop1state: Option<Box<Cop1State>>,
+    breakpoints: Option<Breakpoints>,
+    cop0state: Option<Cop0State>,
+    cop1state: Option<Cop1State>,
+    listing: Option<Listing>,
+    memory: Option<Memory>,
+    registers: Option<Registers>,
     symbols: Option<Symbols>,
-    tlb: Option<Box<Tlb>>,
+    tlb: Option<Tlb>,
 
     // copy of tweakables so we don't need the lock every frame
     tweakables: n64::Tweakables,
@@ -895,11 +897,12 @@ impl App for Game {
             stats_window_opened: true,
             tweakables_window_opened: false,
             windows: Vec::new(),
-            listing: None,
             breakpoints: None,
-            registers: None,
             cop0state: None,
             cop1state: None,
+            listing: None,
+            memory: None,
+            registers: None,
             symbols: None,
             tlb: None,
 
@@ -965,13 +968,14 @@ impl App for Game {
 
         // TEMP
         if ret.args.enable_docking {
-            ret.listing     = Some(Box::new(Listing::new(comms.clone())));
-            ret.registers   = Some(Box::new(Registers::new(comms.clone())));
-            ret.breakpoints = Some(Box::new(Breakpoints::new(comms.clone())));
-            ret.cop0state   = Some(Box::new(Cop0State::new(comms.clone())));
-            ret.cop1state   = Some(Box::new(Cop1State::new(comms.clone())));
+            ret.listing     = Some(Listing::new(comms.clone()));
+            ret.registers   = Some(Registers::new(comms.clone()));
+            ret.breakpoints = Some(Breakpoints::new(comms.clone()));
+            ret.cop0state   = Some(Cop0State::new(comms.clone()));
+            ret.cop1state   = Some(Cop1State::new(comms.clone()));
             ret.symbols     = Some(Symbols::new(comms.clone()));
-            ret.tlb         = Some(Box::new(Tlb::new(comms.clone())));
+            ret.tlb         = Some(Tlb::new(comms.clone()));
+            ret.memory      = Some(Memory::new(comms.clone()));
         }
 
         ret
@@ -1369,7 +1373,7 @@ impl App for Game {
                         if self.listing.is_some() {
                             self.listing = None;
                         } else {
-                            self.listing = Some(Box::new(Listing::new(self.comms.clone())));
+                            self.listing = Some(Listing::new(self.comms.clone()));
                         }
                     }
 
@@ -1378,7 +1382,7 @@ impl App for Game {
                         if self.registers.is_some() {
                             self.registers = None;
                         } else {
-                            self.registers = Some(Box::new(Registers::new(self.comms.clone())));
+                            self.registers = Some(Registers::new(self.comms.clone()));
                         }
                     }
 
@@ -1387,7 +1391,7 @@ impl App for Game {
                         if self.breakpoints.is_some() {
                             self.breakpoints = None;
                         } else {
-                            self.breakpoints = Some(Box::new(Breakpoints::new(self.comms.clone())));
+                            self.breakpoints = Some(Breakpoints::new(self.comms.clone()));
                         }
                     }
 
@@ -1396,7 +1400,7 @@ impl App for Game {
                         if self.cop0state.is_some() {
                             self.cop0state = None;
                         } else {
-                            self.cop0state = Some(Box::new(Cop0State::new(self.comms.clone())));
+                            self.cop0state = Some(Cop0State::new(self.comms.clone()));
                         }
                     }
 
@@ -1405,7 +1409,7 @@ impl App for Game {
                         if self.cop1state.is_some() {
                             self.cop1state = None;
                         } else {
-                            self.cop1state = Some(Box::new(Cop1State::new(self.comms.clone())));
+                            self.cop1state = Some(Cop1State::new(self.comms.clone()));
                         }
                     }
 
@@ -1423,10 +1427,18 @@ impl App for Game {
                         if self.tlb.is_some() {
                             self.tlb = None;
                         } else {
-                            self.tlb = Some(Box::new(Tlb::new(self.comms.clone())));
+                            self.tlb = Some(Tlb::new(self.comms.clone()));
                         }
                     }
 
+                    let mut memory_open = self.memory.is_some();
+                    if ui.checkbox("Memory Viewer", &mut memory_open) {
+                        if self.memory.is_some() {
+                            self.memory = None;
+                        } else {
+                            self.memory = Some(Memory::new(self.comms.clone()));
+                        }
+                    }
 
                     debugger_windows_token.end();
                 }
@@ -1531,6 +1543,12 @@ impl App for Game {
         if let Some(w) = self.tlb.as_mut() {
             if !w.render_ui(ui) {
                 self.tlb = None;
+            }
+        }
+
+        if let Some(w) = self.memory.as_mut() {
+            if !w.render_ui(ui) {
+                self.memory = None;
             }
         }
 

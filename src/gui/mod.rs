@@ -364,6 +364,9 @@ pub async fn run<T: App + 'static>(args: crate::Args,
         }),
     }]);
 
+    // add some rounding
+    imgui.style_mut().frame_rounding = 4.0;
+
     // disable window dragging by clicking in the content area
     imgui.io_mut().config_windows_move_from_title_bar_only = true;
 
