@@ -68,7 +68,7 @@ impl<'a> AppWindow<'a> {
 
         // Create a wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: backends,
+            backends,
             flags: wgpu::InstanceFlags::from_build_config().with_env(),
             dx12_shader_compiler,
             gles_minor_version,
@@ -364,7 +364,7 @@ pub async fn run<T: App + 'static>(args: crate::Args,
         }),
     }]);
 
-    // add some rounding
+    // add some frame rounding
     imgui.style_mut().frame_rounding = 4.0;
 
     // disable window dragging by clicking in the content area

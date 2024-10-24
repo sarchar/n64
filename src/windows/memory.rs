@@ -271,13 +271,13 @@ impl Memory {
                 DataFormat::Float => {
                     // No idea on these sizes
                     match self.data_size {
-                        DataSize::Word       => 10.0,
-                        DataSize::DoubleWord => 20.0,
+                        DataSize::Word       => 13.0,
+                        DataSize::DoubleWord => 19.0,
                         _ => panic!(),
                     }
                 },
-                // Hexii is always 3
-                DataFormat::Hexii => 3.0,
+                // Hexii is always 2
+                DataFormat::Hexii => 2.0,
             };
 
             // column width depends on the data format, but always add 1 for the trailing space
@@ -347,98 +347,13 @@ impl Memory {
                     let address = row_address + (col * self.data_size.size()) as u32;
 
                     // format the data
-                    let mut is_zero = false;
-                    let mut value_str = match self.data_format {
-                        DataFormat::Dec => {
-                            match self.data_size {
-                                DataSize::Byte => {
-                                    let mut value_str = format!("???");
-                                    if let Some((base_address, memory)) = &self.memory {
-                                        if address >= (*base_address as u32) {
-                                            if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
-                                                let shift = 24 - ((address & 3) << 3);
-                                                let value = (value >> shift) & 0xFF;
-                                                is_zero = value == 0;
-                                                value_str = format!("{:>width$}", value as u8, width = max_chars_per_element as usize);
-                                            }
-                                        }
-                                    }
-                                    value_str
-                                },
-
-                                _ => format!("yyy"),
-                            }
-                        },
-                        
-                        DataFormat::Hex => {
-                            match self.data_size {
-                                DataSize::Byte => {
-                                    let mut value_str = format!("??");
-                                    if let Some((base_address, memory)) = &self.memory {
-                                        if address >= (*base_address as u32) {
-                                            if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
-                                                let shift = 24 - ((address & 3) << 3);
-                                                let value = (value >> shift) & 0xFF;
-                                                is_zero = value == 0;
-                                                value_str = format!("{:0width$X}", value, width = 2 * self.data_size.size());
-                                            }
-                                        }
-                                    }
-                                    value_str
-                                },
-
-                                DataSize::Short => {
-                                    let mut value_str = format!("????");
-                                    if let Some((base_address, memory)) = &self.memory {
-                                        if address >= (*base_address as u32) {
-                                            if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
-                                                let shift = 16 - ((address & 2) << 4);
-                                                let value = (value >> shift) & 0xFFFF;
-                                                is_zero = value == 0;
-                                                value_str = format!("{:0width$X}", value, width = 2 * self.data_size.size());
-                                            }
-                                        }
-                                    }
-                                    value_str
-                                },
-
-                                DataSize::Word => {
-                                    let mut value_str = format!("????????");
-                                    if let Some((base_address, memory)) = &self.memory {
-                                        if address >= (*base_address as u32) {
-                                            if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
-                                                is_zero = *value == 0;
-                                                value_str = format!("{:0width$X}", value, width = 2 * self.data_size.size());
-                                            }
-                                        }
-                                    }
-                                    value_str
-                                },
-
-                                DataSize::DoubleWord => {
-                                    let mut value_str = format!("????????????????");
-                                    if let Some((base_address, memory)) = &self.memory {
-                                        if address >= (*base_address as u32) {
-                                            if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
-                                                if let Some(value2) = memory.get(((((address & !3) + 1)  - (*base_address as u32)) >> 2) as usize) {
-                                                    let value = (*value as u64) << 32 | (*value2 as u64);
-                                                    is_zero = value == 0;
-                                                    value_str = format!("{:0width$X}", value, width = 2 * self.data_size.size());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    value_str
-                                },
-                            }
-                        },
-
-                        _ => format!("..."),
-                    };
+                    let (is_zero, mut value_str) = self.format_data_column(address, max_chars_per_element as usize).unwrap_or_else(|| {
+                        (true, String::from_utf8(vec![b'?'; max_chars_per_element as usize]).unwrap())
+                    });
 
                     ui.same_line_with_spacing(x_pos, 0.0);
                     if address == 0x24 {
-                        ui.set_next_item_width(char_width * (self.data_size.size() *  2) as f32);
+                        ui.set_next_item_width(max_chars_per_element * char_width);
                         let _id_token = ui.push_id_int(address as i32);
                         if ui.input_text("##data", &mut value_str)
                                 .chars_hexadecimal(true)
@@ -475,7 +390,15 @@ impl Memory {
                         let address = row_address + col as u32;
 
                         ui.same_line_with_spacing(x_pos, 0.0);
-                        ui.text_disabled(".");
+                        if let Some(value) = self.get_memory_u8(address) {
+                            if value >= 32 && value < 128 {
+                                ui.text(format!("{}", String::from_utf8(vec![value]).unwrap()));
+                            } else {
+                                ui.text_disabled(".");
+                            }
+                        } else {
+                            ui.text_disabled(".");
+                        }
 
                         x_pos += char_width;
                         if ((col % 8) == 7) && (col != (bytes_per_row - 1)) { // extra space between groups of 8
@@ -491,6 +414,231 @@ impl Memory {
         }
     }
 
+    fn get_memory_u8(&self, address: u32) -> Option<u8> {
+        if let Some((base_address, memory)) = &self.memory {
+            if address >= (*base_address as u32) {
+                if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
+                    let shift = 24 - ((address & 3) << 3);
+                    let value = (value >> shift) as u8;
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_memory_u16(&self, address: u32) -> Option<u16> {
+        if let Some((base_address, memory)) = &self.memory {
+            if address >= (*base_address as u32) {
+                if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
+                    let shift = 16 - ((address & 2) << 4);
+                    let value = (value >> shift) as u16;
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_memory_u32(&self, address: u32) -> Option<u32> {
+        if let Some((base_address, memory)) = &self.memory {
+            if address >= (*base_address as u32) {
+                if let Some(value) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
+                    return Some(*value);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_memory_u64(&self, address: u32) -> Option<u64> {
+        if let Some((base_address, memory)) = &self.memory {
+            if address >= (*base_address as u32) {
+                if let Some(value1) = memory.get((((address & !3) - (*base_address as u32)) >> 2) as usize) {
+                    if let Some(value2) = memory.get(((((address & !3) + 1) - (*base_address as u32)) >> 2) as usize) {
+                        return Some((*value1 as u64) << 32 | (*value2 as u64));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn format_data_column(&self, address: u32, max_chars_per_element: usize) -> Option<(bool, String)> {
+        match self.data_format {
+            DataFormat::Dec => {
+                match self.data_size {
+                    DataSize::Byte => {
+                        if let Some(value) = self.get_memory_u8(address) {
+                            if self.data_signed {
+                                Some((value == 0, format!("{:>width$}", value as i8, width = max_chars_per_element)))
+                            } else {
+                                Some((value == 0, format!("{:>width$}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::Short => {
+                        if let Some(value) = self.get_memory_u16(address) {
+                            if self.data_signed {
+                                Some((value == 0, format!("{:>width$}", value as i16, width = max_chars_per_element)))
+                            } else {
+                                Some((value == 0, format!("{:>width$}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::Word  => {
+                        if let Some(value) = self.get_memory_u32(address) {
+                            if self.data_signed {
+                                Some((value == 0, format!("{:>width$}", value as i32, width = max_chars_per_element)))
+                            } else {
+                                Some((value == 0, format!("{:>width$}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::DoubleWord  => {
+                        if let Some(value) = self.get_memory_u64(address) {
+                            if self.data_signed {
+                                Some((value == 0, format!("{:>width$}", value as i64, width = max_chars_per_element)))
+                            } else {
+                                Some((value == 0, format!("{:>width$}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+                }
+            },
+            
+            DataFormat::Hex => {
+                match self.data_size {
+                    DataSize::Byte => {
+                        if let Some(value) = self.get_memory_u8(address) {
+                            // not a fan of this formatting...
+                            if self.data_signed {
+                                if (value as i8) < 0 {
+                                    Some((value == 0, format!("-{:0width$X}", (!value).wrapping_add(1), width = max_chars_per_element - 1)))
+                                } else {
+                                    Some((value == 0, format!(" {:0width$X}", value, width = max_chars_per_element - 1)))
+                                }
+                            } else {
+                                Some((value == 0, format!("{:0width$X}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::Short => {
+                        if let Some(value) = self.get_memory_u16(address) {
+                            if self.data_signed {
+                                if (value as i16) < 0 {
+                                    Some((value == 0, format!("-{:0width$X}", (!value).wrapping_add(1), width = max_chars_per_element - 1)))
+                                } else {
+                                    Some((value == 0, format!(" {:0width$X}", value, width = max_chars_per_element - 1)))
+                                }
+                            } else {
+                                Some((value == 0, format!("{:0width$X}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::Word => {
+                        if let Some(value) = self.get_memory_u32(address) {
+                            if self.data_signed {
+                                if (value as i32) < 0 {
+                                    Some((value == 0, format!("-{:0width$X}", (!value).wrapping_add(1), width = max_chars_per_element - 1)))
+                                } else {
+                                    Some((value == 0, format!(" {:0width$X}", value, width = max_chars_per_element - 1)))
+                                }
+                            } else {
+                                Some((value == 0, format!("{:0width$X}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::DoubleWord => {
+                        if let Some(value) = self.get_memory_u64(address) {
+                            if self.data_signed {
+                                if (value as i64) < 0 {
+                                    Some((value == 0, format!("-{:0width$X}", (!value).wrapping_add(1), width = max_chars_per_element - 1)))
+                                } else {
+                                    Some((value == 0, format!(" {:0width$X}", value, width = max_chars_per_element - 1)))
+                                }
+                            } else {
+                                Some((value == 0, format!("{:0width$X}", value, width = max_chars_per_element)))
+                            }
+                        } else {
+                            None
+                        }
+                    },
+                }
+            },
+
+            DataFormat::Float => {
+                match self.data_size {
+                    DataSize::Word => {
+                        if let Some(value) = self.get_memory_u32(address) {
+                            let float = f32::from_bits(value);
+                            let config = pretty_dtoa::FmtFloatConfig::default()
+                                            .add_point_zero(true)
+                                            .max_significant_digits(6)
+                                            .round();
+                            let float_str = String::from(pretty_dtoa::dtoa(float as f64, config));
+                            Some((float == 0.0, format!("{:>width$}", float_str, width = max_chars_per_element)))
+                        } else {
+                            None
+                        }
+                    },
+
+                    DataSize::DoubleWord => {
+                        if let Some(value) = self.get_memory_u64(address) {
+                            let float = f64::from_bits(value);
+                            let config = pretty_dtoa::FmtFloatConfig::default()
+                                            .add_point_zero(true)
+                                            .max_significant_digits(12)
+                                            .round();
+                            let float_str = String::from(pretty_dtoa::dtoa(float, config));
+                            Some((float == 0.0, format!("{:>width$}", float_str, width = max_chars_per_element)))
+                        } else {
+                            None
+                        }
+                    },
+
+                    _ => panic!("invalid"),
+                }
+            },
+
+            DataFormat::Hexii => {
+                assert!(self.data_size == DataSize::Byte);
+                if let Some(value) = self.get_memory_u8(address) {
+                    if value >= 32 && value < 128 {
+                        Some((false, format!(".{}", String::from_utf8(vec![value]).unwrap())))
+                    } else if value == 0xFF {
+                        Some((true, format!("##")))
+                    } else if value == 0 {
+                        Some((true, format!("  ")))
+                    } else {
+                        Some((false, format!("{:02X}", value)))
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl GameWindow for Memory {
@@ -500,8 +648,6 @@ impl GameWindow for Memory {
         window.size([300.0, 500.0], imgui::Condition::FirstUseEver)
               .position([0.0, 0.0], imgui::Condition::FirstUseEver)
               .opened(&mut opened)
-              // because I want to fill up enough lines to fill up the screen, that causes the actual table borders to
-              // run outside of the content area of the window, which means a scrollbar will appear...so disable it
               .flags(imgui::WindowFlags::NO_SCROLLBAR | imgui::WindowFlags::NO_SCROLL_WITH_MOUSE)
               .build(|| {
 
