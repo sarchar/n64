@@ -1,4 +1,5 @@
 use crossbeam::channel::{self, Receiver, Sender};
+use imgui::draw_list;
 
 use crate::*;
 use n64::debugger;
@@ -20,6 +21,11 @@ impl DataSize {
             DataSize::Word       => 4,
             DataSize::DoubleWord => 8,
         }
+    }
+
+    // 0, 1, 3, 7
+    fn offset_mask(&self) -> u32 {
+        self.size() as u32 - 1
     }
 }
 
@@ -71,6 +77,17 @@ pub struct Memory {
     memory_display_min: Option<u32>,
     memory_display_max: Option<u32>,
     memory: Option<(u64, Vec<u32>)>,
+
+    // editing state
+    editing_address: Option<u32>,
+    editing_take_focus: bool,
+    editing_buffer: String,
+
+    // when end_address is set, editing is disabled and editing_address is 
+    // used as the start address of the region select
+    end_selection_address: Option<u32>,
+    
+    hover_address: Option<u32>,
 }
 
 impl Memory {
@@ -94,12 +111,44 @@ impl Memory {
             memory_display_min: None,
             memory_display_max: None,
             memory: None,
+
+            editing_address: None,
+            editing_take_focus: false,
+            editing_buffer: String::new(),
+
+            end_selection_address: None,
+
+            hover_address: None,
         }
     }
 
     // Certain keys work no matter what, as long as the Listing window is open.  Others only work when the Listing window is in focus.
     fn update_inputs(&mut self, ui: &imgui::Ui) {
-        // Start/Stop execution
+        // Move the editing address (self.editing_address is only !None when it has focus)
+        let memory_region = &MEMORY_REGIONS[self.current_region];
+        
+        if let Some(address) = self.editing_address {
+            let row_size = (self.column_count * self.data_size.size()) as u32; 
+            if ui.is_key_pressed(imgui::Key::UpArrow) && (address - memory_region.1 as u32) >= row_size {
+                self.editing_address = Some(address - row_size);
+                self.editing_take_focus = true;
+            } else if ui.is_key_pressed(imgui::Key::DownArrow) && (address + row_size) < memory_region.2 {
+                self.editing_address = Some(address + row_size);
+                self.editing_take_focus = true;
+            } else if ui.is_key_pressed(imgui::Key::Tab) {
+                if !ui.io().key_shift && (address + self.data_size.size() as u32) < memory_region.2 {
+                    self.editing_address = Some(address + self.data_size.size() as u32);
+                    self.editing_take_focus = true;
+                } else if ui.io().key_shift && (address - memory_region.1 as u32) >= self.data_size.size() as u32 {
+                    self.editing_address = Some(address - self.data_size.size() as u32);
+                    self.editing_take_focus = true;
+                }
+            } else if ui.is_key_pressed(imgui::Key::RightArrow) {
+                println!("TODO check cursor position within edit field");
+            } else if ui.is_key_pressed(imgui::Key::LeftArrow) {
+                println!("TODO check cursor position within edit field");
+            }
+        }
 
         // Any following keys require window focus
         if !ui.is_window_focused() { return; }
@@ -142,6 +191,24 @@ impl Memory {
                 _ => {},
             }
         }
+    }
+
+    fn handle_mouse_click(&mut self, click_address: u32, other_address: Option<u32>, ui: &imgui::Ui) -> Option<u32> {
+        if ui.io().key_shift && other_address.is_some_and(|v| v != click_address) {
+            if click_address < other_address.unwrap() {
+                // if we're increasing the range backwards, move only self.editing_address
+                if self.end_selection_address.is_none() {
+                    self.end_selection_address = Some(other_address.unwrap());
+                }
+                Some(click_address)
+            } else {
+                self.end_selection_address = Some(click_address);
+                other_address
+            }
+        } else {
+            self.end_selection_address = None;
+            Some(click_address)
+        }        
     }
 
     fn draw_contents(&mut self, ui: &imgui::Ui) {
@@ -252,6 +319,13 @@ impl Memory {
     fn draw_memory(&mut self, ui: &imgui::Ui) {
         let memory_region = &MEMORY_REGIONS[self.current_region];
 
+        // Disable memory editing if it falls outsidee of the memory region
+        if let Some(address) = self.editing_address {
+            if address < memory_region.1 || address >= memory_region.2 {
+                self.editing_address = None;
+            }
+        }
+
         if let Some(_memory_window) = ui.child_window("##scrolling").begin() {
             // calculate the width of a character glyph, assuming a monospaced font for rendering
             let char_width = ui.calc_text_size("T")[0];
@@ -327,6 +401,16 @@ impl Memory {
 
             // memory bytes per row will be useful
             let bytes_per_row = self.column_count * self.data_size.size();
+
+            // editing
+            let mut editing_address_increment = false;
+            let mut editing_address_next = None;
+
+            // hovering
+            let mut next_hover_address = None;
+
+            // selection
+            let mut took_focus = None;
             
             // start a Clipper within the region
             let line_height = ui.text_line_height_with_spacing();
@@ -347,27 +431,67 @@ impl Memory {
                     let address = row_address + (col * self.data_size.size()) as u32;
 
                     // format the data
-                    let (is_zero, mut value_str) = self.format_data_column(address, max_chars_per_element as usize).unwrap_or_else(|| {
+                    let (is_zero, value_str) = self.format_data_column(address, max_chars_per_element as usize).unwrap_or_else(|| {
                         (true, String::from_utf8(vec![b'?'; max_chars_per_element as usize]).unwrap())
                     });
 
                     ui.same_line_with_spacing(x_pos, 0.0);
-                    if address == 0x24 {
-                        ui.set_next_item_width(max_chars_per_element * char_width);
+                    if self.editing_address.is_some_and(|v| v == address) && self.end_selection_address.is_none() {
                         let _id_token = ui.push_id_int(address as i32);
-                        if ui.input_text("##data", &mut value_str)
+
+                        if self.editing_take_focus {
+                            ui.set_keyboard_focus_here_with_offset(imgui::FocusedWidget::Next);
+                            self.editing_buffer = value_str.clone();
+                        }
+
+                        ui.set_next_item_width(max_chars_per_element * char_width);
+                        if ui.input_text("##data", &mut self.editing_buffer)
                                 .chars_hexadecimal(true)
                                 .enter_returns_true(true)
                                 .auto_select_all(true)
                                 .no_horizontal_scroll(true)
                                 .build() {
-                            println!("got value: {}", value_str);       
+                            println!("got value: {}", self.editing_buffer);       
+                            editing_address_increment = true;
+                        } else if !self.editing_take_focus && !ui.is_item_active() {
+                            took_focus = self.editing_address;
+                            self.editing_address = None;
                         }
+
+                        self.editing_take_focus = false;
                     } else {
+                        if let Some(end_address) = self.end_selection_address {
+                            if let Some(start_address) = self.editing_address {
+                                if address >= start_address && address <= end_address {
+                                    let draw_list = ui.get_window_draw_list();
+                                    let cursor_pos = ui.cursor_screen_pos();
+                                    draw_list.add_rect([cursor_pos[0], cursor_pos[1]], 
+                                                       [cursor_pos[0] + column_width - char_width, cursor_pos[1] + line_height], 
+                                                       [0.4, 0.1, 0.1, 0.8]).filled(true).build();
+                                }
+                            }
+                        }
+
+                        if self.hover_address.is_some_and(|v| v == address) {
+                            let draw_list = ui.get_window_draw_list();
+                            let cursor_pos = ui.cursor_screen_pos();
+                            draw_list.add_rect([cursor_pos[0], cursor_pos[1]], 
+                                               [cursor_pos[0] + column_width - char_width, cursor_pos[1] + line_height], 
+                                               ui.style_color(imgui::StyleColor::FrameBg)).filled(true).build();
+                        }
+
                         if is_zero {
                             ui.text_disabled(value_str);
                         } else {
                             ui.text(value_str);
+                        }
+
+                        if ui.is_item_hovered() {
+                            next_hover_address = Some(address);
+                            if ui.is_mouse_clicked(imgui::MouseButton::Left) {
+                                let other_address = self.editing_address.or(took_focus);
+                                editing_address_next = self.handle_mouse_click(address, other_address, ui);
+                            }
                         }
                     }
 
@@ -384,10 +508,41 @@ impl Memory {
                 }
 
                 if self.show_ascii {
-                    x_pos += spacing_between_column_groups; // spacing between the final group and ascii is the same as column groups
+                    // spacing between the final group and ascii is the same as column groups
+                    // the dividing line was drawn separately above
+                    x_pos += spacing_between_column_groups; 
+
                     // ASCII is always in groups of 8 bytes
                     for col in 0..bytes_per_row {
                         let address = row_address + col as u32;
+
+                        let offset_mask = self.data_size.offset_mask();
+
+                        if let Some(end_address) = self.end_selection_address {
+                            if let Some(start_address) = self.editing_address {
+                                if address >= start_address && address <= (end_address | offset_mask) {
+                                    let draw_list = ui.get_window_draw_list();
+                                    let cursor_pos = ui.cursor_screen_pos();
+                                    draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
+                                                       [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
+                                                       [0.4, 0.1, 0.1, 0.8]).filled(true).build();
+                                }
+                            }
+                        } else if self.editing_address.is_some_and(|v| (address & !offset_mask) == v) {
+                            let draw_list = ui.get_window_draw_list();
+                            let cursor_pos = ui.cursor_screen_pos();
+                            draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
+                                               [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
+                                               ui.style_color(imgui::StyleColor::TextSelectedBg)).filled(true).build();
+                        }
+
+                        if self.hover_address.is_some_and(|v| (address & !offset_mask) == v) {
+                            let draw_list = ui.get_window_draw_list();
+                            let cursor_pos = ui.cursor_screen_pos();
+                            draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
+                                               [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
+                                               ui.style_color(imgui::StyleColor::FrameBg)).filled(true).build();
+                        }
 
                         ui.same_line_with_spacing(x_pos, 0.0);
                         if let Some(value) = self.get_memory_u8(address) {
@@ -398,6 +553,14 @@ impl Memory {
                             }
                         } else {
                             ui.text_disabled(".");
+                        }
+
+                        if ui.is_item_hovered() {
+                            next_hover_address = Some(address & !self.data_size.offset_mask());
+                            if ui.is_mouse_clicked(imgui::MouseButton::Left) {
+                                let other_address = self.editing_address.or(took_focus);
+                                editing_address_next = self.handle_mouse_click(next_hover_address.unwrap(), other_address, ui);
+                            }
                         }
 
                         x_pos += char_width;
@@ -411,6 +574,18 @@ impl Memory {
                 ui.set_cursor_pos([x_pos, ui.cursor_pos()[1]]);
                 ui.dummy([0.0, 0.0]);
             }
+
+            if editing_address_increment {
+                if let Some(address) = self.editing_address {
+                    self.editing_address = Some(address + self.data_size.size() as u32);
+                    self.editing_take_focus = true;
+                }
+            } else  if let Some(address) = editing_address_next {
+                self.editing_address = Some(address);
+                self.editing_take_focus = true;
+            }
+
+            self.hover_address = next_hover_address;
         }
     }
 
