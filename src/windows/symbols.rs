@@ -5,7 +5,7 @@ use gui::game::GameWindow;
 
 #[derive(Clone, Debug)]
 pub enum SymbolsMessage {
-    GotoAddress(u64),
+    GotoCodeAddress(u64),
 }
 
 pub struct Symbols {
@@ -145,7 +145,7 @@ impl GameWindow for Symbols {
 
                     ui.table_next_column();
                     if ui.selectable_config(format!("##{}", i)).flags(imgui::SelectableFlags::SPAN_ALL_COLUMNS).build() {
-                        let _ = self.publish_channel.try_send(SymbolsMessage::GotoAddress(*address));
+                        let _ = self.publish_channel.try_send(SymbolsMessage::GotoCodeAddress(*address));
                     }
                     ui.same_line_with_spacing(0.0, 0.0);
                     

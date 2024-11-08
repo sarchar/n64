@@ -475,7 +475,7 @@ impl Debugger {
 
             // let mut depth = 0;
             let mut entries = unit_ref.entries();
-            while let Some((_delta_depth, entry)) = entries.next_dfs().unwrap() {
+            'next_tag: while let Some((_delta_depth, entry)) = entries.next_dfs().unwrap() {
                 // depth += delta_depth;
                 // println!("<{}><{:x}> {}", depth, entry.offset().0, entry.tag());
                 match entry.tag() {
@@ -489,6 +489,33 @@ impl Debugger {
                                 }
                             }
                         }
+                    },
+
+                    DW_TAG_variable => {
+                        let Ok(Some(name_attr)) = entry.attr(DW_AT_name) else { continue 'next_tag; };
+                        let Ok(name) = unit_ref.attr_string(name_attr.value()) else { continue 'next_tag; };
+                        let Ok(Some(gimli::AttributeValue::Exprloc(expression))) = entry.attr_value(DW_AT_location) else { continue 'next_tag; };
+
+                        let mut eval = expression.evaluation(unit.encoding());
+                        let mut result = eval.evaluate().unwrap();
+
+                        while result != gimli::EvaluationResult::Complete {
+                            match result {
+                                gimli::EvaluationResult::RequiresRelocatedAddress(rlo) => {
+                                    // TODO assume no relocation memory is flat at $0
+                                    result = eval.resume_with_relocated_address(rlo).unwrap();
+                                },
+
+                                _ => { continue 'next_tag; }, //unimplemented!("unknown result {:?}", result),
+                            }
+                        }
+
+                        let result = eval.result();
+                        println!("new var :: {} at {:?}", name.to_string_lossy().to_string(), result);
+                        // let mut attrs = entry.attrs();
+                        // while let Some(attr) = attrs.next().unwrap() {
+                        //     println!("{}: {:?}", attr.name(), attr.value());
+                        // }
                     },
 
                     _ => {},

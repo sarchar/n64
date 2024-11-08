@@ -1,9 +1,10 @@
 use crossbeam::channel::{self, Receiver, Sender};
-use imgui::draw_list;
 
 use crate::*;
 use n64::debugger;
 use gui::game::{GameWindow, Utils};
+
+use super::symbols;
 
 #[derive(PartialOrd, PartialEq, Copy, Clone, Debug)]
 enum DataSize {
@@ -87,7 +88,14 @@ pub struct Memory {
     // used as the start address of the region select
     end_selection_address: Option<u32>,
     
+    // another highlight range that stays highlighted through clicks
+    // used for the symbols window to highlight a range of data for an object
+    data_selection: Option<(u32, u32)>,
+    
     hover_address: Option<u32>,
+
+    // receive messages from Symbols
+    symbols_subscription: Receiver<symbols::SymbolsMessage>,
 }
 
 impl Memory {
@@ -95,6 +103,8 @@ impl Memory {
         let (debugging_request_response_tx, debugging_request_response_rx) = channel::unbounded();
         
         comms.increment_debugger_windows();
+
+        let symbols_subscription = comms.pubsub.subscribe();
         
         Self {
             comms,
@@ -118,7 +128,10 @@ impl Memory {
 
             end_selection_address: None,
 
+            data_selection: Some((0x20, 0x40)),//None,
+
             hover_address: None,
+            symbols_subscription,
         }
     }
 
@@ -191,6 +204,16 @@ impl Memory {
                 _ => {},
             }
         }
+
+        // Process Symbols messages
+        while let Ok(msg) = self.symbols_subscription.try_recv() {
+            match msg {
+                symbols::SymbolsMessage::GotoCodeAddress(mut address) => {
+                    address &= 0x7fff_ffff;
+                    self.data_selection = Some((address as u32, (address + 0x20) as u32));
+                }
+            }
+        }
     }
 
     fn handle_mouse_click(&mut self, click_address: u32, other_address: Option<u32>, ui: &imgui::Ui) -> Option<u32> {
@@ -209,6 +232,37 @@ impl Memory {
             self.end_selection_address = None;
             Some(click_address)
         }        
+    }
+
+    fn get_highlight(&self, address: u32, ui: &imgui::Ui) -> Option<imgui::ImColor32> {
+        // Editing region (only gets here in the ascii display)
+        if self.editing_address.is_some_and(|v| address == v) && self.end_selection_address.is_none() {
+            return Some(ui.style_color(imgui::StyleColor::TextSelectedBg).into());
+        }
+
+        // Mouse hover
+        if self.hover_address.is_some_and(|v| address == v) {
+            return Some(ui.style_color(imgui::StyleColor::FrameBg).into());
+        }
+        
+        // User selected region
+        if let Some(end_address) = self.end_selection_address {
+            if let Some(start_address) = self.editing_address {
+                if address >= start_address && address <= end_address {
+                    return Some([0.4, 0.1, 0.1, 0.8].into());
+                }
+            }
+        }
+
+        // Data selected region
+        if let Some((start, end)) = self.data_selection {
+            if address >= start && address < end {
+                return Some([0.317, 0.360, 0.067, 0.8].into());
+            }
+        }
+
+        // No highlight
+        None
     }
 
     fn draw_contents(&mut self, ui: &imgui::Ui) {
@@ -460,24 +514,12 @@ impl Memory {
 
                         self.editing_take_focus = false;
                     } else {
-                        if let Some(end_address) = self.end_selection_address {
-                            if let Some(start_address) = self.editing_address {
-                                if address >= start_address && address <= end_address {
-                                    let draw_list = ui.get_window_draw_list();
-                                    let cursor_pos = ui.cursor_screen_pos();
-                                    draw_list.add_rect([cursor_pos[0], cursor_pos[1]], 
-                                                       [cursor_pos[0] + column_width - char_width, cursor_pos[1] + line_height], 
-                                                       [0.4, 0.1, 0.1, 0.8]).filled(true).build();
-                                }
-                            }
-                        }
-
-                        if self.hover_address.is_some_and(|v| v == address) {
+                        if let Some(highlight_color) = self.get_highlight(address, ui) {
                             let draw_list = ui.get_window_draw_list();
                             let cursor_pos = ui.cursor_screen_pos();
                             draw_list.add_rect([cursor_pos[0], cursor_pos[1]], 
                                                [cursor_pos[0] + column_width - char_width, cursor_pos[1] + line_height], 
-                                               ui.style_color(imgui::StyleColor::FrameBg)).filled(true).build();
+                                               highlight_color).filled(true).build();
                         }
 
                         if is_zero {
@@ -518,30 +560,12 @@ impl Memory {
 
                         let offset_mask = self.data_size.offset_mask();
 
-                        if let Some(end_address) = self.end_selection_address {
-                            if let Some(start_address) = self.editing_address {
-                                if address >= start_address && address <= (end_address | offset_mask) {
-                                    let draw_list = ui.get_window_draw_list();
-                                    let cursor_pos = ui.cursor_screen_pos();
-                                    draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
-                                                       [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
-                                                       [0.4, 0.1, 0.1, 0.8]).filled(true).build();
-                                }
-                            }
-                        } else if self.editing_address.is_some_and(|v| (address & !offset_mask) == v) {
+                        if let Some(highlight_color) = self.get_highlight(address & !offset_mask, ui) {
                             let draw_list = ui.get_window_draw_list();
                             let cursor_pos = ui.cursor_screen_pos();
                             draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
                                                [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
-                                               ui.style_color(imgui::StyleColor::TextSelectedBg)).filled(true).build();
-                        }
-
-                        if self.hover_address.is_some_and(|v| (address & !offset_mask) == v) {
-                            let draw_list = ui.get_window_draw_list();
-                            let cursor_pos = ui.cursor_screen_pos();
-                            draw_list.add_rect([x_pos + cursor_pos[0], cursor_pos[1]], 
-                                               [x_pos + cursor_pos[0] + char_width, cursor_pos[1] - line_height], 
-                                               ui.style_color(imgui::StyleColor::FrameBg)).filled(true).build();
+                                               highlight_color).filled(true).build();
                         }
 
                         ui.same_line_with_spacing(x_pos, 0.0);

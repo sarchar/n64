@@ -341,7 +341,7 @@ impl Listing {
         // Process Symbols messages
         while let Ok(msg) = self.symbols_subscription.try_recv() {
             match msg {
-                symbols::SymbolsMessage::GotoAddress(address) => {
+                symbols::SymbolsMessage::GotoCodeAddress(address) => {
                     self.listing_address = Some(address);
                     self.request_listing_memory();
                     self.cursor_address = Some(address);
